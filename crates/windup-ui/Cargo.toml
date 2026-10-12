@@ -13,3 +13,8 @@ eframe = { workspace = true }
 log = { workspace = true }
 image = { workspace = true }
 rfd = { workspace = true }
+
+# `examples/make-art.rs` sets the wordmark in the installer pictures. Already in
+# the tree through epaint, so this adds nothing to the build.
+[dev-dependencies]
+ab_glyph = "0.2"

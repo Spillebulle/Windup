@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Windup is a Windows-first desktop utility (Rust + egui/eframe/wgpu) that runs a settings window plus a set of global-hotkey "tools". Two tools exist today: **Clipboard history** (Win+V → floating popup at the cursor) and **Paste plain text** (Win+Shift+V → strips formatting and pastes). There is no README.
+Windup is a Windows-first desktop utility (Rust + egui/eframe/wgpu) that runs a settings window plus a set of global-hotkey "tools". Two tools exist today: **Clipboard history** (Win+V → floating popup at the cursor) and **Paste plain text** (Win+Shift+V → strips formatting and pastes).
 
 ## Commands
 
@@ -12,11 +12,16 @@ Windup is a Windows-first desktop utility (Rust + egui/eframe/wgpu) that runs a 
 cargo run                    # runs windup-desktop (workspace default-member)
 cargo run --release
 cargo build --release        # -> target/release/windup.exe
-cargo test --workspace       # tests live in windup-core::clipboard::history and windup-ui::lucide
+cargo test --workspace
 cargo test -p windup-core capacity_limit_truncates_oldest_items   # single test
 cargo clippy --workspace --all-targets
 cargo fmt
+cargo run -p windup-ui --example make-art          # regenerate windup.ico + WiX bitmaps, then commit them
+sh packaging/windows/package.sh 0.1.0 x64 target/release dist   # MSI + setup exe (needs WiX 5)
+pwsh tools/release.ps1 X.Y.Z                       # cut a release (see docs/packaging.md)
 ```
+
+CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests with `RUSTFLAGS=-D warnings` on Windows x64 and Linux, and builds Windows ARM64. Keep all three warning-free; Linux-only unused variables from `cfg(windows)` blocks are the usual way to break it.
 
 Debug builds keep a console window (`windows_subsystem = "windows"` is release-only), so `RUST_LOG=debug cargo run` is the way to see logs. Default filter is `warn,wgpu_hal=error,wgpu_core=error`.
 
@@ -24,7 +29,7 @@ Rust edition 2024, MSRV 1.90. `let`-chains (`if let Some(x) = a && let Some(y) =
 
 ## Crate layout
 
-- **`windup-core`** — no UI, no windowing. Clipboard capture/history/persistence, `Config`, `Shortcut`, `ToolId`.
+- **`windup-core`** — no UI, no windowing. Clipboard capture/history/persistence, `Config`, `Shortcut`, `ToolId`, and `install` (the Windows setup model and payload format).
 - **`windup-ui`** — all egui drawing. Depends on core, never on desktop. Knows nothing about Win32.
 - **`windup-desktop`** — the binary. Owns the eframe app, Win32 hooks, window focus/paste plumbing, and wires core ↔ ui together.
 
@@ -49,7 +54,7 @@ The UI is **painted, not composed from egui widgets** — nearly everything in `
 - `theme.rs` holds all design tokens: `metrics::*` (sizes/spacing), `text::*` (font sizes), and `Palette` (colors, built from OKLCH with a configurable accent hue). Never hardcode a size or color; add a token.
 - UI follows `../Design-Principles/STYLE-GUIDE.md` (a private sibling repo, Spillebulle/Design-Principles); accent hue is `28`. Source comments cite its sections. The README, banner and repo settings follow its §17; redraw the banner with `python ../Design-Principles/banner.py --mark assets/icons/windup-256.png --name WINDUP --out docs/images`.
 - Icons are Lucide path data transcribed verbatim into `icons.rs` and flattened to polylines by `lucide.rs`. To add an icon: paste Lucide's elements as `Node::Path`/`Circle`/`Rect` in the same order as lucide.dev, add the variant to `Icon::ALL`. No font, no SVG rasterizer. Lucide is ISC; the notice in `lucide.rs` must stay.
-- The app icon is rasterized at runtime from the Lucide wrench (`create_app_icon` in `main.rs`) and regenerated whenever the palette accent changes.
+- The mark as pixels is `windup_ui::art::mark`. The window icon uses it at runtime and is regenerated whenever the palette accent changes; `examples/make-art.rs` uses it with the default dark palette to write `assets/icons/windup.ico` (compiled into the exe by `windup-desktop/build.rs`) and `packaging/windows/{banner,dialog}.bmp`. Change the mark → re-run make-art and commit.
 - `themelib.rs` reads/writes `.umbertheme` files: first line `Umber theme`, then `name`, `base` (`paper` = light, else dark), then 27 `token = #rrggbb` lines. Adding a `Palette` field does not automatically add a theme token — `Token::ALL` and its `get`/`set` arms must be updated too.
 
 ## Adding a tool
@@ -57,6 +62,17 @@ The UI is **painted, not composed from egui widgets** — nearly everything in `
 A tool is a `ToolId` variant + a config struct + a settings pane + a hotkey branch. Touch points: `core/tool.rs` (`ALL`, `as_str`, `display_name`, `description`, `default_shortcut`), `core/config.rs` (config struct, `Config` field, `is_tool_enabled`/`set_tool_enabled`/`tool_shortcut`/`set_tool_shortcut`), `ui/settings/mod.rs` (`SettingsPane` variant + `ALL`/`label`/`icon`/`blurb` + `render_content` arm) plus a new pane module, and `desktop/hotkey.rs` + the `HotkeyEvent` match in `main.rs`.
 
 Note the current gap: `Config` stores per-tool shortcuts, but the Windows hook hardcodes Win+V / Win+Shift+V. Configured shortcuts are not yet honored on Windows.
+
+## Packaging and releases
+
+Full write-up, including how to add an OS: `docs/packaging.md`. The short version:
+
+- A tag `vX.Y.Z` triggers `release.yml`. Each matrix row builds `--target <triple>` then calls `packaging/<package>/package.sh <version> <arch> <bin-dir> dist`; adding an OS is a row in both workflows plus that script. Platform logic stays in the script, not the YAML.
+- Release notes are the `## X.Y.Z` section of `CHANGELOG.md` verbatim; the title is the bare version. `windup-desktop/tests/release.rs` fails if the changelog or the README download table does not match `Cargo.toml`'s version.
+- **The setup exe is `windup.exe` with the MSI appended** (`windup_core::install::payload`). `main` checks the payload before anything else and runs `setup::run()` instead of the app, because a double-clicked file has no arguments. Setup runs `msiexec /qn` elevated via `ShellExecuteExW("runas")`, then starts the installed exe un-elevated. Pure decisions (`Step`, `Command`, paths) are in `windup_core::install`, the window in `windup_ui::setup`, Win32 in `windup-desktop/src/setup.rs`.
+- `packaging/windows/windup.wxs`: the `UpgradeCode` and component GUIDs are Windup's own and pinned by tests in `windup_core::install`; never copy them from a sibling app. XML comments may not contain `--`.
+- ARM64 Windows is cross-compiled on the x64 runner (private repo: no free ARM runners), so it is built but never tested.
+- `*.sh` files are LF via `.gitattributes`; CI runs them with Git Bash on Windows.
 
 ## License
 

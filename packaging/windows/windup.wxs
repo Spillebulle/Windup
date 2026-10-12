@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Windows installer, built with WiX 5 by packaging/windows/package.sh.
+
+  An XML comment may not contain two hyphens in a row, so no long command line
+  options can be written in this header.
+
+  Windup is one executable with its fonts and icons compiled in, so this
+  places one file plus the readme, changelog and licence. WixUI_Minimal: the
+  licence, Install, and a finish page. The setup executable installs this
+  package silently behind Windup's own window, so these dialogs are only seen
+  when somebody runs the .msi directly.
+
+  Version, BinDir, DocDir and AssetDir come from the command line.
+
+  The UpgradeCode must never change: it is what makes 0.2.0 replace 0.1.0
+  instead of installing beside it. Every GUID here is Windup's alone; copying
+  one from a sibling app makes Windows treat the two as one product.
+  crates/windup-core/src/install/mod.rs pins the UpgradeCode and fails the
+  tests if this file stops carrying it.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="Windup"
+           Manufacturer="Spillebulle"
+           Version="$(var.Version)"
+           UpgradeCode="f9aca005-ce23-4a9f-bd1b-ce170bf28696"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <SummaryInformation Description="Windup: clipboard history and plain-text paste behind a hotkey" />
+
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of Windup is already installed. Uninstall it first if you meant to go back." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!--
+      The Id is a file name and keeps its extension: Windows Installer streams
+      the icon out under this name and the shell identifies it by extension.
+      Used for Add or remove programs only; the shortcut below takes its icon
+      from the RT_GROUP_ICON that crates/windup-desktop/build.rs compiles in.
+    -->
+    <Icon Id="windup.ico" SourceFile="$(var.AssetDir)\windup.ico" />
+    <Property Id="ARPPRODUCTICON" Value="windup.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Spillebulle/Windup" />
+
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.AssetDir)\licence.rtf" />
+    <!-- Drawn from the palette by the make-art example in windup-ui. -->
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.AssetDir)\banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.AssetDir)\dialog.bmp" />
+
+    <!--
+      "Start Windup" on the finish page, ticked. Impersonate="yes" runs it as
+      the person at the machine rather than the elevated installer account,
+      which matters doubly here: Windup's settings live in the user's AppData,
+      and an elevated keyboard hook would be a different process from the one
+      they sign in to. Conditioned on NOT Installed so a repair does not start it.
+    -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Start Windup" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#WindupExe]" />
+    <CustomAction Id="StartWindup"
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixShellExec"
+                  Impersonate="yes" />
+    <UI>
+      <Publish Dialog="ExitDialog"
+               Control="Finish"
+               Event="DoAction"
+               Value="StartWindup"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="Windup" />
+    </StandardDirectory>
+
+    <!--
+      A plain, non-advertised shortcut, so it takes its icon from the
+      executable. ICE43 requires a component holding one to have an HKCU key as
+      its keypath; HKMU looks tidier and fails ICE57 instead.
+    -->
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="StartMenu" Directory="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="0c8cd24b-8e1e-4bad-8e63-e4a1ebe962f9">
+        <Shortcut Id="WindupShortcut"
+                  Name="Windup"
+                  Description="Clipboard history and plain-text paste"
+                  Target="[#WindupExe]"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Advertise="no" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Spillebulle\Windup"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="Windup" Level="1">
+      <ComponentGroupRef Id="Files" />
+      <ComponentGroupRef Id="StartMenu" />
+    </Feature>
+
+    <!-- One component per file: WiX only generates a GUID for a component
+         holding a single file that is its own keypath. -->
+    <ComponentGroup Id="Files" Directory="INSTALLFOLDER">
+      <Component Id="Executable" Guid="0a3bb131-b281-44ef-b637-3af01bbe1c20">
+        <File Id="WindupExe" Source="$(var.BinDir)\windup.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="Readme">
+        <File Source="$(var.DocDir)\README.md" />
+      </Component>
+      <Component Id="Changelog">
+        <File Source="$(var.DocDir)\CHANGELOG.md" />
+      </Component>
+      <Component Id="Licence">
+        <File Source="$(var.DocDir)\LICENSE" Name="LICENSE.txt" />
+      </Component>
+    </ComponentGroup>
+
+  </Package>
+</Wix>

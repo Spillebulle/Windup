@@ -15,13 +15,25 @@
 </p>
 
 > **Early days.** Two tools work on Windows: clipboard history and plain-text
-> paste. There is no installer yet. [What is not there yet](#what-is-not-there-yet)
-> is honest about the rest.
+> paste. [What is not there yet](#what-is-not-there-yet) is honest about the
+> rest.
 
 ## Install
 
-There is no release yet. Build it from source (below); the result is a
-single `windup.exe` with nothing to install.
+**Windup 0.1.0.** Take the installer for your PC, or browse the
+[release itself](https://github.com/Spillebulle/Windup/releases/latest) for the
+notes.
+
+| | x64 | ARM64 |
+|---|---|---|
+| Windows | [Installer](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-setup-0.1.0-x64.exe) | [Installer](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-setup-0.1.0-arm64.exe) |
+| Windows, `.msi` to deploy | [`.msi`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-0.1.0-x64.msi) | [`.msi`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-0.1.0-arm64.msi) |
+| Windows, no installer | [`.zip`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-0.1.0-x86_64-pc-windows-msvc.zip) | [`.zip`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-0.1.0-aarch64-pc-windows-msvc.zip) |
+
+The installer asks Windows for permission once, installs for everyone on the
+PC, adds Windup to the Start menu and starts it. Uninstall it from Settings,
+Apps. The files are not signed yet, so SmartScreen may warn the first time;
+choose More info, then Run anyway.
 
 You need Windows 10 or 11 and a GPU with Direct3D 12 or Vulkan, which is
 essentially any machine from the last ten years.
@@ -41,9 +53,12 @@ anything that would otherwise keep the formatting.
 
 ## What is not there yet
 
-- **No installer or release.** Building from source is the only way in.
+- **No start at sign-in or tray icon.** The settings for both are there and
+  saved, but Windup does not act on them yet. Start it from the Start menu.
+- **Unsigned.** The installer and program are not code-signed.
 - **Windows only, in practice.** The code compiles on Linux and macOS with
-  fallbacks for the hotkeys and paste, but nobody has used it there.
+  fallbacks for the hotkeys and paste, but nobody has used it there and there
+  are no packages for either.
 - **Two tools.** The settings window is built for more; none of the others
   exist yet.
 

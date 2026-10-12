@@ -1,0 +1,150 @@
+name: Release
+
+# Pushing a tag `vX.Y.Z` is the whole of cutting a release; tools/release.ps1
+# pushes it after checking the tree and waiting for CI on that commit.
+#
+# Run by hand (workflow_dispatch) it builds and packages everything and
+# uploads the files as workflow artefacts, but publishes nothing. That is how a
+# change to this file is rehearsed without spending a tag.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # `package` names the folder under packaging/ whose package.sh turns the
+        # built binary into this platform's installers. `arch` is that
+        # packager's spelling of the architecture. Adding an OS is a row here,
+        # the same row in ci.yml, and a packaging/<os>/package.sh; see
+        # docs/packaging.md.
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,  arch: x64,   package: windows, test: true }
+          # Cross-compiled: GitHub's ARM runners are not free for private repositories.
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, arch: arm64, package: windows, test: false }
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sh packaging/linux/dependencies.sh
+
+      - name: Install WiX
+        if: matrix.package == 'windows'
+        shell: bash
+        run: |
+          set -eu
+          dotnet tool install --global wix --version 5.0.2
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          wix extension add -g WixToolset.Util.wixext/5.0.2
+
+      # The same gates CI runs, because a tag can point at a commit CI never saw.
+      - name: Test
+        if: matrix.test
+        run: cargo test --workspace --target ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release -p windup-desktop --target ${{ matrix.target }}
+
+      - name: Version
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # The bare program, for anybody who wants it without an installer.
+      - name: Archive
+        shell: bash
+        run: |
+          set -eu
+          bin="target/${{ matrix.target }}/release"
+          stage="windup-${VERSION}-${{ matrix.target }}"
+          mkdir -p "staging/$stage" dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "$bin/windup.exe" "staging/$stage/"
+          else
+            cp "$bin/windup" "staging/$stage/"
+          fi
+          cp README.md CHANGELOG.md LICENSE "staging/$stage/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            (cd staging && 7z a "../dist/${stage}.zip" "$stage" > /dev/null)
+          else
+            tar czf "dist/${stage}.tar.gz" -C staging "$stage"
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          sh packaging/${{ matrix.package }}/package.sh \
+            "$VERSION" "${{ matrix.arch }}" "target/${{ matrix.target }}/release" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    # A manual run has no tag to attach a release to; it stops at the artefacts.
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # The notes are CHANGELOG.md's section for this version, verbatim, so the
+      # release page and the repository cannot disagree.
+      # crates/windup-desktop/tests/release.rs fails CI when that section is
+      # missing, empty, or not the newest.
+      - name: Release notes
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          manifest=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$version" != "$manifest" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml's ${manifest}" >&2
+            exit 1
+          fi
+          sh tools/release-notes.sh "$version" > notes.md
+          cat notes.md
+
+      # Titled with the bare version number, built from the tag (STYLE-GUIDE §17.2).
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la artifacts
+          gh release create "$GITHUB_REF_NAME" \
+            --title "${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md \
+            artifacts/*

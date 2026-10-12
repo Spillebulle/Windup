@@ -1,7 +1,9 @@
+pub mod art;
 pub mod icons;
 pub mod lucide;
 pub mod popup;
 pub mod settings;
+pub mod setup;
 pub mod theme;
 pub mod themelib;
 pub mod widgets;

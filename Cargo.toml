@@ -13,6 +13,7 @@ edition = "2024"
 rust-version = "1.90"
 license = "GPL-3.0-or-later"
 authors = ["Windup contributors"]
+repository = "https://github.com/Spillebulle/Windup"
 
 [workspace.dependencies]
 windup-core = { path = "crates/windup-core" }

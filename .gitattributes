@@ -1,0 +1,9 @@
+# Shell scripts keep LF even when checked out on Windows (CI's Windows runners
+# included): sh fails on a CRLF shebang and on every \r after it.
+*.sh text eol=lf
+
+# Generated art, committed; never let autocrlf touch it.
+*.bmp binary
+*.ico binary
+*.png binary
+*.ttf binary

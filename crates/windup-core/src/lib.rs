@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod config;
+pub mod install;
 pub mod shortcut;
 pub mod tool;
 

@@ -100,6 +100,9 @@ pub fn paste_current_clipboard_as_plain(target_hwnd: isize) {
 
 pub fn dispatch_paste_to_target(target_hwnd: isize) {
     thread::spawn(move || {
+        // Only the Win32 path restores focus to a window.
+        #[cfg(not(target_os = "windows"))]
+        let _ = target_hwnd;
         #[cfg(target_os = "windows")]
         unsafe {
             use windows_sys::Win32::Foundation::HWND;
