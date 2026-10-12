@@ -221,6 +221,15 @@ impl Clip {
         }
     }
 
+    /// Whether the selection is ours and is text.
+    pub fn owns_text(&self) -> bool {
+        self.current.is_none()
+            && self
+                .own
+                .as_ref()
+                .is_some_and(|(_, p)| matches!(**p, Payload::Text(_)))
+    }
+
     /// The types the current selection offers, or `None` when it is ours or
     /// empty.
     pub fn current_mimes(&self) -> Option<&[String]> {

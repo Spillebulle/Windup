@@ -40,6 +40,7 @@ pub struct Gpu {
     pub renderer: egui_wgpu::Renderer,
     pub ctx: egui::Context,
     pub view: PopupView,
+    pub epoch: Instant,
 }
 
 impl Gpu {
@@ -83,6 +84,7 @@ impl Gpu {
                 renderer,
                 ctx,
                 view: PopupView::new(),
+                epoch: Instant::now(),
             },
             alpha,
         ))
@@ -214,7 +216,8 @@ impl Popup {
         let logical = vec2(self.size.0 as f32, self.size.1 as f32);
         let mut raw = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, logical)),
-            time: Some(self.opened.elapsed().as_secs_f64()),
+            // One clock for the life of the context, which outlives popups.
+            time: Some(gpu.epoch.elapsed().as_secs_f64()),
             modifiers: self.modifiers,
             events: std::mem::take(&mut self.events),
             focused: true,

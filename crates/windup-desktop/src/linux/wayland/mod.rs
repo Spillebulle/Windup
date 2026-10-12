@@ -395,8 +395,11 @@ impl State {
             return;
         };
         let Some(pick) = clip.current_mimes().and_then(|m| capture::pick(m, false)) else {
-            // Our own copy is already plain text; paste it as it is.
-            self.paste_after(SHORTCUT_SETTLE);
+            // Our own text is already plain; paste it as it is. Anything else
+            // has no text to paste, as on Windows.
+            if clip.owns_text() {
+                self.paste_after(SHORTCUT_SETTLE);
+            }
             return;
         };
         let tx = self.loop_tx.clone();
@@ -469,8 +472,14 @@ impl State {
             Ok(surface) => popup.surface = Some(surface),
             Err(e) => {
                 log::error!("{e}");
+                self.layer = Some(layer);
+                self.close_popup();
                 return;
             }
+        }
+        // A fresh list each time, as on Windows: top entry selected, no search.
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.view.reset();
         }
         self.popup = Some(popup);
         self.layer = Some(layer);
@@ -725,6 +734,10 @@ impl LayerShellHandler for State {
         }
         if let Some(at) = popup.pointer {
             popup.place_at(at);
+        }
+        // The grace period may have run out before the first configure.
+        if popup.opened.elapsed() >= ENTER_GRACE {
+            popup.place_fallback();
         }
         if let Some(gpu) = &self.gpu {
             popup.configure_surface(gpu);
