@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/windup-core",
+    "crates/windup-ui",
+    "crates/windup-desktop",
+]
+default-members = ["crates/windup-desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "GPL-3.0-or-later"
+authors = ["Windup contributors"]
+
+[workspace.dependencies]
+windup-core = { path = "crates/windup-core" }
+windup-ui = { path = "crates/windup-ui" }
+
+log = "0.4"
+env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = "0.15"
+
+eframe = { version = "0.32", default-features = false, features = [
+    "wgpu",
+    "default_fonts",
+    "wayland",
+    "x11",
+    "accesskit",
+] }
+egui = "0.32"
+wgpu = "25"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 16

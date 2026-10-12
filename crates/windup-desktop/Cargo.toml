@@ -1,0 +1,36 @@
+[package]
+name = "windup-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "windup"
+path = "src/main.rs"
+
+[dependencies]
+windup-core = { workspace = true }
+windup-ui = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+wgpu = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+global-hotkey = "0.8.0"
+enigo = "0.6.1"
+clipboard-rs = "0.3.5"
+image = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Threading",
+] }
