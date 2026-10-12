@@ -2,23 +2,40 @@
 
 mod cursor;
 mod hotkey;
+#[cfg(target_os = "linux")]
+mod linux;
 mod paste;
+mod platform;
 mod setup;
 
 use eframe::egui;
 use hotkey::{HotkeyEvent, HotkeyListener};
+use platform::{Plan, Target};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use windup_core::clipboard::{ClipboardHistory, ClipboardMonitor};
+use windup_core::placement::{self, Area};
 use windup_core::{Config, ThemeMode, ToolId};
 use windup_ui::{Mode, Palette, PopupAction, PopupView, SettingsView, apply_theme, install_fonts};
+
+/// How this process was started.
+struct Startup {
+    plan: Plan,
+    /// Only the settings window: a child of the Linux background process,
+    /// which owns the clipboard, the hotkeys and the history file.
+    settings_only: bool,
+    /// The single-instance socket, already bound.
+    #[cfg(target_os = "linux")]
+    listener: Option<std::os::unix::net::UnixListener>,
+}
 
 struct WindupApp {
     config: Config,
     settings_view: SettingsView,
     history: Arc<Mutex<ClipboardHistory>>,
-    _monitor: ClipboardMonitor,
-    hotkey_listener: HotkeyListener,
+    _monitor: Option<ClipboardMonitor>,
+    hotkey_listener: Option<HotkeyListener>,
+    settings_only: bool,
     popup_view: PopupView,
     popup_open: bool,
     popup_opened_at: Option<std::time::Instant>,
@@ -26,16 +43,17 @@ struct WindupApp {
     popup_first_frame: bool,
     popup_pos: Option<(f32, f32)>,
     popup_logical_pos: Option<[f32; 2]>,
-    target_hwnd: isize,
+    target: Target,
     last_saved_state: (usize, u64),
     max_items_atomic: Arc<AtomicUsize>,
     save_images_atomic: Arc<AtomicBool>,
+    watching_atomic: Arc<AtomicBool>,
     app_icon: Arc<egui::IconData>,
     last_icon_colors: Option<(egui::Color32, egui::Color32)>,
 }
 
 impl WindupApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
         install_fonts(&cc.egui_ctx);
         let config = Config::load();
         let initial_palette = Palette::of(Mode::Dark, config.accent_hue);
@@ -56,16 +74,59 @@ impl WindupApp {
         let history = Arc::new(Mutex::new(initial_history));
         let max_items_atomic = Arc::new(AtomicUsize::new(config.clipboard.max_items));
         let save_images_atomic = Arc::new(AtomicBool::new(config.clipboard.save_images));
+        let watching_atomic = Arc::new(AtomicBool::new(config.clipboard.enabled));
 
-        let monitor = ClipboardMonitor::new(Arc::clone(&history));
-        if config.clipboard.enabled {
-            monitor.start(
-                Arc::clone(&max_items_atomic),
-                Arc::clone(&save_images_atomic),
-            );
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut plan = startup.plan;
+        let mut monitor = None;
+        let mut hotkey_listener = None;
+        if !startup.settings_only {
+            #[cfg(target_os = "linux")]
+            {
+                let (events, _) = std::sync::mpsc::channel();
+                let shared = linux::wayland::Shared {
+                    history: Arc::clone(&history),
+                    max_items: Arc::clone(&max_items_atomic),
+                    save_images: Arc::clone(&save_images_atomic),
+                    watching: Arc::clone(&watching_atomic),
+                    events,
+                };
+                plan = linux::start(plan, shared).plan;
+                linux::autostart::sync(config.launch_at_login);
+            }
+
+            if plan.watch == platform::Watch::Poll {
+                let m = ClipboardMonitor::new(Arc::clone(&history));
+                if config.clipboard.enabled {
+                    m.start(
+                        Arc::clone(&max_items_atomic),
+                        Arc::clone(&save_images_atomic),
+                    );
+                }
+                monitor = Some(m);
+            }
+
+            let listener = HotkeyListener::new(&plan);
+            #[cfg(target_os = "linux")]
+            if let Some(socket) = startup.listener {
+                let tx = listener.sender();
+                let ctx = cc.egui_ctx.clone();
+                linux::ipc::serve(socket, move |command| {
+                    use windup_core::ipc::Command;
+                    let target = linux::current_target(&plan);
+                    let event = match command {
+                        Command::Popup => HotkeyEvent::ClipboardPopup { target },
+                        Command::PastePlain => HotkeyEvent::PastePlainText { target },
+                        Command::Show => HotkeyEvent::Show,
+                        Command::Reload => HotkeyEvent::Reload,
+                    };
+                    let _ = tx.send(event);
+                    ctx.request_repaint();
+                });
+                linux::portal::start_shortcuts(&plan);
+            }
+            hotkey_listener = Some(listener);
         }
-
-        let hotkey_listener = HotkeyListener::new();
 
         Self {
             config,
@@ -73,6 +134,7 @@ impl WindupApp {
             history,
             _monitor: monitor,
             hotkey_listener,
+            settings_only: startup.settings_only,
             popup_view: PopupView::new(),
             popup_open: false,
             popup_opened_at: None,
@@ -80,40 +142,46 @@ impl WindupApp {
             popup_first_frame: false,
             popup_pos: None,
             popup_logical_pos: None,
-            target_hwnd: 0,
+            target: Target::None,
             last_saved_state: initial_state,
             max_items_atomic,
             save_images_atomic,
+            watching_atomic,
             app_icon,
             last_icon_colors: Some((initial_palette.accent, initial_palette.accent_ink)),
         }
     }
 
     fn resolved_mode(&self, ctx: &egui::Context) -> Mode {
-        match self.config.theme_mode {
-            ThemeMode::Dark => Mode::Dark,
-            ThemeMode::Light => Mode::Light,
-            ThemeMode::System => {
-                if ctx.style().visuals.dark_mode {
-                    Mode::Dark
-                } else {
-                    Mode::Light
-                }
-            }
-        }
+        resolve_mode(&self.config, ctx.style().visuals.dark_mode)
     }
 
     fn resolved_palette(&self, mode: Mode) -> Palette {
-        if let Some(ref custom_id) = self.config.custom_theme
-            && let Some(themes_dir) = Config::themes_dir()
-        {
-            let (custom_themes, _) = windup_ui::themelib::load_all_from_dir(&themes_dir);
-            if let Some(ct) = custom_themes.into_iter().find(|t| &t.id == custom_id) {
-                return ct.palette;
-            }
-        }
-        Palette::of(mode, self.config.accent_hue)
+        resolve_palette(&self.config, mode)
     }
+}
+
+/// Light or dark, with "Follow system" settled by `system_dark`.
+pub(crate) fn resolve_mode(config: &Config, system_dark: bool) -> Mode {
+    match config.theme_mode {
+        ThemeMode::Dark => Mode::Dark,
+        ThemeMode::Light => Mode::Light,
+        ThemeMode::System if system_dark => Mode::Dark,
+        ThemeMode::System => Mode::Light,
+    }
+}
+
+/// The custom theme the config names, or the built-in palette.
+pub(crate) fn resolve_palette(config: &Config, mode: Mode) -> Palette {
+    if let Some(ref custom_id) = config.custom_theme
+        && let Some(themes_dir) = Config::themes_dir()
+    {
+        let (custom_themes, _) = windup_ui::themelib::load_all_from_dir(&themes_dir);
+        if let Some(ct) = custom_themes.into_iter().find(|t| &t.id == custom_id) {
+            return ct.palette;
+        }
+    }
+    Palette::of(mode, config.accent_hue)
 }
 
 impl eframe::App for WindupApp {
@@ -127,13 +195,17 @@ impl eframe::App for WindupApp {
             .store(self.config.clipboard.max_items, Ordering::Relaxed);
         self.save_images_atomic
             .store(self.config.clipboard.save_images, Ordering::Relaxed);
+        self.watching_atomic
+            .store(self.config.clipboard.enabled, Ordering::Relaxed);
 
-        // Check if history state changed and auto-persist to disk
+        // Check if history state changed and auto-persist to disk. A
+        // settings-only window must never write it: the background process
+        // owns that file.
         let current_state = {
             let hist = self.history.lock().unwrap();
             (hist.len(), hist.get(0).map(|e| e.id).unwrap_or(0))
         };
-        if current_state != self.last_saved_state {
+        if !self.settings_only && current_state != self.last_saved_state {
             self.last_saved_state = current_state;
             if let Some(ref p) = Config::history_path() {
                 let hist = self.history.lock().unwrap();
@@ -141,48 +213,30 @@ impl eframe::App for WindupApp {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        self.keep_running_when_closed(ctx);
+
         // -------------------------------------------------------------
         // Poll Global Hotkeys
         // -------------------------------------------------------------
-        while let Some(event) = self.hotkey_listener.try_recv() {
+        while let Some(event) = self.hotkey_listener.as_ref().and_then(|l| l.try_recv()) {
             match event {
-                HotkeyEvent::ClipboardPopup { target_hwnd } => {
+                HotkeyEvent::ClipboardPopup { target } => {
                     if self.config.is_tool_enabled(ToolId::ClipboardHistory) {
                         let ((cx, cy), mon) = cursor::get_cursor_and_monitor();
                         let ppp = ctx.pixels_per_point().max(1.0);
-
-                        let cur_x = cx / ppp;
-                        let cur_y = cy / ppp;
-                        let work_left = mon.left / ppp;
-                        let work_top = mon.top / ppp;
-                        let work_right = mon.right / ppp;
-                        let work_bottom = mon.bottom / ppp;
-
+                        let area = Area {
+                            left: mon.left / ppp,
+                            top: mon.top / ppp,
+                            right: mon.right / ppp,
+                            bottom: mon.bottom / ppp,
+                        };
                         let pw = self.config.clipboard.popup_width.clamp(280.0, 900.0);
                         let ph = self.config.clipboard.popup_height.clamp(260.0, 1000.0);
-
-                        // Horizontal placement:
-                        // Default to 4 points right of cursor; flip to left of cursor if overflowing right edge
-                        let mut lx = cur_x + 4.0;
-                        if lx + pw > work_right - 8.0 {
-                            lx = (cur_x - pw - 4.0).max(work_left + 8.0);
-                        }
-                        if lx < work_left + 8.0 {
-                            lx = work_left + 8.0;
-                        }
-
-                        // Vertical placement:
-                        // Default to 12 points below cursor; flip to above cursor if overflowing bottom edge
-                        let mut ly = cur_y + 12.0;
-                        if ly + ph > work_bottom - 8.0 {
-                            ly = cur_y - ph - 12.0;
-                        }
-                        if ly < work_top + 8.0 {
-                            ly = work_top + 8.0;
-                        }
+                        let (lx, ly) = placement::place((cx / ppp, cy / ppp), area, (pw, ph));
 
                         self.popup_logical_pos = Some([lx, ly]);
-                        self.target_hwnd = target_hwnd;
+                        self.target = target;
                         self.popup_pos = Some((cx, cy));
                         self.popup_open = true;
                         self.popup_first_frame = true;
@@ -192,11 +246,17 @@ impl eframe::App for WindupApp {
                         ctx.request_repaint();
                     }
                 }
-                HotkeyEvent::PastePlainText { target_hwnd } => {
+                HotkeyEvent::PastePlainText { target } => {
                     if self.config.is_tool_enabled(ToolId::PastePlainText) {
-                        paste::paste_current_clipboard_as_plain(target_hwnd);
+                        paste::paste_current_clipboard_as_plain(target);
                     }
                 }
+                HotkeyEvent::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                HotkeyEvent::Reload => self.config = Config::load(),
             }
         }
 
@@ -335,14 +395,14 @@ impl eframe::App for WindupApp {
                     PopupAction::Paste(entry) => {
                         close_popup = true;
                         if self.config.clipboard.auto_paste {
-                            paste::paste_entry_to_target(self.target_hwnd, &entry);
+                            paste::paste_entry_to_target(self.target, &entry);
                         } else {
                             paste::populate_clipboard(&entry);
                         }
                     }
                     PopupAction::PastePlain(text) => {
                         close_popup = true;
-                        paste::paste_plain_to_target(self.target_hwnd, &text);
+                        paste::paste_plain_to_target(self.target, &text);
                     }
                     PopupAction::Delete(id) => {
                         let mut hist = self.history.lock().unwrap();
@@ -543,32 +603,37 @@ fn main() -> eframe::Result<()> {
         return setup::run();
     }
 
+    #[cfg(target_os = "linux")]
+    let Some(startup) = linux_startup() else {
+        return Ok(());
+    };
+    #[cfg(not(target_os = "linux"))]
+    let startup = Startup {
+        plan: if cfg!(target_os = "windows") {
+            Plan::WINDOWS
+        } else {
+            Plan::OTHER
+        },
+        settings_only: false,
+    };
+    #[cfg(target_os = "linux")]
+    let start_hidden = startup.listener.is_some() && LAUNCHED_IN_BACKGROUND.get() == Some(&true);
+    #[cfg(not(target_os = "linux"))]
+    let start_hidden = false;
+
     let config = Config::load();
-    let mode = match config.theme_mode {
-        ThemeMode::Dark => Mode::Dark,
-        ThemeMode::Light => Mode::Light,
-        ThemeMode::System => Mode::Dark,
-    };
-    let initial_palette = if let Some(ref custom_id) = config.custom_theme
-        && let Some(themes_dir) = Config::themes_dir()
-    {
-        let (custom_themes, _) = windup_ui::themelib::load_all_from_dir(&themes_dir);
-        custom_themes
-            .into_iter()
-            .find(|t| &t.id == custom_id)
-            .map(|t| t.palette)
-            .unwrap_or_else(|| Palette::of(mode, config.accent_hue))
-    } else {
-        Palette::of(mode, config.accent_hue)
-    };
+    let mode = resolve_mode(&config, true);
+    let initial_palette = resolve_palette(&config, mode);
 
     let app_icon = windup_ui::art::window_icon(&initial_palette);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Windup")
+            .with_app_id(APP_ID)
             .with_icon(app_icon)
             .with_inner_size([960.0, 620.0])
             .with_min_inner_size([720.0, 480.0])
+            .with_visible(!start_hidden)
             .with_transparent(true),
         ..Default::default()
     };
@@ -576,6 +641,100 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Windup",
         options,
-        Box::new(|cc| Ok(Box::new(WindupApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(WindupApp::new(cc, startup)))),
     )
+}
+
+/// The desktop entry, icon and Wayland app id all carry this name.
+const APP_ID: &str = "io.github.spillebulle.windup";
+
+#[cfg(target_os = "linux")]
+static LAUNCHED_IN_BACKGROUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Decides what this launch is on Linux: hand a command to the Windup
+/// already running, become the background process (layer-shell desktops), or
+/// carry on into the eframe app. `None` means there is nothing left to do.
+#[cfg(target_os = "linux")]
+fn linux_startup() -> Option<Startup> {
+    use windup_core::ipc::{self, Command, Launch};
+
+    let launch = ipc::parse_args(std::env::args().skip(1));
+    match launch {
+        Launch::Help => {
+            println!("{}", ipc::USAGE);
+            return None;
+        }
+        Launch::Unknown(why) => {
+            eprintln!("windup: {why}\n\n{}", ipc::USAGE);
+            std::process::exit(2);
+        }
+        Launch::Send(command) => {
+            if let Err(e) = linux::ipc::send_or_start(command) {
+                eprintln!("windup: could not reach or start Windup: {e}");
+                std::process::exit(1);
+            }
+            return None;
+        }
+        Launch::Settings => {
+            return Some(Startup {
+                plan: Plan::OTHER,
+                settings_only: true,
+                listener: None,
+            });
+        }
+        Launch::App | Launch::Background => {}
+    }
+    let background = launch == Launch::Background;
+    let _ = LAUNCHED_IN_BACKGROUND.set(background);
+
+    let listener = match linux::ipc::bind() {
+        Ok(linux::ipc::Bound::Listening(l)) => l,
+        Ok(linux::ipc::Bound::AlreadyRunning) => {
+            if !background {
+                let _ = linux::ipc::send(Command::Show);
+            }
+            return None;
+        }
+        Err(e) => {
+            log::error!("socket {}: {e}", linux::ipc::socket_path().display());
+            eprintln!("windup: cannot create its socket: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let plan = linux::detect();
+    let listener = if plan.host == platform::Host::Layer {
+        match linux::run_layer_host(plan, listener, !background) {
+            Ok(()) => return None,
+            // The Wayland service would not start: carry on as an eframe app.
+            Err(listener) => listener,
+        }
+    } else {
+        listener
+    };
+    Some(Startup {
+        plan: linux::runtime().map_or(plan, |r| r.plan),
+        settings_only: false,
+        listener: Some(listener),
+    })
+}
+
+#[cfg(target_os = "linux")]
+impl WindupApp {
+    /// Closing the window must not end the clipboard history and the
+    /// hotkeys with it. X11 can hide a window; Wayland cannot, so there it
+    /// is minimised. Running `windup` again brings it back.
+    fn keep_running_when_closed(&mut self, ctx: &egui::Context) {
+        if self.settings_only || !self.config.close_to_tray {
+            return;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
+    }
 }

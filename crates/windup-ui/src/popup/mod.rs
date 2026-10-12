@@ -299,7 +299,7 @@ impl PopupView {
 
         if grip_resp.dragged() {
             let delta = grip_resp.drag_delta();
-            let current_size = ui.ctx().screen_rect().size();
+            let current_size = total_rect.size();
             let new_w = (current_size.x + delta.x).clamp(280.0, 900.0);
             let new_h = (current_size.y + delta.y).clamp(260.0, 1000.0);
             ui.ctx()
@@ -343,7 +343,7 @@ impl PopupView {
 
         if grip_bl_resp.dragged() {
             let delta = grip_bl_resp.drag_delta();
-            let current_size = ui.ctx().screen_rect().size();
+            let current_size = total_rect.size();
             let new_w = (current_size.x - delta.x).clamp(280.0, 900.0);
             let new_h = (current_size.y + delta.y).clamp(260.0, 1000.0);
             let actual_dx = current_size.x - new_w;

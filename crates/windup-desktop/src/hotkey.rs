@@ -1,7 +1,10 @@
 //! Global hotkey listener.
 //! On Windows, uses low-level keyboard hook to intercept Win+V and Win+Shift+V reliably.
-//! On Linux/macOS, uses global-hotkey crate.
+//! On X11 and macOS, uses the global-hotkey crate. On Wayland nothing can grab
+//! a key, so the events come from the socket instead (`linux::ipc`), sent
+//! through [`HotkeyListener::sender`].
 
+use crate::platform::{HotkeysVia, Plan, Target};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -9,30 +12,51 @@ use std::thread;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HotkeyEvent {
-    ClipboardPopup { target_hwnd: isize },
-    PastePlainText { target_hwnd: isize },
+    ClipboardPopup {
+        target: Target,
+    },
+    PastePlainText {
+        target: Target,
+    },
+    /// Bring the settings window up (`windup` run a second time).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Show,
+    /// config.json changed under us.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Reload,
 }
 
 pub struct HotkeyListener {
     rx: Receiver<HotkeyEvent>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    tx: Sender<HotkeyEvent>,
     _running: Arc<AtomicBool>,
 }
 
 impl HotkeyListener {
-    pub fn new() -> Self {
+    pub fn new(plan: &Plan) -> Self {
         let (tx, rx) = channel();
         let running = Arc::new(AtomicBool::new(true));
 
-        #[cfg(target_os = "windows")]
-        start_windows_hook(tx, Arc::clone(&running));
-
-        #[cfg(not(target_os = "windows"))]
-        start_crossplatform_hotkeys(tx, Arc::clone(&running));
+        match plan.hotkeys {
+            #[cfg(target_os = "windows")]
+            HotkeysVia::Hook => start_windows_hook(tx.clone(), Arc::clone(&running)),
+            #[cfg(not(target_os = "windows"))]
+            HotkeysVia::XGrab => start_crossplatform_hotkeys(tx.clone(), Arc::clone(&running)),
+            _ => {}
+        }
 
         Self {
             rx,
+            tx,
             _running: running,
         }
+    }
+
+    /// For events that do not come from a key grab: the socket, the portal.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn sender(&self) -> Sender<HotkeyEvent> {
+        self.tx.clone()
     }
 
     pub fn try_recv(&self) -> Option<HotkeyEvent> {
@@ -88,7 +112,7 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                                 || (GetAsyncKeyState(VK_LSHIFT as i32) as u16 & 0x8000 != 0)
                                 || (GetAsyncKeyState(VK_RSHIFT as i32) as u16 & 0x8000 != 0);
 
-                            let target_hwnd = GetForegroundWindow() as isize;
+                            let target = Target::Hwnd(GetForegroundWindow() as isize);
 
                             // Explicitly permit this process to take foreground window
                             windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
@@ -99,11 +123,9 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                                 && let Some(sender) = guard.as_ref()
                             {
                                 if shift_down {
-                                    let _ =
-                                        sender.send(HotkeyEvent::PastePlainText { target_hwnd });
+                                    let _ = sender.send(HotkeyEvent::PastePlainText { target });
                                 } else {
-                                    let _ =
-                                        sender.send(HotkeyEvent::ClipboardPopup { target_hwnd });
+                                    let _ = sender.send(HotkeyEvent::ClipboardPopup { target });
                                 }
                             }
 
@@ -164,19 +186,39 @@ fn start_crossplatform_hotkeys(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>
         let id_v = hk_v.id();
         let id_shift_v = hk_shift_v.id();
 
-        let _ = manager.register(hk_v);
-        let _ = manager.register(hk_shift_v);
+        // Another program (often the desktop itself) may own Super+V; then
+        // the command-line route in docs/linux.md is the way in.
+        for hk in [hk_v, hk_shift_v] {
+            if let Err(e) = manager.register(hk) {
+                log::warn!("could not grab {hk:?}: {e}");
+            }
+        }
 
         let receiver = GlobalHotKeyEvent::receiver();
 
         while running.load(Ordering::SeqCst) {
             if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(100)) {
+                // Only key presses: global-hotkey reports the release too.
+                if event.state != global_hotkey::HotKeyState::Pressed {
+                    continue;
+                }
+                let target = focused_window();
                 if event.id == id_v {
-                    let _ = tx.send(HotkeyEvent::ClipboardPopup { target_hwnd: 0 });
+                    let _ = tx.send(HotkeyEvent::ClipboardPopup { target });
                 } else if event.id == id_shift_v {
-                    let _ = tx.send(HotkeyEvent::PastePlainText { target_hwnd: 0 });
+                    let _ = tx.send(HotkeyEvent::PastePlainText { target });
                 }
             }
         }
     });
+}
+
+#[cfg(target_os = "linux")]
+fn focused_window() -> Target {
+    crate::linux::x11::active_window().map_or(Target::None, Target::X11)
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+fn focused_window() -> Target {
+    Target::None
 }

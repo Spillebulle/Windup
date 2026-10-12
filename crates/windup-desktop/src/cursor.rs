@@ -47,6 +47,19 @@ pub fn get_cursor_and_monitor() -> ((f32, f32), MonitorBounds) {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(((x, y), area)) = crate::linux::x11::pointer_and_area() {
+        return (
+            (x, y),
+            MonitorBounds {
+                left: area.left,
+                top: area.top,
+                right: area.right,
+                bottom: area.bottom,
+            },
+        );
+    }
+
     (
         (200.0, 200.0),
         MonitorBounds {

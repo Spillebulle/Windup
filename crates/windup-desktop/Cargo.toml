@@ -24,6 +24,22 @@ enigo = "0.6.1"
 clipboard-rs = "0.3.5"
 image = { workspace = true }
 
+# Linux: our own Wayland connection for data-control, the virtual keyboard and
+# the layer-shell popup (egui drawn through egui-wgpu, as eframe does), and
+# x11rb for the pointer and focus on X11. See docs/linux.md.
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay-client-toolkit = "0.20"
+calloop = "0.14"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+raw-window-handle = "0.6"
+egui-wgpu = "0.32"
+pollster = "0.4"
+x11rb = { version = "0.13", features = ["randr"] }
+rustix = { version = "1", features = ["fs", "process", "pipe"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

@@ -1,5 +1,6 @@
 //! Simulated paste operations across platforms.
 
+use crate::platform::Target;
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContext, RustImageData};
 use std::thread;
@@ -51,6 +52,10 @@ pub fn set_clipboard_text(text: &str) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 pub fn set_clipboard_text(text: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    if crate::linux::set_text(text, false) {
+        return true;
+    }
     if let Ok(ctx) = ClipboardContext::new() {
         ctx.set_text(text.to_string()).is_ok()
     } else {
@@ -59,6 +64,10 @@ pub fn set_clipboard_text(text: &str) -> bool {
 }
 
 pub fn populate_clipboard(entry: &ClipboardEntry) {
+    #[cfg(target_os = "linux")]
+    if crate::linux::set_entry(entry, false) {
+        return;
+    }
     match &entry.content {
         ClipboardContent::Text { text, .. } => {
             set_clipboard_text(text);
@@ -79,30 +88,46 @@ pub fn populate_clipboard(entry: &ClipboardEntry) {
     }
 }
 
-pub fn paste_entry_to_target(target_hwnd: isize, entry: &ClipboardEntry) {
+pub fn paste_entry_to_target(target: Target, entry: &ClipboardEntry) {
+    // The Wayland service sets the clipboard and presses Ctrl+V in order on
+    // its own thread.
+    #[cfg(target_os = "linux")]
+    if crate::linux::set_entry(entry, true) {
+        return;
+    }
     populate_clipboard(entry);
-    dispatch_paste_to_target(target_hwnd);
+    dispatch_paste_to_target(target);
 }
 
-pub fn paste_plain_to_target(target_hwnd: isize, text: &str) {
+pub fn paste_plain_to_target(target: Target, text: &str) {
+    #[cfg(target_os = "linux")]
+    if crate::linux::set_text(text, true) {
+        return;
+    }
     set_clipboard_text(text);
-    dispatch_paste_to_target(target_hwnd);
+    dispatch_paste_to_target(target);
 }
 
-pub fn paste_current_clipboard_as_plain(target_hwnd: isize) {
+pub fn paste_current_clipboard_as_plain(target: Target) {
+    #[cfg(target_os = "linux")]
+    if crate::linux::paste_plain_current() {
+        return;
+    }
     if let Ok(ctx) = ClipboardContext::new()
         && let Ok(text) = ctx.get_text()
     {
         set_clipboard_text(&text);
-        dispatch_paste_to_target(target_hwnd);
+        dispatch_paste_to_target(target);
     }
 }
 
-pub fn dispatch_paste_to_target(target_hwnd: isize) {
+pub fn dispatch_paste_to_target(target: Target) {
     thread::spawn(move || {
-        // Only the Win32 path restores focus to a window.
-        #[cfg(not(target_os = "windows"))]
-        let _ = target_hwnd;
+        #[cfg(target_os = "windows")]
+        let target_hwnd = match target {
+            Target::Hwnd(h) => h,
+            _ => 0,
+        };
         #[cfg(target_os = "windows")]
         unsafe {
             use windows_sys::Win32::Foundation::HWND;
@@ -205,8 +230,33 @@ pub fn dispatch_paste_to_target(target_hwnd: isize) {
             SendInput(4, inputs.as_mut_ptr(), std::mem::size_of::<INPUT>() as i32);
         }
 
+        #[cfg(target_os = "linux")]
+        {
+            use crate::platform::PasteVia;
+            let via = crate::linux::runtime().map_or(PasteVia::XTest, |r| r.plan.paste);
+            match via {
+                PasteVia::Portal => {
+                    crate::linux::portal::paste_ctrl_v();
+                    return;
+                }
+                PasteVia::VirtualKeyboard => {
+                    if let Some(service) = crate::linux::runtime().and_then(|r| r.service.as_ref())
+                    {
+                        service.press_ctrl_v();
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            if let Target::X11(window) = target {
+                crate::linux::x11::activate(window);
+            }
+        }
+
         #[cfg(not(target_os = "windows"))]
         {
+            #[cfg(not(target_os = "linux"))]
+            let _ = target;
             thread::sleep(Duration::from_millis(80));
             use enigo::{Direction, Enigo, Key, Keyboard, Settings};
             if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
