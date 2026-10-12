@@ -14,10 +14,6 @@
   runs in the background
 </p>
 
-![The Windup settings window: the tool list on the left, and the overview of
-the Clipboard history and Paste plain text tools with their shortcuts and
-switches](docs/images/window.png)
-
 > **Early days.** Two tools work on Windows: clipboard history and plain-text
 > paste. There is no installer yet. [What is not there yet](#what-is-not-there-yet)
 > is honest about the rest.

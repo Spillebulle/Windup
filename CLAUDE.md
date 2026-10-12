@@ -61,3 +61,12 @@ Note the current gap: `Config` stores per-tool shortcuts, but the Windows hook h
 ## License
 
 GPL-3.0-or-later.
+
+## Missing pictures
+
+The README has no screenshots yet. §17.1 wants a whole-window picture under the
+sentence (`docs/images/window.png`) and §17.3 a cropped one beside each feature
+(the clipboard popup, the paste-plain settings). They were not taken because the
+MSI Afterburner / RTSS overlay draws itself into every graphics backend and runs
+elevated; turn the OSD off before capturing. Do not capture the popup with real
+clipboard history in it.
