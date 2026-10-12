@@ -45,6 +45,54 @@ jobs:
             bash -n "$f"
           done
 
+      # The desktop entry, the AppStream file and the icons must agree on the
+      # app id, or software centres drop the whole component.
+      - name: Linux metadata
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils appstream
+          desktop-file-validate packaging/io.github.spillebulle.windup.desktop
+          appstreamcli validate --no-net packaging/io.github.spillebulle.windup.metainfo.xml
+          sh packaging/check.sh
+
+  # Builds every Linux package from a debug binary, so a mistake in
+  # package.sh shows up on the push that made it rather than on the tag.
+  linux-packages:
+    name: Linux packages
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-packages
+
+      - name: Build
+        run: |
+          sh packaging/linux/dependencies.sh
+          sudo apt-get install -y rpm
+          cargo build -p windup-desktop
+
+      - name: Package
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          sh packaging/linux/package.sh "$version" amd64 target/debug dist
+          readelf -d target/debug/windup | grep NEEDED
+          dpkg-deb --info dist/*.deb
+          rpm -qpR dist/*.rpm
+
+      # Installs the packages in clean distributions: the dependency lists are
+      # hand-written, so this is what proves they resolve.
+      - name: Install on Debian, Fedora and Arch
+        run: |
+          docker run --rm -v "$PWD/dist:/dist" debian:12 sh -c             'apt-get update -qq && apt-get install -y -qq /dist/*.deb >/dev/null && windup --help'
+          docker run --rm -v "$PWD/dist:/dist" fedora:41 sh -c             'dnf install -y -q /dist/*.rpm && windup --help'
+          docker run --rm -v "$PWD/dist:/dist" archlinux:latest sh -c             'pacman -Sy --noconfirm --needed archlinux-keyring >/dev/null && pacman -U --noconfirm /dist/*.pkg.tar.zst >/dev/null && windup --help'
+          chmod +x dist/*.AppImage
+          APPIMAGE_EXTRACT_AND_RUN=1 dist/*.AppImage --help
+
   # Every target the release builds is built here too, so a green CI on the
   # commit being tagged means the release will build. Adding a row to
   # release.yml's matrix means adding it here in the same commit.
@@ -95,3 +143,36 @@ jobs:
       - name: Build
         if: ${{ !matrix.test }}
         run: cargo build --release -p windup-desktop --target ${{ matrix.target }}
+
+  # Windup driven for real on Linux with no screen: a headless Sway for
+  # Wayland (the protocols COSMIC, KDE and wlroots share) and Xvfb for X11.
+  # tools/linux-e2e.sh says what each case checks. lavapipe stands in for a
+  # GPU, so the popup is really drawn; the screenshots are kept.
+  e2e:
+    name: end-to-end (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+
+      - name: Install dependencies
+        run: |
+          sh packaging/linux/dependencies.sh
+          sudo apt-get install -y sway wl-clipboard wtype grim zenity             xvfb x11-utils xdotool xclip openbox imagemagick mesa-vulkan-drivers
+
+      - name: Build
+        run: cargo build -p windup-desktop
+
+      - name: Run
+        run: bash tools/linux-e2e.sh target/debug/windup all e2e-artefacts
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-artefacts
+          path: e2e-artefacts

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata. Software centres on Linux read this rather than the
+  .desktop file. Every claim here is one a user can check by running Windup.
+-->
+<component type="desktop-application">
+  <id>io.github.spillebulle.windup</id>
+  <launchable type="desktop-id">io.github.spillebulle.windup.desktop</launchable>
+
+  <name>Windup</name>
+  <summary>Clipboard history and plain-text paste behind a hotkey</summary>
+
+  <developer id="io.github.spillebulle">
+    <name>Windup contributors</name>
+  </developer>
+  <developer_name>Windup contributors</developer_name>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <description>
+    <p>
+      Press Super+V and a popup opens at your cursor with everything you have
+      copied, images included. Pick an entry and Windup pastes it into the
+      window you were in. Super+Shift+V pastes what is on the clipboard with
+      its formatting stripped.
+    </p>
+    <p>
+      It works on Wayland and on X11. On COSMIC, KDE Plasma, Sway, Hyprland
+      and other wlroots desktops it watches the clipboard and pastes through
+      the compositor's own protocols; on GNOME it asks once for permission to
+      paste. Copies a password manager marks as secret are never recorded.
+    </p>
+  </description>
+
+  <categories>
+    <category>Utility</category>
+  </categories>
+
+  <url type="homepage">https://github.com/Spillebulle/Windup</url>
+  <url type="bugtracker">https://github.com/Spillebulle/Windup/issues</url>
+
+  <provides>
+    <binary>windup</binary>
+  </provides>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-10-12">
+      <description>
+        <p>First release: clipboard history and plain-text paste, on Windows and Linux.</p>
+      </description>
+    </release>
+  </releases>
+</component>

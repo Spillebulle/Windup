@@ -34,6 +34,11 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc,  arch: x64,   package: windows, test: true }
           # Cross-compiled: GitHub's ARM runners are not free for private repositories.
           - { os: windows-latest, target: aarch64-pc-windows-msvc, arch: arm64, package: windows, test: false }
+          # The oldest supported Ubuntu, deliberately: a binary built against an
+          # older glibc runs on newer distributions, not the other way round.
+          # No ARM64 Linux yet: it would be cross-compiled against arm64 system
+          # libraries, and the Arch package is built in an x86-64-only image.
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, arch: amd64, package: linux,   test: true }
 
     steps:
       - uses: actions/checkout@v5
@@ -48,7 +53,9 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sh packaging/linux/dependencies.sh
+        run: |
+          sh packaging/linux/dependencies.sh
+          sudo apt-get install -y rpm
 
       - name: Install WiX
         if: matrix.package == 'windows'

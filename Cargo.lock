@@ -4470,6 +4470,7 @@ dependencies = [
 name = "windup-desktop"
 version = "0.1.0"
 dependencies = [
+ "ashpd",
  "calloop 0.14.4",
  "clipboard-rs",
  "eframe",
@@ -4477,6 +4478,7 @@ dependencies = [
  "egui-wgpu",
  "enigo",
  "env_logger",
+ "futures-util",
  "global-hotkey",
  "image",
  "log",

@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Name=Windup
+GenericName=Clipboard history
+Comment=Clipboard history at your cursor and plain-text paste, behind a hotkey
+Exec=windup
+Icon=io.github.spillebulle.windup
+Terminal=false
+Categories=Utility;
+Keywords=clipboard;history;paste;plain;text;hotkey;
+StartupNotify=true
+StartupWMClass=io.github.spillebulle.windup
+Actions=popup;paste-plain;
+
+[Desktop Action popup]
+Name=Open clipboard history
+Exec=windup --popup
+
+[Desktop Action paste-plain]
+Name=Paste as plain text
+Exec=windup --paste-plain

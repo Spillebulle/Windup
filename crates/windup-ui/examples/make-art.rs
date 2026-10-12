@@ -9,6 +9,9 @@
 //! - `assets/icons/windup.ico`, compiled into `windup.exe` by
 //!   `crates/windup-desktop/build.rs` and used by the MSI for Add or remove
 //!   programs.
+//! - `assets/icons/hicolor/<size>.png` at the same six sizes, which the Linux
+//!   packages install as `io.github.spillebulle.windup.png`. (Not
+//!   `windup-256.png`: that one is full-bleed, the README banner's source.)
 //! - `packaging/windows/banner.bmp` and `dialog.bmp`, WiX's `WixUIBannerBmp`
 //!   and `WixUIDialogBmp`, seen only when somebody runs the `.msi` directly.
 //!   The setup `.exe` installs silently behind Windup's own window.
@@ -74,6 +77,15 @@ fn main() {
     let ico = root.join("assets/icons/windup.ico");
     write_ico(&ico, &icons);
     println!("wrote {}", ico.display());
+
+    std::fs::create_dir_all(root.join("assets/icons/hicolor"))
+        .expect("creating assets/icons/hicolor");
+    for icon in &icons {
+        let path = root.join(format!("assets/icons/hicolor/{}.png", icon.width));
+        std::fs::write(&path, png(icon))
+            .unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+        println!("wrote {}", path.display());
+    }
 
     let banner = root.join("packaging/windows/banner.bmp");
     write_bmp(&banner, &installer_banner(&font, &dark, &light));

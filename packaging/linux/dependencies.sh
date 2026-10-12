@@ -4,9 +4,9 @@
 #
 #   sh packaging/linux/dependencies.sh
 #
-# winit's Wayland and X11 backends, GTK 3 for rfd's file dialogs, and libxdo
-# for enigo's simulated paste. There is no Linux package yet; when there is,
-# its packaging/linux/package.sh goes beside this file (docs/packaging.md).
+# winit's Wayland and X11 backends, libxkbcommon (linked: the Wayland popup's
+# keyboard), GTK 3 for rfd's file dialogs, and libxdo for enigo's simulated
+# paste on X11. packaging/linux/package.sh turns the build into packages.
 
 set -eu
 

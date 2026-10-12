@@ -3,7 +3,7 @@
 2026-10-12
 
 How a release is built, what each platform ships, and how to add a platform.
-Windows is the only one released today.
+Windows and Linux (x86-64) are released.
 
 ## Cutting a release
 
@@ -76,11 +76,48 @@ cargo build --release -p windup-desktop
 sh packaging/windows/package.sh 0.1.0 x64 target/release dist
 ```
 
+## Linux
+
+| File | What it is |
+|---|---|
+| `windup_X.Y.Z_amd64.deb` | Debian, Ubuntu and derivatives. Enrols the machine in the house archive. |
+| `windup-X.Y.Z-1.x86_64.rpm` | Fedora, openSUSE, RHEL. Enrols the machine likewise. |
+| `windup-bin-X.Y.Z-1-x86_64.pkg.tar.zst` | Arch and derivatives, `pacman -U`. |
+| `Windup-X.Y.Z-x86_64.AppImage` | Anything else. |
+| `windup-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | The bare program. |
+
+`packaging/linux/package.sh` stages one tree (binary, desktop entry, AppStream
+file, hicolor icons from `assets/icons/hicolor/`, docs) and builds all four
+from it: `dpkg-deb`, `rpmbuild`, `makepkg` (in an `archlinux:base-devel`
+container when the host has none), and linuxdeploy. The dependency lists in
+it are hand-written because most of the libraries are dlopened; CI's
+`linux-packages` job installs each package in a clean Debian, Fedora and Arch
+container to prove they resolve. `packaging/check.sh` keeps the app id
+`io.github.spillebulle.windup` the same in the desktop entry, the AppStream
+file, the icons and the program.
+
+The `.deb` and `.rpm` carry `packaging/linux/spillebulle-archive.asc` and write
+the archive's source on install (STYLE-GUIDE §18.2). For the archive to carry
+Windup, `Spillebulle/Windup` has to be listed in `../Packages/projects` and the
+release workflow has to send the archive its dispatch, as Muster's does; neither
+is done yet.
+
+Built on Ubuntu 22.04, so the binary needs glibc 2.35 or newer. No ARM64:
+GitHub's ARM runners are not free for private repositories, and the Arch image
+is x86-64 only. No Flatpak or Snap, deliberately; `docs/linux.md` says why.
+
+To build them locally on Debian or Ubuntu:
+
+```sh
+sh packaging/linux/dependencies.sh
+sudo apt-get install -y rpm
+cargo build --release -p windup-desktop
+sh packaging/linux/package.sh 0.1.0 amd64 target/release dist
+```
+
 ## Adding a platform
 
-The code already compiles on Linux (CI checks it), with `global-hotkey`,
-`enigo` and `clipboard-rs` standing in for the Win32 hook, `SendInput` and the
-Windows clipboard. A new platform needs:
+A new platform needs:
 
 1. **A matrix row in both workflows.** In `release.yml`, for example
    `{ os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, arch: amd64, package: linux, test: true }`,
@@ -113,5 +150,5 @@ installer window.
 - Code signing. The setup file and `windup.exe` are unsigned, so SmartScreen
   warns on first run.
 - An in-app update check.
-- Start at sign-in and a tray icon; the settings exist in `Config` but nothing
-  acts on them.
+- A tray icon, and start at sign-in on Windows. (Linux writes an XDG
+  autostart entry.)

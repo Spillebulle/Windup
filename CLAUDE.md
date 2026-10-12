@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Windup is a Windows-first desktop utility (Rust + egui/eframe/wgpu) that runs a settings window plus a set of global-hotkey "tools". Two tools exist today: **Clipboard history** (Win+V → floating popup at the cursor) and **Paste plain text** (Win+Shift+V → strips formatting and pastes).
+Windup is a desktop utility for Windows and Linux (Rust + egui/eframe/wgpu) that runs a settings window plus a set of global-hotkey "tools". Two tools exist today: **Clipboard history** (Win+V → floating popup at the cursor) and **Paste plain text** (Win+Shift+V → strips formatting and pastes).
 
 ## Commands
 
@@ -16,8 +16,11 @@ cargo test --workspace
 cargo test -p windup-core capacity_limit_truncates_oldest_items   # single test
 cargo clippy --workspace --all-targets
 cargo fmt
-cargo run -p windup-ui --example make-art          # regenerate windup.ico + WiX bitmaps, then commit them
+cargo run -p windup-ui --example make-art          # regenerate windup.ico, Linux hicolor PNGs + WiX bitmaps, then commit them
 sh packaging/windows/package.sh 0.1.0 x64 target/release dist   # MSI + setup exe (needs WiX 5)
+sh packaging/linux/package.sh 0.1.0 amd64 target/release dist   # deb, rpm, Arch, AppImage (Linux)
+sh packaging/check.sh                              # Linux app id consistency
+bash tools/linux-e2e.sh target/debug/windup all    # real end-to-end on headless Sway + Xvfb (Linux)
 pwsh tools/release.ps1 X.Y.Z                       # cut a release (see docs/packaging.md)
 ```
 
@@ -33,7 +36,9 @@ Rust edition 2024, MSRV 1.90. `let`-chains (`if let Some(x) = a && let Some(y) =
 - **`windup-ui`** — all egui drawing. Depends on core, never on desktop. Knows nothing about Win32.
 - **`windup-desktop`** — the binary. Owns the eframe app, Win32 hooks, window focus/paste plumbing, and wires core ↔ ui together.
 
-Win32 code (`windows-sys`) lives in `windup-desktop` (plus a small amount in core's Cargo manifest). Every Win32 block is `#[cfg(target_os = "windows")]` with a no-op `#[cfg(not(...))]` twin — keep that pairing when adding platform code; the crates are expected to still compile on Linux/macOS (fallbacks use `global-hotkey`, `enigo`, `clipboard-rs`).
+Win32 code (`windows-sys`) lives in `windup-desktop` (plus a small amount in core's Cargo manifest). Every Win32 block is `#[cfg(target_os = "windows")]` with a no-op `#[cfg(not(...))]` twin — keep that pairing when adding platform code; the crates are expected to still compile on macOS (fallbacks use `global-hotkey`, `enigo`, `clipboard-rs`). Linux code is all under `windup-desktop/src/linux/` (`#[cfg(target_os = "linux")] mod linux`).
+
+To type-check or clippy the Linux build from Windows: `cargo clippy --target x86_64-unknown-linux-gnu` works once `PKG_CONFIG` points at a script that prints `-lxkbcommon` and `PKG_CONFIG_ALLOW_CROSS=1` is set (sctk's build script insists on pkg-config). Tests still need Linux: CI, or WSL.
 
 ## Architecture notes worth knowing before editing
 
@@ -46,6 +51,18 @@ Win32 code (`windows-sys`) lives in `windup-desktop` (plus a small amount in cor
 **Clipboard capture** is a 250 ms polling thread (`core/clipboard/monitor.rs`) — images take priority over text, deduped by a `DefaultHasher` hash / last-text comparison. History semantics are deliberate and covered by tests: re-copying an existing value **inserts a new entry at the front and never reorders** existing ones. Live settings reach that thread via `Arc<AtomicUsize>` / `Arc<AtomicBool>` mirrored from config every frame.
 
 **Persistence** goes through `directories::ProjectDirs("com", "spillebulle", "windup")`: `config.json`, `clipboard_history.json` (images serialized as raw RGBA + thumbnail — large), and `themes/`. `Config::save()` is called eagerly by the setters, so settings changes persist immediately; history is written when `(len, newest_id)` changes.
+
+## Linux
+
+Design: `docs/superpowers/specs/2026-10-12-linux-support-design.md`; user-facing: `docs/linux.md`.
+
+- **The backend is chosen at runtime** by `platform::detect(env, globals)`, a pure tested function of `WAYLAND_DISPLAY`/`DISPLAY` and the Wayland globals a registry roundtrip reports. The result is a `Plan { host, watch, paste, hotkeys }`.
+- **Layer host** (layer-shell + data-control: COSMIC, KDE, wlroots): `linux::run_layer_host` runs with **no winit at all**, because Wayland cannot hide a window. A single Wayland thread (`linux/wayland/`) owns data-control (watch + serve the selection), the virtual keyboard (Ctrl+V) and the popup, a full-output transparent overlay layer surface drawing `PopupView` through egui-wgpu; the card is placed where the pointer *enters* that surface (Wayland gives no global cursor position), centred after 150 ms otherwise. The settings window is a child process `windup --settings` (settings-only `WindupApp`, never writes history); the host reloads `config.json` when its mtime changes.
+- **Viewport host** (X11, GNOME): the eframe app as on Windows; pointer, work area and focus via `linux/x11.rs` (EWMH/RandR over x11rb). Closing the window hides (X11) or minimises (Wayland) instead of quitting.
+- **Hotkeys on Wayland are commands**: `windup --popup` / `--paste-plain` / `--show` connect to `$XDG_RUNTIME_DIR/windup-<display>.sock` (protocol in `windup_core::ipc`, plumbing in `linux/ipc.rs`), starting Windup in the background if needed. The same socket makes Windup single-instance. Portals (`linux/portal.rs`, ashpd on async-std, already in the tree via rfd) add GlobalShortcuts and RemoteDesktop paste where the compositor lacks the protocols.
+- Clipboard ingest is shared: `windup_core::clipboard::capture::{Ingest, pick}`; offers carrying `x-kde-passwordManagerHint` are never recorded. Our own selection is tagged with `application/x-windup-owned` so its echo is recognised without reading our own pipe (which would deadlock the thread).
+- `cosmic-protocols` is deliberately not used: it is GPL-3.0-only.
+- Tested end to end by `tools/linux-e2e.sh` (CI job `e2e`): headless Sway exercises the wlr data-control, virtual-keyboard and layer-shell paths; COSMIC uses ext-data-control, which only the owner's machine exercises.
 
 ## UI conventions
 
@@ -61,12 +78,13 @@ The UI is **painted, not composed from egui widgets** — nearly everything in `
 
 A tool is a `ToolId` variant + a config struct + a settings pane + a hotkey branch. Touch points: `core/tool.rs` (`ALL`, `as_str`, `display_name`, `description`, `default_shortcut`), `core/config.rs` (config struct, `Config` field, `is_tool_enabled`/`set_tool_enabled`/`tool_shortcut`/`set_tool_shortcut`), `ui/settings/mod.rs` (`SettingsPane` variant + `ALL`/`label`/`icon`/`blurb` + `render_content` arm) plus a new pane module, and `desktop/hotkey.rs` + the `HotkeyEvent` match in `main.rs`.
 
-Note the current gap: `Config` stores per-tool shortcuts, but the Windows hook hardcodes Win+V / Win+Shift+V. Configured shortcuts are not yet honored on Windows.
+Note the current gap: `Config` stores per-tool shortcuts, but the Windows hook hardcodes Win+V / Win+Shift+V and X11 grabs the same two. Configured shortcuts are not yet honored. On Wayland a tool also needs an `ipc::Command` and a `windup --flag`.
 
 ## Packaging and releases
 
 Full write-up, including how to add an OS: `docs/packaging.md`. The short version:
 
+- Linux: `.deb`/`.rpm`/Arch/AppImage from `packaging/linux/package.sh`, x86-64 only, built on Ubuntu 22.04; the app id `io.github.spillebulle.windup` must match across desktop entry, metainfo, icons, `main.rs` and `autostart.rs` (`packaging/check.sh`).
 - A tag `vX.Y.Z` triggers `release.yml`. Each matrix row builds `--target <triple>` then calls `packaging/<package>/package.sh <version> <arch> <bin-dir> dist`; adding an OS is a row in both workflows plus that script. Platform logic stays in the script, not the YAML.
 - Release notes are the `## X.Y.Z` section of `CHANGELOG.md` verbatim; the title is the bare version. `windup-desktop/tests/release.rs` fails if the changelog or the README download table does not match `Cargo.toml`'s version.
 - **The setup exe is `windup.exe` with the MSI appended** (`windup_core::install::payload`). `main` checks the payload before anything else and runs `setup::run()` instead of the app, because a double-clicked file has no arguments. Setup runs `msiexec /qn` elevated via `ShellExecuteExW("runas")`, then starts the installed exe un-elevated. Pure decisions (`Step`, `Command`, paths) are in `windup_core::install`, the window in `windup_ui::setup`, Win32 in `windup-desktop/src/setup.rs`.

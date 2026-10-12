@@ -6,7 +6,8 @@
 </p>
 
 <p align="center">
-  Small Windows tools that live behind a <b>hotkey</b>, in the spirit of PowerToys.
+  Small desktop tools that live behind a <b>hotkey</b>, for Windows and Linux,
+  in the spirit of PowerToys.
 </p>
 
 <p align="center">
@@ -14,8 +15,8 @@
   runs in the background
 </p>
 
-> **Early days.** Two tools work on Windows: clipboard history and plain-text
-> paste. [What is not there yet](#what-is-not-there-yet) is honest about the
+> **Early days.** Two tools work, on Windows and on Linux: clipboard history
+> and plain-text paste. [What is not there yet](#what-is-not-there-yet) is honest about the
 > rest.
 
 ## Install
@@ -29,6 +30,11 @@ notes.
 | Windows | [Installer](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-setup-0.1.0-x64.exe) | [Installer](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-setup-0.1.0-arm64.exe) |
 | Windows, `.msi` to deploy | [`.msi`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-0.1.0-x64.msi) | [`.msi`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-0.1.0-arm64.msi) |
 | Windows, no installer | [`.zip`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-0.1.0-x86_64-pc-windows-msvc.zip) | [`.zip`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-0.1.0-aarch64-pc-windows-msvc.zip) |
+| Debian, Ubuntu, Mint, Pop!\_OS | [`.deb`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup_0.1.0_amd64.deb) | |
+| Fedora, openSUSE | [`.rpm`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-0.1.0-1.x86_64.rpm) | |
+| Arch, CachyOS, EndeavourOS, Manjaro | [`.pkg.tar.zst`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-bin-0.1.0-1-x86_64.pkg.tar.zst) | |
+| Any other Linux | [AppImage](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/Windup-0.1.0-x86_64.AppImage) | |
+| Linux, no package | [`.tar.gz`](https://github.com/Spillebulle/Windup/releases/download/v0.1.0/windup-0.1.0-x86_64-unknown-linux-gnu.tar.gz) | |
 
 The installer asks Windows for permission once, installs for everyone on the
 PC, adds Windup to the Start menu and starts it. Uninstall it from Settings,
@@ -38,27 +44,44 @@ choose More info, then Run anyway.
 You need Windows 10 or 11 and a GPU with Direct3D 12 or Vulkan, which is
 essentially any machine from the last ten years.
 
+On Linux, install the package for your distribution (`sudo apt install
+./windup_0.1.0_amd64.deb`, `sudo dnf install ./windup-0.1.0-1.x86_64.rpm`,
+`sudo pacman -U windup-bin-0.1.0-1-x86_64.pkg.tar.zst`) and start Windup from
+the app menu. The `.deb` and `.rpm` also add the
+[Spillebulle package archive](https://spillebulle.github.io/packages/), so
+Windup updates with the rest of the system. Wayland and X11 both work.
+**Most Wayland desktops do not let an app take Super+V by itself**: bind it
+once to `windup --popup` in your desktop's keyboard settings.
+[`docs/linux.md`](docs/linux.md) has the steps for COSMIC, GNOME, KDE, Sway,
+Hyprland and the rest, and what works where.
+
 ## Clipboard history
 
-Press Win+V and a popup opens at your cursor with everything you have copied,
+Press Win+V (Super+V on Linux) and a popup opens at your cursor with everything you have copied,
 images included, with previews. Pick an entry and Windup pastes it into the
 window you were in. It replaces the Windows clipboard panel rather than
-sitting beside it.
+sitting beside it. On Linux, copies a password manager marks as secret
+(KeePassXC, Bitwarden, 1Password) are never recorded.
 
 ## Paste plain text
 
-Press Win+Shift+V to paste what is on the clipboard with its fonts, colours
+Press Win+Shift+V (Super+Shift+V) to paste what is on the clipboard with its fonts, colours
 and links stripped. Useful when copying out of a web page or a document into
 anything that would otherwise keep the formatting.
 
 ## What is not there yet
 
-- **No start at sign-in or tray icon.** The settings for both are there and
-  saved, but Windup does not act on them yet. Start it from the Start menu.
+- **No tray icon, and no start at sign-in on Windows.** Both settings are
+  saved; on Linux "Launch at login" works, on Windows neither does yet. Start
+  it from the Start menu.
 - **Unsigned.** The installer and program are not code-signed.
-- **Windows only, in practice.** The code compiles on Linux and macOS with
-  fallbacks for the hotkeys and paste, but nobody has used it there and there
-  are no packages for either.
+- **On Linux, a shortcut to bind.** Except on X11 and on desktops with the
+  GlobalShortcuts portal (KDE Plasma, GNOME 48 and newer, Hyprland), Super+V
+  is bound by hand once; see [`docs/linux.md`](docs/linux.md).
+- **On GNOME the popup opens mid-screen**, not at the cursor: GNOME keeps the
+  overlay layer other desktops offer to itself. Pasting asks for permission
+  once.
+- **No ARM64 Linux packages yet**, and no macOS.
 - **Two tools.** The settings window is built for more; none of the others
   exist yet.
 
@@ -66,25 +89,28 @@ anything that would otherwise keep the formatting.
 
 | Shortcut | Does |
 |---|---|
-| Win+V | Open clipboard history at the cursor |
-| Win+Shift+V | Paste the clipboard as plain text |
+| Win+V, Super+V | Open clipboard history at the cursor |
+| Win+Shift+V, Super+Shift+V | Paste the clipboard as plain text |
 | Type | Search the history |
 | Up, Down | Move through the history |
 | Enter | Paste the selected entry |
 | Delete | Remove the selected entry |
 | Esc | Close the popup |
 
-Both shortcuts can be changed or switched off in the settings window.
+Both tools can be switched off in the settings window. On Linux the
+shortcuts themselves live in your desktop's keyboard settings.
 
 ## Building from source
 
 ```sh
 git clone https://github.com/Spillebulle/Windup.git
 cd Windup
-cargo build --release      # target/release/windup.exe
+cargo build --release      # target/release/windup(.exe)
 ```
 
-Rust 1.90 or newer.
+Rust 1.90 or newer. On Linux, `sh packaging/linux/dependencies.sh` installs
+the system libraries on Debian and Ubuntu; elsewhere you need the development
+packages for libxkbcommon, Wayland, X11 and libxdo.
 
 ## Licence
 

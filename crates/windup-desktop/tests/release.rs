@@ -75,6 +75,11 @@ const ASSETS: &[&str] = &[
     "windup-{v}-arm64.msi",
     "windup-{v}-x86_64-pc-windows-msvc.zip",
     "windup-{v}-aarch64-pc-windows-msvc.zip",
+    "windup_{v}_amd64.deb",
+    "windup-{v}-1.x86_64.rpm",
+    "windup-bin-{v}-1-x86_64.pkg.tar.zst",
+    "Windup-{v}-x86_64.AppImage",
+    "windup-{v}-x86_64-unknown-linux-gnu.tar.gz",
 ];
 
 const DOWNLOADS: &str = "https://github.com/Spillebulle/Windup/releases/download/";
