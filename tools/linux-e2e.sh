@@ -59,7 +59,8 @@ start_windup() {
     RUST_LOG=info,wgpu_hal=error,wgpu_core=error,naga=error \
         "$bin" --background >"$art/$1-windup.log" 2>&1 &
     windup_pid=$!
-    if wait_for 100 test -S "$(ls "$XDG_RUNTIME_DIR"/windup*.sock 2>/dev/null | head -1)"; then
+    # The glob is evaluated on every try: the socket does not exist yet.
+    if wait_for 100 sh -c 'for s in "$XDG_RUNTIME_DIR"/windup*.sock; do [ -S "$s" ] && exit 0; done; exit 1'; then
         ok "$1: Windup started and is listening"
     else
         bad "$1: Windup never opened its socket"
