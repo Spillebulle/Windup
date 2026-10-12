@@ -5,14 +5,12 @@ mod hotkey;
 mod paste;
 
 use eframe::egui;
-use windup_core::clipboard::{ClipboardHistory, ClipboardMonitor};
-use windup_core::{Config, ThemeMode, ToolId};
-use windup_ui::{
-    Mode, Palette, PopupAction, PopupView, SettingsView, apply_theme, install_fonts,
-};
 use hotkey::{HotkeyEvent, HotkeyListener};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use windup_core::clipboard::{ClipboardHistory, ClipboardMonitor};
+use windup_core::{Config, ThemeMode, ToolId};
+use windup_ui::{Mode, Palette, PopupAction, PopupView, SettingsView, apply_theme, install_fonts};
 
 struct WindupApp {
     config: Config,
@@ -40,7 +38,10 @@ impl WindupApp {
         install_fonts(&cc.egui_ctx);
         let config = Config::load();
         let initial_palette = Palette::of(Mode::Dark, config.accent_hue);
-        let app_icon = Arc::new(create_app_icon(initial_palette.accent, initial_palette.accent_ink));
+        let app_icon = Arc::new(create_app_icon(
+            initial_palette.accent,
+            initial_palette.accent_ink,
+        ));
 
         // Load persisted clipboard history from disk if available
         let history_path = Config::history_path();
@@ -223,12 +224,10 @@ impl eframe::App for WindupApp {
             if !MAIN_INIT.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 unsafe {
                     use windows_sys::Win32::UI::WindowsAndMessaging::{
-                        FindWindowW, SetClassLongPtrW, GCLP_HBRBACKGROUND,
+                        FindWindowW, GCLP_HBRBACKGROUND, SetClassLongPtrW,
                     };
-                    let wide: Vec<u16> = "Windup"
-                        .encode_utf16()
-                        .chain(std::iter::once(0))
-                        .collect();
+                    let wide: Vec<u16> =
+                        "Windup".encode_utf16().chain(std::iter::once(0)).collect();
                     let main_hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
                     if !main_hwnd.is_null() {
                         SetClassLongPtrW(main_hwnd, GCLP_HBRBACKGROUND, 0);
@@ -353,10 +352,8 @@ impl eframe::App for WindupApp {
                         if let Some(ref p) = Config::history_path() {
                             let _ = hist.save_to_disk(p);
                         }
-                        self.last_saved_state = (
-                            hist.len(),
-                            hist.get(0).map(|e| e.id).unwrap_or(0),
-                        );
+                        self.last_saved_state =
+                            (hist.len(), hist.get(0).map(|e| e.id).unwrap_or(0));
                     }
                     PopupAction::Resize(w, h) => {
                         self.config.clipboard.popup_width = w;
@@ -413,7 +410,7 @@ pub fn reset_popup_clipping_cache() {}
 
 #[cfg(target_os = "windows")]
 pub fn hide_popup_window(title: &str) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SW_HIDE, ShowWindow};
     unsafe {
         let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
         let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
@@ -433,11 +430,11 @@ fn focus_and_clip_popup_window(title: &str, width: f32, height: f32, ppp: f32) -
     use windows_sys::Win32::System::Threading::{
         AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetWindowThreadProcessId, SetClassLongPtrW, GCLP_HBRBACKGROUND,
-        ShowWindow, SW_SHOW, GetForegroundWindow, SetForegroundWindow, BringWindowToTop,
-    };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, FindWindowW, GCLP_HBRBACKGROUND, GetForegroundWindow,
+        GetWindowThreadProcessId, SW_SHOW, SetClassLongPtrW, SetForegroundWindow, ShowWindow,
+    };
 
     #[repr(C)]
     struct Margins {
@@ -502,10 +499,8 @@ fn focus_and_clip_popup_window(title: &str, width: f32, height: f32, ppp: f32) -
             // 3. Set physical window region to cut away all corner pixels outside radius
             let r = (8.0 * ppp).round() as i32; // metrics::RADIUS_CARD is 8.0
             let rgn = CreateRoundRectRgn(0, 0, pw + 1, ph + 1, r * 2, r * 2);
-            if !rgn.is_null() {
-                if SetWindowRgn(hwnd, rgn, 1) == 0 {
-                    DeleteObject(rgn);
-                }
+            if !rgn.is_null() && SetWindowRgn(hwnd, rgn, 1) == 0 {
+                DeleteObject(rgn);
             }
         }
 

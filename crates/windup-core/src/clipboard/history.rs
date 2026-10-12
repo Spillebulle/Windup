@@ -33,12 +33,20 @@ impl ClipboardHistory {
                     hist
                 }
                 Err(e) => {
-                    log::warn!("Failed to parse clipboard history at {}: {}", path.display(), e);
+                    log::warn!(
+                        "Failed to parse clipboard history at {}: {}",
+                        path.display(),
+                        e
+                    );
                     Self::new()
                 }
             },
             Err(e) => {
-                log::warn!("Failed to read clipboard history at {}: {}", path.display(), e);
+                log::warn!(
+                    "Failed to read clipboard history at {}: {}",
+                    path.display(),
+                    e
+                );
                 Self::new()
             }
         }

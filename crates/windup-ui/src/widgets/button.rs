@@ -41,9 +41,7 @@ pub fn button(ui: &mut Ui, p: &Palette, label: &str, emphasis: bool) -> Response
             egui::StrokeKind::Inside,
         );
 
-        let text_col = if emphasis {
-            p.text_strong
-        } else if response.hovered() {
+        let text_col = if emphasis || response.hovered() {
             p.text_strong
         } else {
             p.text

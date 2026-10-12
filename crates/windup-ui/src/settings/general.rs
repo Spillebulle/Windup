@@ -17,17 +17,11 @@ pub fn render(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mode) {
         Some("Dark (Graphite), Light (Paper), or follow system preference."),
         |ui| {
             let mut theme_mode = config.theme_mode;
-            if segmented(
-                ui,
-                *p,
-                &mut theme_mode,
-                &ThemeMode::ALL,
-                |tm| match tm {
-                    ThemeMode::Dark => "Dark",
-                    ThemeMode::Light => "Light",
-                    ThemeMode::System => "System",
-                },
-            ) {
+            if segmented(ui, *p, &mut theme_mode, &ThemeMode::ALL, |tm| match tm {
+                ThemeMode::Dark => "Dark",
+                ThemeMode::Light => "Light",
+                ThemeMode::System => "System",
+            }) {
                 config.theme_mode = theme_mode;
                 config.save();
             }
@@ -98,16 +92,25 @@ fn render_accent_picker(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
         Mode::Dark => oklch(0.674, 0.101, config.accent_hue),
         Mode::Light => oklch(0.55, 0.10, config.accent_hue),
     };
-    let hex_str = format!("#{:02X}{:02X}{:02X}", preview_color.r(), preview_color.g(), preview_color.b());
+    let hex_str = format!(
+        "#{:02X}{:02X}{:02X}",
+        preview_color.r(),
+        preview_color.g(),
+        preview_color.b()
+    );
 
     ui.horizontal(|ui| {
         // Swatch trigger button
         let (swatch_rect, response) = ui.allocate_exact_size(vec2(28.0, 24.0), Sense::click());
-        ui.painter().rect_filled(swatch_rect, metrics::RADIUS_TIGHT, preview_color);
+        ui.painter()
+            .rect_filled(swatch_rect, metrics::RADIUS_TIGHT, preview_color);
         ui.painter().rect_stroke(
             swatch_rect,
             metrics::RADIUS_TIGHT,
-            Stroke::new(metrics::HAIRLINE, if is_open { p.text_strong } else { p.line }),
+            Stroke::new(
+                metrics::HAIRLINE,
+                if is_open { p.text_strong } else { p.line },
+            ),
             egui::StrokeKind::Inside,
         );
 
@@ -134,7 +137,9 @@ fn render_accent_picker(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
 
         if is_open {
             let area_pos = pos2(
-                swatch_rect.left().min(ui.ctx().screen_rect().right() - 280.0),
+                swatch_rect
+                    .left()
+                    .min(ui.ctx().screen_rect().right() - 280.0),
                 swatch_rect.bottom() + 6.0,
             );
 
@@ -182,7 +187,8 @@ fn render_accent_picker(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
                                         Mode::Dark => oklch(0.674, 0.101, curated_h),
                                         Mode::Light => oklch(0.55, 0.10, curated_h),
                                     };
-                                    let (c_rect, c_resp) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
+                                    let (c_rect, c_resp) =
+                                        ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
                                     let is_selected = (config.accent_hue - curated_h).abs() < 4.0;
                                     ui.painter().rect_filled(c_rect, metrics::RADIUS_TIGHT, col);
                                     if is_selected {
@@ -229,7 +235,9 @@ fn render_accent_picker(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
                                     .font(egui::FontId::monospace(text::CONTROL));
                                 if ui.add(te).changed() {
                                     let trimmed = hex_val.trim().trim_start_matches('#');
-                                    if trimmed.len() == 6 && let Ok(val) = u32::from_str_radix(trimmed, 16) {
+                                    if trimmed.len() == 6
+                                        && let Ok(val) = u32::from_str_radix(trimmed, 16)
+                                    {
                                         let r = ((val >> 16) & 0xFF) as u8;
                                         let g = ((val >> 8) & 0xFF) as u8;
                                         let b = (val & 0xFF) as u8;
@@ -240,18 +248,21 @@ fn render_accent_picker(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
                                 }
                                 ui.data_mut(|d| d.insert_temp(hex_input_id, hex_val));
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui
-                                        .button(
-                                            egui::RichText::new("Done")
-                                                .font(strong(text::CONTROL))
-                                                .color(p.text_strong),
-                                        )
-                                        .clicked()
-                                    {
-                                        is_open = false;
-                                    }
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .button(
+                                                egui::RichText::new("Done")
+                                                    .font(strong(text::CONTROL))
+                                                    .color(p.text_strong),
+                                            )
+                                            .clicked()
+                                        {
+                                            is_open = false;
+                                        }
+                                    },
+                                );
                             });
 
                             if ui.input(|i| i.key_pressed(Key::Escape)) {
@@ -289,7 +300,8 @@ fn render_custom_themes(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
             let mut is_open = ui.data_mut(|d| d.get_temp::<bool>(popup_id).unwrap_or(false));
 
             let btn_w = 200.0;
-            let (rect, response) = ui.allocate_exact_size(vec2(btn_w, metrics::BUTTON), Sense::click());
+            let (rect, response) =
+                ui.allocate_exact_size(vec2(btn_w, metrics::BUTTON), Sense::click());
             if response.clicked() {
                 is_open = !is_open;
                 ui.data_mut(|d| d.insert_temp(popup_id, is_open));
@@ -358,23 +370,40 @@ fn render_custom_themes(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
 
                                 // Default option
                                 let is_default = config.custom_theme.is_none();
-                                let (item_rect, item_resp) = ui.allocate_exact_size(vec2(btn_w - 8.0, metrics::BUTTON), Sense::click());
+                                let (item_rect, item_resp) = ui.allocate_exact_size(
+                                    vec2(btn_w - 8.0, metrics::BUTTON),
+                                    Sense::click(),
+                                );
                                 let ip = ui.painter();
                                 if item_resp.hovered() {
-                                    ip.rect_filled(item_rect, metrics::RADIUS_TIGHT, p.control_hover);
+                                    ip.rect_filled(
+                                        item_rect,
+                                        metrics::RADIUS_TIGHT,
+                                        p.control_hover,
+                                    );
                                 }
                                 if is_default {
                                     ip.rect_filled(
-                                        Rect::from_min_size(item_rect.left_top(), vec2(metrics::NAV_MARK_W, item_rect.height())),
+                                        Rect::from_min_size(
+                                            item_rect.left_top(),
+                                            vec2(metrics::NAV_MARK_W, item_rect.height()),
+                                        ),
                                         0.0,
                                         p.accent,
                                     );
                                 }
                                 ip.text(
-                                    pos2(item_rect.min.x + metrics::PAD_STRIP, item_rect.center().y),
+                                    pos2(
+                                        item_rect.min.x + metrics::PAD_STRIP,
+                                        item_rect.center().y,
+                                    ),
                                     Align2::LEFT_CENTER,
                                     "Default (Built-in)",
-                                    if is_default { strong(text::CONTROL) } else { egui::FontId::proportional(text::CONTROL) },
+                                    if is_default {
+                                        strong(text::CONTROL)
+                                    } else {
+                                        egui::FontId::proportional(text::CONTROL)
+                                    },
                                     if is_default { p.text_strong } else { p.text },
                                 );
                                 if item_resp.clicked() {
@@ -385,14 +414,24 @@ fn render_custom_themes(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
 
                                 for t in &custom_themes {
                                     let is_sel = config.custom_theme.as_deref() == Some(&t.id);
-                                    let (t_rect, t_resp) = ui.allocate_exact_size(vec2(btn_w - 8.0, metrics::BUTTON), Sense::click());
+                                    let (t_rect, t_resp) = ui.allocate_exact_size(
+                                        vec2(btn_w - 8.0, metrics::BUTTON),
+                                        Sense::click(),
+                                    );
                                     let tip = ui.painter();
                                     if t_resp.hovered() {
-                                        tip.rect_filled(t_rect, metrics::RADIUS_TIGHT, p.control_hover);
+                                        tip.rect_filled(
+                                            t_rect,
+                                            metrics::RADIUS_TIGHT,
+                                            p.control_hover,
+                                        );
                                     }
                                     if is_sel {
                                         tip.rect_filled(
-                                            Rect::from_min_size(t_rect.left_top(), vec2(metrics::NAV_MARK_W, t_rect.height())),
+                                            Rect::from_min_size(
+                                                t_rect.left_top(),
+                                                vec2(metrics::NAV_MARK_W, t_rect.height()),
+                                            ),
                                             0.0,
                                             p.accent,
                                         );
@@ -402,7 +441,11 @@ fn render_custom_themes(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
                                         pos2(t_rect.min.x + metrics::PAD_STRIP, t_rect.center().y),
                                         Align2::LEFT_CENTER,
                                         label,
-                                        if is_sel { strong(text::CONTROL) } else { egui::FontId::proportional(text::CONTROL) },
+                                        if is_sel {
+                                            strong(text::CONTROL)
+                                        } else {
+                                            egui::FontId::proportional(text::CONTROL)
+                                        },
                                         if is_sel { p.text_strong } else { p.text },
                                     );
                                     if t_resp.clicked() {
@@ -419,11 +462,15 @@ fn render_custom_themes(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
                     });
 
                 if ui.input(|i| i.pointer.any_click()) && !response.clicked() {
-                    let total_menu_rect = Rect::from_min_size(menu_pos, vec2(btn_w, (custom_themes.len() + 1) as f32 * 28.0 + 8.0));
-                    if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                        if !total_menu_rect.contains(pos) && !rect.contains(pos) {
-                            is_open = false;
-                        }
+                    let total_menu_rect = Rect::from_min_size(
+                        menu_pos,
+                        vec2(btn_w, (custom_themes.len() + 1) as f32 * 28.0 + 8.0),
+                    );
+                    if let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+                        && !total_menu_rect.contains(pos)
+                        && !rect.contains(pos)
+                    {
+                        is_open = false;
                     }
                 }
 
@@ -462,7 +509,9 @@ fn render_custom_themes(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
                 if button(ui, p, "Open themes folder", false).clicked() {
                     let _ = std::fs::create_dir_all(&themes_dir);
                     #[cfg(target_os = "windows")]
-                    let _ = std::process::Command::new("explorer").arg(&themes_dir).spawn();
+                    let _ = std::process::Command::new("explorer")
+                        .arg(&themes_dir)
+                        .spawn();
                 }
             });
         },

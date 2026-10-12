@@ -83,7 +83,8 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                             || (GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000 != 0);
 
                         if win_down {
-                            let shift_down = (GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000 != 0)
+                            let shift_down = (GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000
+                                != 0)
                                 || (GetAsyncKeyState(VK_LSHIFT as i32) as u16 & 0x8000 != 0)
                                 || (GetAsyncKeyState(VK_RSHIFT as i32) as u16 & 0x8000 != 0);
 
@@ -98,9 +99,11 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                                 && let Some(sender) = guard.as_ref()
                             {
                                 if shift_down {
-                                    let _ = sender.send(HotkeyEvent::PastePlainText { target_hwnd });
+                                    let _ =
+                                        sender.send(HotkeyEvent::PastePlainText { target_hwnd });
                                 } else {
-                                    let _ = sender.send(HotkeyEvent::ClipboardPopup { target_hwnd });
+                                    let _ =
+                                        sender.send(HotkeyEvent::ClipboardPopup { target_hwnd });
                                 }
                             }
 

@@ -120,11 +120,7 @@ impl SettingsView {
             ui.allocate_rect(mark_rect, egui::Sense::hover());
             ui.painter()
                 .rect_filled(mark_rect, metrics::RADIUS_TIGHT, p.accent);
-            Icon::Wrench.paint(
-                ui.painter(),
-                mark_rect.shrink(2.5),
-                p.accent_ink,
-            );
+            Icon::Wrench.paint(ui.painter(), mark_rect.shrink(2.5), p.accent_ink);
             ui.add_space(metrics::S2);
             ui.label(
                 egui::RichText::new("Windup")

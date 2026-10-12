@@ -2,9 +2,9 @@
 
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContext, RustImageData};
-use windup_core::clipboard::{ClipboardContent, ClipboardEntry};
 use std::thread;
 use std::time::Duration;
+use windup_core::clipboard::{ClipboardContent, ClipboardEntry};
 
 #[cfg(target_os = "windows")]
 pub fn set_clipboard_text(text: &str) -> bool {
@@ -109,7 +109,8 @@ pub fn dispatch_paste_to_target(target_hwnd: isize) {
                 VK_CONTROL, VK_LWIN, VK_RETURN, VK_RWIN, VK_V,
             };
             use windows_sys::Win32::UI::WindowsAndMessaging::{
-                BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+                BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
+                SetForegroundWindow,
             };
 
             // 1. If target_hwnd is non-zero, reliably restore foreground focus using AttachThreadInput

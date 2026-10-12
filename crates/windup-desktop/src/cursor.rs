@@ -13,7 +13,7 @@ pub fn get_cursor_and_monitor() -> ((f32, f32), MonitorBounds) {
     unsafe {
         use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 

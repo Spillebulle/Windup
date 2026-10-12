@@ -110,7 +110,8 @@ impl Default for Config {
 
 impl Config {
     pub fn config_dir() -> Option<PathBuf> {
-        ProjectDirs::from("com", "spillebulle", "windup").map(|proj| proj.config_dir().to_path_buf())
+        ProjectDirs::from("com", "spillebulle", "windup")
+            .map(|proj| proj.config_dir().to_path_buf())
     }
 
     pub fn config_file_path() -> Option<PathBuf> {

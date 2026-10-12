@@ -56,122 +56,127 @@ pub fn slider_usize(
     let mut float_val = (*value as f32).clamp(min as f32, max as f32);
     let mut changed = false;
 
-    let response = ui.horizontal(|ui| {
-        let mut s_resp = slider(
-            ui,
-            p,
-            &mut float_val,
-            min as f32,
-            max as f32,
-            step.max(1) as f32,
-        );
-        if s_resp.dragged() || s_resp.clicked() {
-            *value = float_val.round() as usize;
-            if *value != old_val {
-                changed = true;
-                s_resp.mark_changed();
-            }
-        }
-
-        ui.add_space(metrics::S2);
-
-        // Painted numeric field box per Design-Principles (§7.6)
-        let box_w = 60.0;
-        let box_h = metrics::BUTTON;
-        let id = ui.make_persistent_id("slider_usize_edit_buf");
-        let mut text_buf = ui.data_mut(|d| {
-            d.get_temp::<String>(id)
-                .unwrap_or_else(|| value.to_string())
-        });
-
-        let (rect, resp) = ui.allocate_exact_size(vec2(box_w, box_h), Sense::click_and_drag());
-        let focused_id = ui.make_persistent_id("slider_usize_focused");
-        let mut is_focused = ui.data_mut(|d| d.get_temp::<bool>(focused_id).unwrap_or(false));
-
-        if resp.clicked() {
-            is_focused = true;
-            text_buf = value.to_string();
-            ui.data_mut(|d| d.insert_temp(focused_id, true));
-        }
-
-        // Drag vertically to nudge value
-        if resp.dragged() {
-            let dy = resp.drag_delta().y;
-            if dy.abs() >= 1.0 {
-                let delta = (-dy.signum()) as isize * (step.max(1) as isize);
-                let new_v = ((*value as isize) + delta).clamp(min as isize, max as isize) as usize;
-                if new_v != *value {
-                    *value = new_v;
-                    text_buf = value.to_string();
+    let response = ui
+        .horizontal(|ui| {
+            let mut s_resp = slider(
+                ui,
+                p,
+                &mut float_val,
+                min as f32,
+                max as f32,
+                step.max(1) as f32,
+            );
+            if s_resp.dragged() || s_resp.clicked() {
+                *value = float_val.round() as usize;
+                if *value != old_val {
                     changed = true;
+                    s_resp.mark_changed();
                 }
             }
-        }
 
-        let painter = ui.painter();
-        let border_col = if is_focused {
-            p.accent
-        } else if resp.hovered() {
-            p.text_dim
-        } else {
-            p.line
-        };
+            ui.add_space(metrics::S2);
 
-        painter.rect_filled(rect, metrics::RADIUS_TIGHT, p.field);
-        painter.rect_stroke(
-            rect,
-            metrics::RADIUS_TIGHT,
-            Stroke::new(metrics::HAIRLINE, border_col),
-            egui::StrokeKind::Inside,
-        );
+            // Painted numeric field box per Design-Principles (§7.6)
+            let box_w = 60.0;
+            let box_h = metrics::BUTTON;
+            let id = ui.make_persistent_id("slider_usize_edit_buf");
+            let mut text_buf = ui.data_mut(|d| {
+                d.get_temp::<String>(id)
+                    .unwrap_or_else(|| value.to_string())
+            });
 
-        if is_focused {
-            let mut edit_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect.shrink2(vec2(4.0, 2.0)))
-                    .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
-            );
-            let te = egui::TextEdit::singleline(&mut text_buf)
-                .font(egui::FontId::monospace(text::CONTROL))
-                .text_color(p.text_strong)
-                .frame(false)
-                .margin(egui::Margin::ZERO);
-            let te_resp = edit_ui.add(te);
-            te_resp.request_focus();
+            let (rect, resp) = ui.allocate_exact_size(vec2(box_w, box_h), Sense::click_and_drag());
+            let focused_id = ui.make_persistent_id("slider_usize_focused");
+            let mut is_focused = ui.data_mut(|d| d.get_temp::<bool>(focused_id).unwrap_or(false));
 
-            if te_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                ui.data_mut(|d| d.insert_temp(focused_id, false));
-                if let Ok(parsed) = text_buf.trim().parse::<usize>() {
-                    let clamped = parsed.clamp(min, 100_000);
-                    if clamped != *value {
-                        *value = clamped;
+            if resp.clicked() {
+                is_focused = true;
+                text_buf = value.to_string();
+                ui.data_mut(|d| d.insert_temp(focused_id, true));
+            }
+
+            // Drag vertically to nudge value
+            if resp.dragged() {
+                let dy = resp.drag_delta().y;
+                if dy.abs() >= 1.0 {
+                    let delta = (-dy.signum()) as isize * (step.max(1) as isize);
+                    let new_v =
+                        ((*value as isize) + delta).clamp(min as isize, max as isize) as usize;
+                    if new_v != *value {
+                        *value = new_v;
+                        text_buf = value.to_string();
                         changed = true;
                     }
                 }
-                text_buf = value.to_string();
-            } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                ui.data_mut(|d| d.insert_temp(focused_id, false));
-                text_buf = value.to_string();
             }
-        } else {
-            text_buf = value.to_string();
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                &text_buf,
-                egui::FontId::monospace(text::CONTROL),
-                p.text,
+
+            let painter = ui.painter();
+            let border_col = if is_focused {
+                p.accent
+            } else if resp.hovered() {
+                p.text_dim
+            } else {
+                p.line
+            };
+
+            painter.rect_filled(rect, metrics::RADIUS_TIGHT, p.field);
+            painter.rect_stroke(
+                rect,
+                metrics::RADIUS_TIGHT,
+                Stroke::new(metrics::HAIRLINE, border_col),
+                egui::StrokeKind::Inside,
             );
-        }
 
-        ui.data_mut(|d| d.insert_temp(id, text_buf));
+            if is_focused {
+                let mut edit_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect.shrink2(vec2(4.0, 2.0)))
+                        .layout(egui::Layout::centered_and_justified(
+                            egui::Direction::LeftToRight,
+                        )),
+                );
+                let te = egui::TextEdit::singleline(&mut text_buf)
+                    .font(egui::FontId::monospace(text::CONTROL))
+                    .text_color(p.text_strong)
+                    .frame(false)
+                    .margin(egui::Margin::ZERO);
+                let te_resp = edit_ui.add(te);
+                te_resp.request_focus();
 
-        if changed {
-            s_resp.mark_changed();
-        }
+                if te_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    ui.data_mut(|d| d.insert_temp(focused_id, false));
+                    if let Ok(parsed) = text_buf.trim().parse::<usize>() {
+                        let clamped = parsed.clamp(min, 100_000);
+                        if clamped != *value {
+                            *value = clamped;
+                            changed = true;
+                        }
+                    }
+                    text_buf = value.to_string();
+                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    ui.data_mut(|d| d.insert_temp(focused_id, false));
+                    text_buf = value.to_string();
+                }
+            } else {
+                text_buf = value.to_string();
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &text_buf,
+                    egui::FontId::monospace(text::CONTROL),
+                    p.text,
+                );
+            }
 
-        s_resp
-    }).inner;
+            ui.data_mut(|d| d.insert_temp(id, text_buf));
+
+            if changed {
+                s_resp.mark_changed();
+            }
+
+            s_resp
+        })
+        .inner;
 
     let mut final_resp = response;
     if changed {

@@ -1,7 +1,7 @@
 use crate::theme::{Palette, metrics, strong, text};
 use egui::{Align2, Color32, Key, Sense, Stroke, Ui, pos2, vec2};
-use windup_core::shortcut::Shortcut;
 use std::hash::Hash;
+use windup_core::shortcut::Shortcut;
 
 /// Static keycap badge displaying a keyboard shortcut string.
 pub fn shortcut_badge(ui: &mut Ui, p: &Palette, text: &str) {
@@ -47,9 +47,7 @@ pub fn shortcut_recorder(
 
     let text_str = shortcut.to_string();
     let font_id = egui::FontId::monospace(text::TINY);
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text_str, font_id, p.text);
+    let galley = ui.painter().layout_no_wrap(text_str, font_id, p.text);
     let text_size = galley.size();
 
     let pad_x = metrics::S2;
@@ -91,7 +89,10 @@ pub fn shortcut_recorder(
 
     // Popover for editing shortcut
     if is_open {
-        let area_pos = pos2(rect.left().min(ui.ctx().screen_rect().right() - 260.0), rect.bottom() + 4.0);
+        let area_pos = pos2(
+            rect.left().min(ui.ctx().screen_rect().right() - 260.0),
+            rect.bottom() + 4.0,
+        );
 
         egui::Area::new(popup_id.with("area"))
             .order(egui::Order::Foreground)
@@ -199,21 +200,54 @@ pub fn shortcut_recorder(
                                     }
 
                                     let key_str = match key {
-                                        Key::A => "A", Key::B => "B", Key::C => "C", Key::D => "D",
-                                        Key::E => "E", Key::F => "F", Key::G => "G", Key::H => "H",
-                                        Key::I => "I", Key::J => "J", Key::K => "K", Key::L => "L",
-                                        Key::M => "M", Key::N => "N", Key::O => "O", Key::P => "P",
-                                        Key::Q => "Q", Key::R => "R", Key::S => "S", Key::T => "T",
-                                        Key::U => "U", Key::V => "V", Key::W => "W", Key::X => "X",
-                                        Key::Y => "Y", Key::Z => "Z",
-                                        Key::Num0 => "0", Key::Num1 => "1", Key::Num2 => "2",
-                                        Key::Num3 => "3", Key::Num4 => "4", Key::Num5 => "5",
-                                        Key::Num6 => "6", Key::Num7 => "7", Key::Num8 => "8",
+                                        Key::A => "A",
+                                        Key::B => "B",
+                                        Key::C => "C",
+                                        Key::D => "D",
+                                        Key::E => "E",
+                                        Key::F => "F",
+                                        Key::G => "G",
+                                        Key::H => "H",
+                                        Key::I => "I",
+                                        Key::J => "J",
+                                        Key::K => "K",
+                                        Key::L => "L",
+                                        Key::M => "M",
+                                        Key::N => "N",
+                                        Key::O => "O",
+                                        Key::P => "P",
+                                        Key::Q => "Q",
+                                        Key::R => "R",
+                                        Key::S => "S",
+                                        Key::T => "T",
+                                        Key::U => "U",
+                                        Key::V => "V",
+                                        Key::W => "W",
+                                        Key::X => "X",
+                                        Key::Y => "Y",
+                                        Key::Z => "Z",
+                                        Key::Num0 => "0",
+                                        Key::Num1 => "1",
+                                        Key::Num2 => "2",
+                                        Key::Num3 => "3",
+                                        Key::Num4 => "4",
+                                        Key::Num5 => "5",
+                                        Key::Num6 => "6",
+                                        Key::Num7 => "7",
+                                        Key::Num8 => "8",
                                         Key::Num9 => "9",
-                                        Key::F1 => "F1", Key::F2 => "F2", Key::F3 => "F3",
-                                        Key::F4 => "F4", Key::F5 => "F5", Key::F6 => "F6",
-                                        Key::F7 => "F7", Key::F8 => "F8", Key::F9 => "F9",
-                                        Key::F10 => "F10", Key::F11 => "F11", Key::F12 => "F12",
+                                        Key::F1 => "F1",
+                                        Key::F2 => "F2",
+                                        Key::F3 => "F3",
+                                        Key::F4 => "F4",
+                                        Key::F5 => "F5",
+                                        Key::F6 => "F6",
+                                        Key::F7 => "F7",
+                                        Key::F8 => "F8",
+                                        Key::F9 => "F9",
+                                        Key::F10 => "F10",
+                                        Key::F11 => "F11",
+                                        Key::F12 => "F12",
                                         Key::Space => "Space",
                                         Key::Insert => "Insert",
                                         Key::Delete => "Delete",
@@ -246,7 +280,11 @@ pub fn shortcut_recorder(
                                         egui::Button::new(
                                             egui::RichText::new("Revert")
                                                 .font(egui::FontId::proportional(text::CONTROL))
-                                                .color(if !is_default { p.text } else { p.placeholder }),
+                                                .color(if !is_default {
+                                                    p.text
+                                                } else {
+                                                    p.placeholder
+                                                }),
                                         ),
                                     )
                                     .on_hover_text(format!("Reset to default: {}", def))
@@ -257,18 +295,21 @@ pub fn shortcut_recorder(
                                 }
                             }
 
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui
-                                    .button(
-                                        egui::RichText::new("Done")
-                                            .font(strong(text::CONTROL))
-                                            .color(p.text_strong),
-                                    )
-                                    .clicked()
-                                {
-                                    is_open = false;
-                                }
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .button(
+                                            egui::RichText::new("Done")
+                                                .font(strong(text::CONTROL))
+                                                .color(p.text_strong),
+                                        )
+                                        .clicked()
+                                    {
+                                        is_open = false;
+                                    }
+                                },
+                            );
                         });
                     });
             });
@@ -281,7 +322,8 @@ pub fn shortcut_recorder(
 
 fn mod_chip(ui: &mut Ui, p: &Palette, label: &str, on: &mut bool) -> bool {
     let chip_w = 46.0;
-    let (rect, response) = ui.allocate_exact_size(vec2(chip_w, metrics::BUTTON * 0.8), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(chip_w, metrics::BUTTON * 0.8), Sense::click());
     let clicked = response.clicked();
     if clicked {
         *on = !*on;

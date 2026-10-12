@@ -75,7 +75,9 @@ pub fn render(ui: &mut Ui, config: &mut Config, p: &Palette) {
 
                         let default_shortcut = match tool_id {
                             ToolId::ClipboardHistory => windup_core::shortcut::Shortcut::super_v(),
-                            ToolId::PastePlainText => windup_core::shortcut::Shortcut::super_shift_v(),
+                            ToolId::PastePlainText => {
+                                windup_core::shortcut::Shortcut::super_shift_v()
+                            }
                         };
 
                         let mut shortcut = config.tool_shortcut(tool_id).clone();

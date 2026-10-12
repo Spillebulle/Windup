@@ -3,8 +3,8 @@
 use crate::icons::Icon;
 use crate::theme::{Palette, metrics, strong, text};
 use egui::{Color32, Key, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
-use windup_core::clipboard::{ClipboardContent, ClipboardEntry, ClipboardHistory};
 use std::collections::HashMap;
+use windup_core::clipboard::{ClipboardContent, ClipboardEntry, ClipboardHistory};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusedButton {
@@ -109,7 +109,8 @@ impl PopupView {
 
             // Direct Delete key, or Backspace when search query is empty
             let is_search_empty = self.search_query.is_empty();
-            let should_delete = i.key_pressed(Key::Delete) || (is_search_empty && i.key_pressed(Key::Backspace));
+            let should_delete =
+                i.key_pressed(Key::Delete) || (is_search_empty && i.key_pressed(Key::Backspace));
             if should_delete && let Some(entry) = filtered.get(self.selected_index) {
                 action = Some(PopupAction::Delete(entry.id));
             }
@@ -255,8 +256,7 @@ impl PopupView {
             if self.scroll_to_selected {
                 let target_top = self.selected_index as f32 * ROW_HEIGHT;
                 let target_bottom = target_top + ROW_HEIGHT;
-                let current_scroll: f32 =
-                    ui.ctx().data(|d| d.get_temp(scroll_id)).unwrap_or(0.0);
+                let current_scroll: f32 = ui.ctx().data(|d| d.get_temp(scroll_id)).unwrap_or(0.0);
                 let view_h = (ui.available_height() - 20.0).max(100.0);
                 if target_top < current_scroll {
                     scroll_area = scroll_area.vertical_scroll_offset(target_top);
@@ -278,7 +278,8 @@ impl PopupView {
                 }
             });
 
-            ui.ctx().data_mut(|d| d.insert_temp(scroll_id, output.state.offset.y));
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(scroll_id, output.state.offset.y));
         });
 
         // -------------------------------------------------------------
@@ -286,7 +287,10 @@ impl PopupView {
         // -------------------------------------------------------------
         let grip_size = vec2(16.0, 16.0);
         let grip_rect = Rect::from_min_size(
-            pos2(total_rect.max.x - grip_size.x, total_rect.max.y - grip_size.y),
+            pos2(
+                total_rect.max.x - grip_size.x,
+                total_rect.max.y - grip_size.y,
+            ),
             grip_size,
         );
         let grip_resp = ui
@@ -298,7 +302,8 @@ impl PopupView {
             let current_size = ui.ctx().screen_rect().size();
             let new_w = (current_size.x + delta.x).clamp(280.0, 900.0);
             let new_h = (current_size.y + delta.y).clamp(260.0, 1000.0);
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(new_w, new_h)));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(new_w, new_h)));
             action = Some(PopupAction::Resize(new_w, new_h));
         }
 
@@ -342,7 +347,8 @@ impl PopupView {
             let new_w = (current_size.x - delta.x).clamp(280.0, 900.0);
             let new_h = (current_size.y + delta.y).clamp(260.0, 1000.0);
             let actual_dx = current_size.x - new_w;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(new_w, new_h)));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(new_w, new_h)));
             action = Some(PopupAction::ResizeLeft(new_w, new_h, actual_dx));
         }
 
@@ -614,8 +620,7 @@ impl PopupView {
 
             // 3. Little Pen button for images (placeholder for edit mode)
             if entry.is_image() {
-                let is_pen_focused =
-                    is_selected && self.focused_button == Some(FocusedButton::Pen);
+                let is_pen_focused = is_selected && self.focused_button == Some(FocusedButton::Pen);
                 let pen_btn_rect = Rect::from_center_size(
                     pos2(del_btn_rect.left() - 14.0, rect.center().y),
                     vec2(22.0, 22.0),
