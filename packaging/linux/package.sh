@@ -265,12 +265,16 @@ if command -v makepkg >/dev/null 2>&1; then
     (cd "$arch_dir" && PKGDEST="$outdir" makepkg --nodeps --noconfirm -f >/dev/null)
 elif command -v docker >/dev/null 2>&1; then
     chmod -R a+rwX "$arch_dir"
-    docker run --rm -v "$arch_dir:/build" -v "$outdir:/out" archlinux:base-devel bash -c '
+    # makepkg refuses to run as root, so a throwaway user builds; everything
+    # is handed back to the caller afterwards, or the cleanup trap could not
+    # delete what the container left.
+    docker run --rm -e HOST_ID="$(id -u):$(id -g)"         -v "$arch_dir:/build" -v "$outdir:/out" archlinux:base-devel bash -c '
         set -e
         useradd -m builder
         chown -R builder /build
         su builder -c "cd /build && makepkg --nodeps --noconfirm -f"
         cp /build/*.pkg.tar.zst /out/
+        chown -R "$HOST_ID" /build /out
     ' >/dev/null
 else
     echo "!! neither makepkg nor docker: no Arch package" >&2
