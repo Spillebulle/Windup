@@ -9,8 +9,10 @@ _spillebulle_archive() {
     local conf=/etc/pacman.d/spillebulle
     local fpr=7A9EA69E033F3C3EF4F53EB4A72BC0FD5E061ADA
     [ -e "$conf.disabled" ] && return 0
-    if command -v pacman-key >/dev/null 2>&1 \
-        && ! pacman-key --list-keys "$fpr" >/dev/null 2>&1; then
+    # Every time, not only when the key is missing: both are idempotent, and
+    # a key present but never signed (an earlier attempt that failed) would
+    # otherwise stay "unknown trust" for ever and stop `pacman -Syu`.
+    if command -v pacman-key >/dev/null 2>&1; then
         pacman-key --add /usr/share/windup/spillebulle-archive.asc >/dev/null 2>&1 || true
         pacman-key --lsign-key "$fpr" >/dev/null 2>&1 || true
     fi

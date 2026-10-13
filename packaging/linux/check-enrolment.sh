@@ -64,6 +64,10 @@ rpm)
     dnf -y -q makecache --repo spillebulle || fail "the archive does not verify"
     ;;
 arch)
+    # The archlinux image ships its keyring without the local master key,
+    # which every installed system has (`pacman-key --init` at install time)
+    # and which a local signature needs.
+    pacman-key --init >/dev/null 2>&1
     pacman -Sy --noconfirm --needed archlinux-keyring >/dev/null
     pacman -U --noconfirm "$dist"/windup-bin-*.pkg.tar.zst >/dev/null
     windup --help >/dev/null
