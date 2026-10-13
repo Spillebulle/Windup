@@ -457,6 +457,29 @@ x11_session() {
         bad "x11: paste-plain gave '$got', wanted 'xplain-$$'"
     fi
 
+    # Started in the background, the window is hidden; `windup` shows it,
+    # closing it hides it again without stopping Windup, and it comes back.
+    visible() { xdotool search --onlyvisible --name '^Windup$' >/dev/null 2>&1; }
+    "$bin"
+    if wait_for 50 visible; then
+        ok "x11: a second launch showed the window"
+    else
+        bad "x11: a second launch did not show the window"
+    fi
+    xdotool search --onlyvisible --name '^Windup$' windowactivate --sync key --clearmodifiers alt+F4 2>/dev/null
+    if wait_for 30 sh -c '! xdotool search --onlyvisible --name "^Windup$" >/dev/null 2>&1' &&
+        kill -0 $windup_pid 2>/dev/null; then
+        ok "x11: closing the window hid it and Windup kept running"
+    else
+        bad "x11: closing the window did not hide it, or Windup stopped"
+    fi
+    "$bin"
+    if wait_for 50 visible; then
+        ok "x11: and it comes back"
+    else
+        bad "x11: the window did not come back"
+    fi
+
     kill $windup_pid $wm_pid $xvfb_pid 2>/dev/null
     wait 2>/dev/null
 }
