@@ -96,8 +96,22 @@ secret_case() {
         types=$(xclip -o -selection clipboard -t TARGETS)
     fi
     sleep 1.5
+    local later
+    if [ "$session" = wayland ]; then
+        later=$(wl-paste --list-types)
+    else
+        later=$(xclip -o -selection clipboard -t TARGETS)
+    fi
     if ! printf '%s' "$types" | grep -q x-kde-passwordManagerHint; then
         bad "$session: the secret copy was not marked: $types"
+    elif ! printf '%s' "$later" | grep -q x-kde-passwordManagerHint; then
+        # Weston's clipboard module replaces every selection with its own
+        # text-only copy at once, before a 250 ms poll can see the mark.
+        # Mutter and Klipper only take over when the owner quits, which is
+        # the case below. Known; see docs/linux.md.
+        echo "  skip  $session: the compositor replaced the marked copy at once (offers now: $(echo $later))"
+        wait $pid 2>/dev/null
+        return
     elif history_has "$secret"; then
         bad "$session: a password manager's copy was recorded"
     else
