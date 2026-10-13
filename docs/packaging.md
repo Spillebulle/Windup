@@ -97,10 +97,11 @@ container to prove they resolve. `packaging/check.sh` keeps the app id
 file, the icons and the program.
 
 The `.deb` and `.rpm` carry `packaging/linux/spillebulle-archive.asc` and write
-the archive's source on install (STYLE-GUIDE §18.2). For the archive to carry
-Windup, `Spillebulle/Windup` has to be listed in `../Packages/projects` and the
-release workflow has to send the archive its dispatch, as Muster's does; neither
-is done yet.
+the archive's source on install (STYLE-GUIDE §18.2). `Spillebulle/Windup` is
+listed in `../Packages/projects`, and the last step of `release.yml` asks the
+archive to rebuild once the release exists. That step needs the
+`ARCHIVE_DISPATCH_TOKEN` secret (see the archive's README) and is skipped
+without it; the archive's weekly run then picks the release up instead.
 
 Built on Ubuntu 22.04, so the binary needs glibc 2.35 or newer. No ARM64:
 GitHub's ARM runners are not free for private repositories, and the Arch image
