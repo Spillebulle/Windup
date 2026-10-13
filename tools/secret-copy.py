@@ -37,21 +37,16 @@ def copy(window, why):
 
 def activate(app):
     window = Gtk.ApplicationWindow(application=app, title="secret-copy")
-    done = []
 
     keys = Gtk.EventControllerKey()
     keys.connect("key-pressed", lambda *_: copy(window, "key") or False)
     window.add_controller(keys)
 
-    def on_active(*_):
-        if window.is_active() and not done:
-            done.append(True)
-            GLib.timeout_add(500, lambda: copy(window, "timer") or False)
-            GLib.timeout_add(int(keep * 1000) + 500, app.quit)
-
-    window.connect("notify::is-active", on_active)
+    # X11 needs no focus to take the clipboard, and a window manager with
+    # no input devices may never give any.
     window.present()
-    on_active()
+    GLib.timeout_add(500, lambda: copy(window, "timer") or False)
+    GLib.timeout_add(int(keep * 1000) + 500, app.quit)
 
 
 app = Gtk.Application(application_id="io.github.spillebulle.windup.SecretCopy")
