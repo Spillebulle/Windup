@@ -47,9 +47,10 @@ essentially any machine from the last ten years.
 On Linux, install the package for your distribution (`sudo apt install
 ./windup_0.1.0_amd64.deb`, `sudo dnf install ./windup-0.1.0-1.x86_64.rpm`,
 `sudo pacman -U windup-bin-0.1.0-1-x86_64.pkg.tar.zst`) and start Windup from
-the app menu. The `.deb` and `.rpm` also add the
+the app menu. Each of the three packages also adds the
 [Spillebulle package archive](https://spillebulle.github.io/packages/), so
-Windup updates with the rest of the system. Wayland and X11 both work.
+Windup updates with the rest of the system (`sudo apt upgrade`,
+`sudo dnf upgrade`, `sudo pacman -Syu`). Wayland and X11 both work.
 **Most Wayland desktops do not let an app take Super+V by itself**: bind it
 once to `windup --popup` in your desktop's keyboard settings.
 [`docs/linux.md`](docs/linux.md) has the steps for COSMIC, GNOME, KDE, Sway,

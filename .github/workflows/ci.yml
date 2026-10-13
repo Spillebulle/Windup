@@ -84,12 +84,18 @@ jobs:
           rpm -qpR dist/*.rpm
 
       # Installs the packages in clean distributions: the dependency lists are
-      # hand-written, so this is what proves they resolve.
+      # hand-written, so this is what proves they resolve. Each one must also
+      # enrol the machine as Spillebulle/packages ENROLMENT.md says and then
+      # read the live archive with the key it put there. Debian also installs
+      # a second enrolling package, and upgrades a machine enrolled the old way.
       - name: Install on Debian, Fedora and Arch
         run: |
-          docker run --rm -v "$PWD/dist:/dist" debian:12 sh -c             'apt-get update -qq && apt-get install -y -qq /dist/*.deb >/dev/null && windup --help'
-          docker run --rm -v "$PWD/dist:/dist" fedora:41 sh -c             'dnf install -y -q /dist/*.rpm && windup --help'
-          docker run --rm -v "$PWD/dist:/dist" archlinux:latest sh -c             'pacman -Sy --noconfirm --needed archlinux-keyring >/dev/null && pacman -U --noconfirm /dist/*.pkg.tar.zst >/dev/null && windup --help'
+          check="sh /src/packaging/linux/check-enrolment.sh"
+          mounts="-v $PWD/dist:/dist -v $PWD:/src:ro"
+          docker run --rm $mounts debian:12 $check deb /dist
+          docker run --rm $mounts debian:12 $check deb-legacy /dist
+          docker run --rm $mounts fedora:41 $check rpm /dist
+          docker run --rm $mounts archlinux:latest $check arch /dist
           chmod +x dist/*.AppImage
           APPIMAGE_EXTRACT_AND_RUN=1 dist/*.AppImage --help
 

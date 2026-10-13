@@ -54,3 +54,24 @@ version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
 grep -q "<release version=\"$version\"" "$metainfo" ||
     fail "the AppStream file has no <release> for $version"
 ok "AppStream lists release $version"
+
+# The archive enrolment (Spillebulle/packages ENROLMENT.md). The fingerprint
+# the Arch scriptlet trusts must be the key the packages carry, and every
+# path must be the contract's: a mismatch installs fine and silently never
+# updates.
+fpr=$(sed -n 's/^ *local fpr=\([0-9A-F]*\)$/\1/p' packaging/linux/windup.install)
+if command -v gpg >/dev/null 2>&1; then
+    key_fpr=$(gpg --show-keys --with-colons packaging/linux/spillebulle-archive.asc 2>/dev/null |
+        awk -F: '/^fpr:/ { print $10; exit }')
+    [ "$fpr" = "$key_fpr" ] || fail "windup.install trusts $fpr, the key is $key_fpr"
+fi
+grep -q 'pacman-key --add /usr/share/windup/spillebulle-archive.asc' packaging/linux/windup.install ||
+    fail "windup.install does not add the key the package ships"
+grep -q 'share/windup/$ARCHIVE_KEYRING.asc' packaging/linux/package.sh ||
+    fail "the Arch package does not ship /usr/share/windup/spillebulle-archive.asc"
+grep -q 'install -m644 /usr/share/windup/$ARCHIVE_KEYRING.gpg' packaging/linux/package.sh ||
+    fail "the postinst does not copy the key the .deb ships"
+if grep -q 'deb/usr/share/keyrings/' packaging/linux/package.sh; then
+    fail "the .deb ships /usr/share/keyrings/, which a second application's .deb would conflict with"
+fi
+ok "archive enrolment matches ENROLMENT.md"
