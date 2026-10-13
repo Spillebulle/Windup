@@ -71,7 +71,16 @@ secret_case() {
     local session=$1 secret=$2 types
     python3 "$(dirname "$0")/secret-copy.py" "$secret" 3 >"$art/$session-secret.log" 2>&1 &
     local pid=$!
-    if ! wait_for 80 grep -q copied "$art/$session-secret.log"; then
+    if [ "$session" = wayland ]; then
+        # GTK claims the Wayland clipboard with the serial of the last key
+        # press; give it one.
+        wait_for 80 grep -q "copied (timer)" "$art/$session-secret.log"
+        wtype -k space
+        local copied="copied (key)"
+    else
+        local copied="copied (timer)"
+    fi
+    if ! wait_for 80 grep -qF "$copied" "$art/$session-secret.log"; then
         bad "$session: the secret copy helper did not copy"
         cat "$art/$session-secret.log"
         kill $pid 2>/dev/null

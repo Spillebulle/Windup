@@ -6,7 +6,9 @@ since xclip and wl-copy offer only one type.
     secret-copy.py <text> [seconds-to-keep-it]
 
 Needs python3-gi and gir1.2-gtk-4.0. On Wayland a client may only set the
-clipboard while it has focus, so a small window opens for the duration.
+clipboard in answer to input, so a small window opens and copies again when
+a key is pressed in it ("copied (key)"); X11 takes the copy straight away
+("copied (timer)").
 """
 
 import sys
@@ -21,7 +23,7 @@ text = sys.argv[1].encode()
 keep = float(sys.argv[2]) if len(sys.argv) > 2 else 3.0
 
 
-def copy(window):
+def copy(window, why):
     provider = Gdk.ContentProvider.new_union(
         [
             Gdk.ContentProvider.new_for_bytes("text/plain;charset=utf-8", GLib.Bytes.new(text)),
@@ -30,20 +32,21 @@ def copy(window):
         ]
     )
     window.get_clipboard().set_content(provider)
-    print("copied", flush=True)
+    print(f"copied ({why})", flush=True)
 
 
 def activate(app):
     window = Gtk.ApplicationWindow(application=app, title="secret-copy")
     done = []
 
+    keys = Gtk.EventControllerKey()
+    keys.connect("key-pressed", lambda *_: copy(window, "key") or False)
+    window.add_controller(keys)
+
     def on_active(*_):
         if window.is_active() and not done:
             done.append(True)
-            # Active comes from the toplevel's state, a moment before the
-            # keyboard focus whose serial the compositor checks the
-            # clipboard request against.
-            GLib.timeout_add(500, lambda: copy(window) or False)
+            GLib.timeout_add(500, lambda: copy(window, "timer") or False)
             GLib.timeout_add(int(keep * 1000) + 500, app.quit)
 
     window.connect("notify::is-active", on_active)
