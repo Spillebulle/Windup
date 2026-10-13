@@ -113,6 +113,8 @@ pub enum Request {
     OpenPopup(PopupSetup),
     /// Read off the clipboard by a reader thread.
     Captured(Capture),
+    /// The text of a password manager's copy, to remember and never record.
+    Secret(String),
     /// The current clipboard's text, read for paste-as-plain-text.
     PlainRead(String),
 }
@@ -374,6 +376,7 @@ impl State {
                 self.paste_after(SHORTCUT_SETTLE);
             }
             Request::Captured(capture) => self.ingest(capture),
+            Request::Secret(text) => self.ingest.mark_secret(&text),
             Request::OpenPopup(setup) => self.open_popup(setup),
         }
     }
@@ -404,9 +407,12 @@ impl State {
                 let tx = self.loop_tx.clone();
                 let (mime, html) = (pick.mime.clone(), pick.html.clone());
                 clip.read_current(conn, &mime, html.as_deref(), move |main, html| {
-                    if let Some(capture) = main.and_then(|m| clip::decode(&pick, m, html)) {
-                        let _ = tx.send(Request::Captured(capture));
-                    }
+                    let request = match main.and_then(|m| clip::decode(&pick, m, html)) {
+                        Some(Capture::Text { text, .. }) if pick.secret => Request::Secret(text),
+                        Some(capture) => Request::Captured(capture),
+                        None => return,
+                    };
+                    let _ = tx.send(request);
                 });
             }
         }

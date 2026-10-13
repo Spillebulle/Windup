@@ -53,6 +53,9 @@ impl ClipboardMonitor {
                 let capture_images = save_images.load(Ordering::Relaxed);
 
                 if is_secret(&ctx) {
+                    if let Ok(text) = ctx.get_text() {
+                        ingest.mark_secret(&text);
+                    }
                     continue;
                 }
 

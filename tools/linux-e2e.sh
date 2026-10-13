@@ -103,7 +103,15 @@ secret_case() {
     else
         ok "$session: a password manager's copy is not recorded"
     fi
+    # A clipboard manager keeps the text when the password manager quits
+    # and offers it again, unmarked.
     wait $pid 2>/dev/null
+    sleep 1.5
+    if history_has "$secret"; then
+        bad "$session: the password was recorded once its owner quit"
+    else
+        ok "$session: nor once the password manager quits"
+    fi
 }
 
 history_has() { [ -f "$history" ] && grep -q -- "$1" "$history"; }
