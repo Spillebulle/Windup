@@ -93,6 +93,13 @@ jobs:
           chmod +x dist/*.AppImage
           APPIMAGE_EXTRACT_AND_RUN=1 dist/*.AppImage --help
 
+      # For trying a branch on a real desktop before it is released.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist
+          retention-days: 14
+
   # Every target the release builds is built here too, so a green CI on the
   # commit being tagged means the release will build. Adding a row to
   # release.yml's matrix means adding it here in the same commit.
