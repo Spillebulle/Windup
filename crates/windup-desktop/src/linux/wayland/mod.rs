@@ -294,7 +294,7 @@ impl State {
             .then(|| globals.bind(&qh, 1..=1, ()).ok())
             .flatten();
 
-        let state = State {
+        let mut state = State {
             registry: RegistryState::new(&globals),
             seat_state: SeatState::new(&globals, &qh),
             output_state: OutputState::new(&globals, &qh),
@@ -322,6 +322,11 @@ impl State {
             popup_scale: None,
             redraw_queued: false,
         };
+        // sctk calls `new_seat` only for seats announced later; the ones
+        // there at startup (all of them, in practice) are bound silently.
+        for seat in state.seat_state.seats() {
+            state.adopt_seat(seat);
+        }
         log::info!(
             "Wayland: data-control {}, virtual keyboard {}, layer-shell {}",
             state.clip.is_some(),
@@ -329,6 +334,17 @@ impl State {
             state.layer_shell.is_some()
         );
         Ok((event_loop, state))
+    }
+
+    /// Takes the first seat as the one Windup watches and types on.
+    fn adopt_seat(&mut self, seat: wl_seat::WlSeat) {
+        if self.seat.is_some() {
+            return;
+        }
+        if let Some(clip) = self.clip.as_mut() {
+            clip.attach(&seat, &self.qh);
+        }
+        self.seat = Some(seat);
     }
 
     fn handle_request(&mut self, request: Request) {
@@ -752,13 +768,8 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn new_seat(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
-        if self.seat.is_none() {
-            if let Some(clip) = self.clip.as_mut() {
-                clip.attach(&seat, qh);
-            }
-            self.seat = Some(seat);
-        }
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        self.adopt_seat(seat);
     }
 
     fn new_capability(

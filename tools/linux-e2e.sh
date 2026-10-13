@@ -55,6 +55,17 @@ field() {
     field_pid=$!
 }
 
+# Waits up to five seconds for the field to close, then closes it, so a paste
+# that never arrived fails the case instead of hanging the run.
+field_done() {
+    for _ in $(seq 50); do
+        kill -0 "$field_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill "$field_pid" 2>/dev/null
+    wait "$field_pid" 2>/dev/null
+}
+
 start_windup() {
     RUST_LOG=info,wgpu_hal=error,wgpu_core=error,naga=error \
         "$bin" --background >"$art/$1-windup.log" 2>&1 &
@@ -94,7 +105,8 @@ EOF
 
     start_windup wayland || { kill $sway_pid; return; }
 
-    if grep -q "host: Layer" "$art/wayland-windup.log"; then
+    # The socket is bound before the backend is chosen and logged.
+    if wait_for 50 grep -q "host: Layer" "$art/wayland-windup.log"; then
         ok "wayland: chose the layer-shell host"
     else
         bad "wayland: did not choose the layer-shell host"
@@ -133,7 +145,7 @@ EOF
     wtype -k Return
     sleep 0.8
     wtype -k Return
-    wait $field_pid 2>/dev/null
+    field_done
     got=$(cat "$home/field1")
     if [ "$got" = "first-$$" ]; then
         ok "wayland: popup pasted the picked entry into the focused window"
@@ -162,7 +174,7 @@ EOF
     "$bin" --paste-plain
     sleep 0.8
     wtype -k Return
-    wait $field_pid 2>/dev/null
+    field_done
     got=$(cat "$home/field2")
     if [ "$got" = "plain-$$" ]; then
         ok "wayland: paste-plain pasted into the focused window"
@@ -235,7 +247,7 @@ x11_session() {
     xdotool key Return
     sleep 0.8
     xdotool key Return
-    wait $field_pid 2>/dev/null
+    field_done
     got=$(cat "$home/xfield1")
     if [ "$got" = "xfirst-$$" ]; then
         ok "x11: Super+V popup pasted the picked entry into the focused window"
@@ -251,7 +263,7 @@ x11_session() {
     "$bin" --paste-plain
     sleep 0.8
     xdotool key Return
-    wait $field_pid 2>/dev/null
+    field_done
     got=$(cat "$home/xfield2")
     if [ "$got" = "xplain-$$" ]; then
         ok "x11: paste-plain pasted into the focused window"
