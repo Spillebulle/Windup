@@ -1,13 +1,14 @@
 #!/bin/bash
 # End-to-end test of Windup on Linux, against real compositors with no
 # screen: a headless Sway (Wayland: layer-shell, data-control, virtual
-# keyboard, the same protocols COSMIC offers) and Xvfb (X11).
+# keyboard, the same protocols COSMIC offers), a headless Weston (Wayland
+# with none of them, as on GNOME) and Xvfb (X11).
 #
-#   tools/linux-e2e.sh <path-to-windup> [wayland|x11|all] [artefact-dir]
+#   tools/linux-e2e.sh <path-to-windup> [wayland|weston|x11|all] [artefact-dir]
 #
 # Needs, on Debian/Ubuntu: sway wl-clipboard wtype grim zenity xvfb xdotool
 # xclip x11-utils openbox imagemagick mesa-vulkan-drivers python3-gi
-# gir1.2-gtk-4.0. CI installs them;
+# gir1.2-gtk-4.0 weston xwayland. CI installs them;
 # see the e2e job in ci.yml.
 #
 # Each case copies something, drives Windup the way a person would (a
@@ -69,7 +70,10 @@ keys_later() {
 # history while the copy is really marked (the case proves nothing if not).
 secret_case() {
     local session=$1 secret=$2 types
-    python3 "$(dirname "$0")/secret-copy.py" "$secret" 3 >"$art/$session-secret.log" 2>&1 &
+    # Without data-control, Windup reads the X clipboard; copy there.
+    local backend=$GDK_BACKEND
+    [ "$session" = weston ] && backend=x11
+    GDK_BACKEND=$backend python3 "$(dirname "$0")/secret-copy.py" "$secret" 3 >"$art/$session-secret.log" 2>&1 &
     local pid=$!
     if [ "$session" = wayland ]; then
         # GTK claims the Wayland clipboard with the serial of the last key
@@ -283,6 +287,91 @@ EOF
     wait 2>/dev/null
 }
 
+# --- Wayland without layer-shell ----------------------------------------------
+#
+# Weston offers neither layer-shell nor data-control nor a virtual keyboard,
+# like GNOME: Windup keeps no window, reads the clipboard through XWayland
+# and opens the popup as a window of its own. Weston has no way to inject
+# keys, so this checks the parts that differ: the backend, the copy, and
+# that the shortcut opens and closes the popup while nothing else is shown.
+
+weston_session() {
+    echo "== Wayland without layer-shell (headless Weston + XWayland)"
+    fresh_home
+    unset DISPLAY SWAYSOCK
+    weston --backend=headless --renderer=pixman --width=1600 --height=1000 \
+        --socket=wayland-w --xwayland >"$art/weston.log" 2>&1 &
+    weston_pid=$!
+    if ! wait_for 100 test -S "$XDG_RUNTIME_DIR/wayland-w"; then
+        bad "weston: did not start"
+        cat "$art/weston.log"
+        return
+    fi
+    export WAYLAND_DISPLAY=wayland-w GDK_BACKEND=wayland
+    # Weston starts XWayland on the first X client; it names the display
+    # in its log as soon as it listens.
+    wait_for 50 grep -q "xserver listening on display" "$art/weston.log"
+    DISPLAY=$(grep -o "listening on display :[0-9]*" "$art/weston.log" | grep -o ":[0-9]*" | head -1)
+    export DISPLAY
+
+    start_windup weston || { kill $weston_pid; return; }
+    log=$art/weston-windup.log
+
+    if wait_for 50 grep -q "host: Window" "$log"; then
+        ok "weston: chose a window of its own for the popup"
+    else
+        bad "weston: did not choose the window host"
+        grep -i backend "$log"
+    fi
+
+    printf 'walpha-%s' "$$" | xclip -selection clipboard
+    if wait_for 30 history_has "walpha-$$"; then
+        ok "weston: copied text is recorded through XWayland"
+    else
+        bad "weston: copied text was not recorded"
+    fi
+
+    secret_case weston "whunter2-$$"
+
+    # Windup draws nothing until asked, then the popup has to come up and
+    # take the second press of the shortcut as "close".
+    "$bin" --popup
+    if wait_for 150 grep -q "popup window: shown" "$log"; then
+        ok "weston: the shortcut opened the popup window"
+    else
+        bad "weston: the popup window did not open"
+    fi
+    "$bin" --popup
+    if wait_for 50 grep -q "popup window: closed" "$log"; then
+        ok "weston: the shortcut again closed it"
+    else
+        bad "weston: the popup window did not close"
+    fi
+    "$bin" --popup
+    if wait_for 150 sh -c '[ "$(grep -c "popup window: shown" "$1")" -ge 2 ]' _ "$log"; then
+        ok "weston: and opens it again"
+    else
+        bad "weston: the popup window did not open a second time"
+    fi
+    "$bin" --popup
+
+    "$bin"
+    if wait_for 80 sh -c 'pgrep -f -- "--settings" >/dev/null'; then
+        ok "weston: a second launch opened the settings window"
+    else
+        bad "weston: the settings window did not open"
+    fi
+    pkill -f -- "$bin --settings"
+    if kill -0 $windup_pid 2>/dev/null; then
+        ok "weston: keeps running"
+    else
+        bad "weston: stopped"
+    fi
+
+    kill $windup_pid $weston_pid 2>/dev/null
+    wait 2>/dev/null
+}
+
 # --- X11 --------------------------------------------------------------------
 
 x11_session() {
@@ -353,7 +442,8 @@ x11_session() {
 case $which in
     wayland) wayland_session ;;
     x11) x11_session ;;
-    all) wayland_session; x11_session ;;
+    weston) weston_session ;;
+    all) wayland_session; weston_session; x11_session ;;
     *) echo "unknown session '$which'" >&2; exit 2 ;;
 esac
 

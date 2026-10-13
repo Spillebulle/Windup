@@ -171,7 +171,7 @@ jobs:
       - name: Install dependencies
         run: |
           sh packaging/linux/dependencies.sh
-          sudo apt-get install -y sway wl-clipboard wtype grim zenity             xvfb x11-utils xdotool xclip openbox imagemagick mesa-vulkan-drivers python3-gi gir1.2-gtk-4.0
+          sudo apt-get install -y sway wl-clipboard wtype grim zenity             xvfb x11-utils xdotool xclip openbox imagemagick mesa-vulkan-drivers python3-gi gir1.2-gtk-4.0 weston xwayland
 
       - name: Build
         run: cargo build -p windup-desktop

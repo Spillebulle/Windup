@@ -646,7 +646,7 @@ fn main() -> eframe::Result<()> {
 }
 
 /// The desktop entry, icon and Wayland app id all carry this name.
-const APP_ID: &str = "io.github.spillebulle.windup";
+pub(crate) const APP_ID: &str = "io.github.spillebulle.windup";
 
 #[cfg(target_os = "linux")]
 static LAUNCHED_IN_BACKGROUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -703,8 +703,8 @@ fn linux_startup() -> Option<Startup> {
     };
 
     let plan = linux::detect();
-    let listener = if plan.host == platform::Host::Layer {
-        match linux::run_layer_host(plan, listener, !background) {
+    let listener = if plan.host != platform::Host::Viewport {
+        match linux::run_background(plan, listener, !background) {
             Ok(()) => return None,
             // The Wayland service would not start: carry on as an eframe app.
             Err(listener) => listener,

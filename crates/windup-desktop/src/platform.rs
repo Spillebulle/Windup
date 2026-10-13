@@ -22,12 +22,17 @@ pub enum Target {
 /// Where the clipboard popup is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Host {
-    /// A secondary egui viewport of the eframe app: Windows, X11, and Wayland
-    /// compositors without layer-shell (GNOME), where the compositor places it.
+    /// A secondary egui viewport of the eframe app: Windows and X11, which
+    /// can keep the app's own window hidden while it runs.
     Viewport,
     /// A layer-shell surface on the overlay layer, drawn by our own Wayland
     /// connection. No eframe window exists until settings are opened.
     Layer,
+    /// An ordinary window opened for each popup, with no window in between:
+    /// Wayland compositors without layer-shell (GNOME). Wayland cannot hide a
+    /// window, and one that is not shown never draws, so a hidden eframe app
+    /// would never see the shortcut. The compositor places the popup.
+    Window,
 }
 
 /// Which data-control protocol the compositor speaks.
@@ -146,7 +151,7 @@ pub fn detect(env: &Env, globals: Option<&[String]>) -> Plan {
         let host = if has(LAYER_SHELL) && data_control.is_some() {
             Host::Layer
         } else {
-            Host::Viewport
+            Host::Window
         };
         let paste = if has(VIRTUAL_KEYBOARD) {
             PasteVia::VirtualKeyboard
@@ -229,13 +234,13 @@ mod tests {
     }
 
     #[test]
-    fn gnome_falls_back_to_a_viewport_and_polling() {
+    fn gnome_falls_back_to_a_window_and_polling() {
         let g = globals(&["wl_compositor", "xdg_wm_base", "gtk_shell1"]);
         let plan = detect(&wayland(), Some(&g));
         assert_eq!(
             plan,
             Plan {
-                host: Host::Viewport,
+                host: Host::Window,
                 watch: Watch::Poll,
                 paste: PasteVia::Portal,
                 hotkeys: HotkeysVia::Command,
@@ -248,7 +253,7 @@ mod tests {
     fn data_control_without_layer_shell_still_watches_natively() {
         let g = globals(&[EXT_DATA_CONTROL]);
         let plan = detect(&wayland(), Some(&g));
-        assert_eq!(plan.host, Host::Viewport);
+        assert_eq!(plan.host, Host::Window);
         assert_eq!(plan.watch, Watch::DataControl(DataControl::Ext));
         assert!(plan.needs_wayland());
     }
