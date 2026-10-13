@@ -119,6 +119,8 @@ pub struct Popup {
     pub modifiers: egui::Modifiers,
     pub pointer: Option<Pos2>,
     pub keyboard_entered: bool,
+    /// A frame has reached the screen.
+    pub shown: bool,
     pub dirty: bool,
 }
 
@@ -139,6 +141,7 @@ impl Popup {
             modifiers: egui::Modifiers::default(),
             pointer: None,
             keyboard_entered: false,
+            shown: false,
             dirty: true,
         }
     }

@@ -439,6 +439,7 @@ impl State {
     }
 
     fn press_ctrl_v(&mut self) {
+        log::info!("pressing Ctrl+V");
         if self.vkbd.is_none()
             && let (Some(manager), Some(seat)) = (&self.vk_manager, &self.seat)
         {
@@ -463,6 +464,7 @@ impl State {
             log::warn!("no layer-shell; the popup cannot open here");
             return;
         };
+        log::info!("popup: opening");
         let surface = self.compositor.create_surface(&self.qh);
         let layer = layer_shell.create_layer_surface(
             &self.qh,
@@ -531,6 +533,7 @@ impl State {
 
     fn close_popup(&mut self) {
         if let Some(mut popup) = self.popup.take() {
+            log::info!("popup: closed");
             // The wgpu surface before the wl_surface it draws to.
             popup.surface = None;
         }
@@ -582,6 +585,10 @@ impl State {
             let history = self.shared.history.lock().unwrap();
             popup.draw(gpu, &history)
         };
+        if !popup.shown {
+            popup.shown = true;
+            log::info!("popup: shown");
+        }
         if let Some(delay) = again {
             if delay.is_zero() {
                 self.queue_redraw();
@@ -743,6 +750,9 @@ impl LayerShellHandler for State {
         if w == 0 || h == 0 {
             return;
         }
+        if !popup.configured {
+            log::info!("popup: configured at {w}x{h}");
+        }
         popup.size = (w, h);
         popup.configured = true;
         if let Some((_, viewport)) = &self.popup_scale {
@@ -871,6 +881,7 @@ impl KeyboardHandler for State {
             && layer.wl_surface() == surface
         {
             popup.keyboard_entered = true;
+            log::info!("popup: has the keyboard");
         }
     }
 
@@ -890,6 +901,7 @@ impl KeyboardHandler for State {
             .is_some_and(|l| l.wl_surface() == surface)
             && self.popup.as_ref().is_some_and(|p| p.keyboard_entered)
         {
+            log::info!("popup: lost the keyboard");
             self.close_popup();
         }
     }
@@ -996,6 +1008,7 @@ impl PointerHandler for State {
                         .and_then(|p| p.card_rect())
                         .is_some_and(|r| !r.contains(pos));
                     if pressed && outside {
+                        log::info!("popup: click outside the card");
                         self.close_popup();
                         return;
                     }

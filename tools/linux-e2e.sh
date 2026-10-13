@@ -46,6 +46,14 @@ wait_for() {
     return 1
 }
 
+# Waits for the popup to reach the screen for the $1th time. The first one
+# creates the GPU device, which on a software renderer takes a while.
+popup_shown() {
+    wait_for 150 sh -c '[ "$(grep -c "popup: shown" "$1")" -ge "$2" ]' _ "$art/wayland-windup.log" "$1" ||
+        echo "  (popup $1 was not shown in time)"
+    sleep 0.3
+}
+
 history_has() { [ -f "$history" ] && grep -q -- "$1" "$history"; }
 
 # Starts a GTK text field and prints what it held when Enter was pressed.
@@ -145,7 +153,7 @@ EOF
     field "$home/field1"
     grim "$art/wayland-field.png" 2>/dev/null
     "$bin" --popup
-    sleep 0.8
+    popup_shown 1
     grim "$art/wayland-popup.png" 2>/dev/null && ok "wayland: screenshot of the popup taken"
     wtype -k Down
     sleep 0.2
@@ -164,7 +172,7 @@ EOF
     wl-copy "keep-$$"
     sleep 0.4
     "$bin" --popup
-    sleep 0.6
+    popup_shown 2
     wtype -k Escape
     sleep 0.4
     if [ "$(wl-paste -n)" = "keep-$$" ]; then
@@ -180,6 +188,7 @@ EOF
     sleep 1.5
     "$bin" --paste-plain
     sleep 0.8
+    grim "$art/wayland-paste-plain.png" 2>/dev/null
     wtype -k Return
     field_done
     got=$(cat "$home/field2")
