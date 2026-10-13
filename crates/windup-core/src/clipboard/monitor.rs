@@ -71,8 +71,21 @@ impl ClipboardMonitor {
                 } else {
                     read_text(&ctx)
                 };
-                if let Some(capture) = capture {
-                    ingest.offer(capture, &mut history.lock().unwrap(), max, capture_images);
+                let Some(capture) = capture else { continue };
+                // Asked again after the read: clipboard-rs matches an X11
+                // reply to its request by sequence alone, so a late answer
+                // to an earlier request can pass for the first check. Only
+                // two clean answers let a copy through.
+                match marked(&ctx) {
+                    Some(false) => {
+                        ingest.offer(capture, &mut history.lock().unwrap(), max, capture_images);
+                    }
+                    Some(true) => {
+                        if let Capture::Text { text, .. } = &capture {
+                            ingest.mark_secret(text);
+                        }
+                    }
+                    None => {}
                 }
             }
         });
@@ -85,12 +98,17 @@ impl ClipboardMonitor {
 
 /// Whether the clipboard holds a password manager's copy, which is never
 /// recorded (see `capture::SECRET_HINT`), or `None` when its owner could not
-/// be asked. One request for the types, so a request that fails is not
-/// taken for "unmarked". Windows password managers mark theirs differently,
+/// be asked or gave an answer that cannot be trusted. A request that fails is
+/// never taken for "unmarked". Windows password managers mark theirs differently,
 /// and Windows keeps the behaviour it has always had.
 #[cfg(not(windows))]
 fn marked(ctx: &ClipboardContext) -> Option<bool> {
     let formats = ctx.available_formats().ok()?;
+    // A live owner offers at least TARGETS. Nothing means the reply was
+    // someone else's: a late answer to an earlier request for text.
+    if formats.is_empty() {
+        return None;
+    }
     Some(formats.iter().any(|f| f == super::capture::SECRET_HINT))
 }
 

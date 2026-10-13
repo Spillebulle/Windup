@@ -195,7 +195,7 @@ EOF
     start_windup wayland || { kill $sway_pid; return; }
 
     # The socket is bound before the backend is chosen and logged.
-    if wait_for 50 grep -q "host: Layer" "$art/wayland-windup.log"; then
+    if wait_for 150 grep -q "host: Layer" "$art/wayland-windup.log"; then
         ok "wayland: chose the layer-shell host"
     else
         bad "wayland: did not choose the layer-shell host"
@@ -221,6 +221,13 @@ EOF
 
     secret_case wayland "hunter2-$$"
 
+    # The first popup creates the GPU device, which on a software renderer
+    # takes seconds; get that out of the way so the timed keys below land.
+    "$bin" --popup
+    popup_shown 1
+    "$bin" --popup
+    wait_for 50 grep -q "popup: closed" "$art/wayland-windup.log"
+
     # Popup, pick the second entry, and it is pasted into the focused field.
     wl-copy "first-$$"
     wait_for 30 history_has "first-$$"
@@ -228,9 +235,9 @@ EOF
     wait_for 30 history_has "second-$$"
     field "$home/field1"
     grim "$art/wayland-field.png" 2>/dev/null
-    keys_later 9000 -k Down -s 200 -k Return
+    keys_later 3000 -k Down -s 200 -k Return
     "$bin" --popup
-    popup_shown 1
+    popup_shown 2
     grim "$art/wayland-popup.png" 2>/dev/null && ok "wayland: screenshot of the popup taken"
     wait $keys_pid
     sleep 0.8
@@ -248,7 +255,7 @@ EOF
     sleep 0.4
     keys_later 3000 -k Escape
     "$bin" --popup
-    popup_shown 2
+    popup_shown 3
     wait $keys_pid
     sleep 0.4
     if [ "$(wl-paste -n)" = "keep-$$" ]; then
@@ -339,7 +346,7 @@ weston_session() {
     start_windup weston || { kill $weston_pid; return; }
     log=$art/weston-windup.log
 
-    if wait_for 50 grep -q "host: Window" "$log"; then
+    if wait_for 150 grep -q "host: Window" "$log"; then
         ok "weston: chose a window of its own for the popup"
     else
         bad "weston: did not choose the window host"
