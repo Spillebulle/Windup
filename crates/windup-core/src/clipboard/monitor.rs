@@ -52,11 +52,17 @@ impl ClipboardMonitor {
                 let max = max_items.load(Ordering::Relaxed);
                 let capture_images = save_images.load(Ordering::Relaxed);
 
-                if is_secret(&ctx) {
-                    if let Ok(text) = ctx.get_text() {
-                        ingest.mark_secret(&text);
+                match marked(&ctx) {
+                    // The owner did not answer this time; a copy is only
+                    // recorded once it is known not to be a password.
+                    None => continue,
+                    Some(true) => {
+                        if let Ok(text) = ctx.get_text() {
+                            ingest.mark_secret(&text);
+                        }
+                        continue;
                     }
-                    continue;
+                    Some(false) => {}
                 }
 
                 // Images take priority over text.
@@ -77,17 +83,20 @@ impl ClipboardMonitor {
     }
 }
 
-/// A password manager's copy, which is never recorded (see
-/// `capture::SECRET_HINT`). Windows password managers mark theirs
-/// differently, and Windows keeps the behaviour it has always had.
+/// Whether the clipboard holds a password manager's copy, which is never
+/// recorded (see `capture::SECRET_HINT`), or `None` when its owner could not
+/// be asked. One request for the types, so a request that fails is not
+/// taken for "unmarked". Windows password managers mark theirs differently,
+/// and Windows keeps the behaviour it has always had.
 #[cfg(not(windows))]
-fn is_secret(ctx: &ClipboardContext) -> bool {
-    ctx.has(ContentFormat::Other(super::capture::SECRET_HINT.to_owned()))
+fn marked(ctx: &ClipboardContext) -> Option<bool> {
+    let formats = ctx.available_formats().ok()?;
+    Some(formats.iter().any(|f| f == super::capture::SECRET_HINT))
 }
 
 #[cfg(windows)]
-fn is_secret(_: &ClipboardContext) -> bool {
-    false
+fn marked(_: &ClipboardContext) -> Option<bool> {
+    Some(false)
 }
 
 fn read_text(ctx: &ClipboardContext) -> Option<Capture> {
