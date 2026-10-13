@@ -35,7 +35,7 @@ Chosen at runtime, because one binary runs on X11 and on Wayland.
 | Hotkey | `windup --popup` bound in the desktop's shortcut settings, delivered over a socket; GlobalShortcuts portal where present | GlobalShortcuts portal (GNOME 48+), else the bound command | `XGrabKey` (`global-hotkey`), and the command |
 | Watch clipboard | data-control (ext, else wlr), event-driven | XWayland selection polling, best effort | polling (`clipboard-rs`) |
 | Set clipboard | data-control source | XWayland / `clipboard-rs` | `clipboard-rs` |
-| Popup | full-output transparent layer surface on the overlay layer, card drawn at the pointer | ordinary egui window, placed by the compositor | egui window at the cursor (`XQueryPointer`, `_NET_WORKAREA`) |
+| Popup | full-output transparent layer surface on the overlay layer, card drawn at the pointer | ordinary egui window of its own per popup (no hidden window between: Wayland cannot hide one, and a window never shown never draws), placed by the compositor | egui window at the cursor (`XQueryPointer`, `_NET_WORKAREA`) |
 | Focus target | `zcosmic_toplevel_info` activated toplevel; elsewhere focus returns when the layer surface unmaps | compositor restores focus | `_NET_ACTIVE_WINDOW`, restored with an EWMH client message |
 | Ctrl+V | `zwp_virtual_keyboard_v1` | RemoteDesktop portal (one consent, restore token kept) | XTest (`enigo`) |
 

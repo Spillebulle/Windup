@@ -112,7 +112,7 @@ Start it from a terminal with logging, and look for the line that says which
 route it chose:
 
 ```sh
-pkill windup; RUST_LOG=info windup
+pkill windup; RUST_LOG=windup=info windup
 ```
 
 ```
@@ -143,7 +143,7 @@ inside them, on purpose, and those protocols are Windup's whole job. The
 A short list to run through on a desktop Windup has not been tried on, in
 the order things depend on each other:
 
-1. `RUST_LOG=info windup` prints a `backend:` line; note it.
+1. `RUST_LOG=windup=info windup` prints a `backend:` line; note it.
 2. Copy some text in another app. Open the popup: it is at the top.
 3. Copy an image (a screenshot tool's "copy"). It shows with a preview.
 4. Copy a password from a password manager. It does **not** show.
