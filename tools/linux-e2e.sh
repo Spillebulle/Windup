@@ -54,6 +54,16 @@ popup_shown() {
     sleep 0.3
 }
 
+# Types into the popup: wtype arguments, run after a $1 ms pause. Started
+# before the popup opens, because Sway hands keyboard focus back to the
+# focused window whenever a keyboard device appears, and each wtype is a new
+# device. A wtype started after the popup would take its focus away.
+keys_later() {
+    wtype -s "$@" &
+    keys_pid=$!
+    sleep 0.3
+}
+
 history_has() { [ -f "$history" ] && grep -q -- "$1" "$history"; }
 
 # Starts a GTK text field and prints what it held when Enter was pressed.
@@ -152,12 +162,11 @@ EOF
     wait_for 30 history_has "second-$$"
     field "$home/field1"
     grim "$art/wayland-field.png" 2>/dev/null
+    keys_later 9000 -k Down -s 200 -k Return
     "$bin" --popup
     popup_shown 1
     grim "$art/wayland-popup.png" 2>/dev/null && ok "wayland: screenshot of the popup taken"
-    wtype -k Down
-    sleep 0.2
-    wtype -k Return
+    wait $keys_pid
     sleep 0.8
     wtype -k Return
     field_done
@@ -171,14 +180,22 @@ EOF
     # Escape closes the popup and leaves the clipboard alone.
     wl-copy "keep-$$"
     sleep 0.4
+    keys_later 3000 -k Escape
     "$bin" --popup
     popup_shown 2
-    wtype -k Escape
+    wait $keys_pid
     sleep 0.4
     if [ "$(wl-paste -n)" = "keep-$$" ]; then
         ok "wayland: Escape dismissed the popup without touching the clipboard"
     else
         bad "wayland: clipboard changed after Escape: '$(wl-paste -n)'"
+    fi
+
+    # Both popups closed by their own keys, not by losing focus.
+    if grep -q "lost the keyboard" "$art/wayland-windup.log"; then
+        bad "wayland: a popup lost the keyboard while open"
+    else
+        ok "wayland: the popup kept the keyboard until it was done"
     fi
 
     # Paste as plain text, from the shortcut, into the focused window.
