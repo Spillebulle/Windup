@@ -130,7 +130,11 @@ backend: Plan { host: Layer, watch: DataControl(Ext), paste: VirtualKeyboard, ho
   was refused, or the window you were in does not accept Ctrl+V (terminals
   want Ctrl+Shift+V). Paste it yourself; it is already on the clipboard.
 - **A password showed up in the history.** The password manager did not mark
-  it secret. KeePassXC, Bitwarden and 1Password do by default.
+  it secret. KeePassXC, Bitwarden and 1Password do by default. Windup also
+  remembers each marked password while it runs, so a clipboard manager that
+  keeps the text after the password manager quits (GNOME's, Klipper) does
+  not sneak it in. Weston is the exception: it can replace the marked copy
+  with its own before Windup has looked.
 
 ## No Flatpak, no Snap
 
