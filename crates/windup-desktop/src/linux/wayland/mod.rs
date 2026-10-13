@@ -344,6 +344,12 @@ impl State {
         if let Some(clip) = self.clip.as_mut() {
             clip.attach(&seat, &self.qh);
         }
+        // Made now rather than at the first paste: a seat that had no
+        // keyboard before gains one, and the window being pasted into must
+        // have bound it before the keys arrive or it never sees them.
+        if let Some(manager) = &self.vk_manager {
+            self.vkbd = vkbd::VirtualKeyboard::new(manager, &seat, &self.qh);
+        }
         self.seat = Some(seat);
     }
 
@@ -829,6 +835,11 @@ impl SeatHandler for State {
         if capability == Capability::Keyboard
             && let Some(k) = self.keyboard.take()
         {
+            // The last keyboard was unplugged; that is not focus going
+            // elsewhere, so it must not close the popup.
+            if let Some(popup) = self.popup.as_mut() {
+                popup.keyboard_entered = false;
+            }
             k.release();
         }
         if capability == Capability::Pointer {
