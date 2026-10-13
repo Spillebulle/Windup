@@ -6,7 +6,8 @@
 #   tools/linux-e2e.sh <path-to-windup> [wayland|x11|all] [artefact-dir]
 #
 # Needs, on Debian/Ubuntu: sway wl-clipboard wtype grim zenity xvfb xdotool
-# xclip x11-utils openbox imagemagick mesa-vulkan-drivers. CI installs them;
+# xclip x11-utils openbox imagemagick mesa-vulkan-drivers python3-gi
+# gir1.2-gtk-4.0. CI installs them;
 # see the e2e job in ci.yml.
 #
 # Each case copies something, drives Windup the way a person would (a
@@ -62,6 +63,34 @@ keys_later() {
     wtype -s "$@" &
     keys_pid=$!
     sleep 0.3
+}
+
+# Copies $2 as a password manager would, and checks it stays out of the
+# history while the copy is really marked (the case proves nothing if not).
+secret_case() {
+    local session=$1 secret=$2 types
+    python3 "$(dirname "$0")/secret-copy.py" "$secret" 3 >"$art/$session-secret.log" 2>&1 &
+    local pid=$!
+    if ! wait_for 80 grep -q copied "$art/$session-secret.log"; then
+        bad "$session: the secret copy helper did not copy"
+        cat "$art/$session-secret.log"
+        kill $pid 2>/dev/null
+        return
+    fi
+    if [ "$session" = wayland ]; then
+        types=$(wl-paste --list-types)
+    else
+        types=$(xclip -o -selection clipboard -t TARGETS)
+    fi
+    sleep 1.5
+    if ! printf '%s' "$types" | grep -q x-kde-passwordManagerHint; then
+        bad "$session: the secret copy was not marked: $types"
+    elif history_has "$secret"; then
+        bad "$session: a password manager's copy was recorded"
+    else
+        ok "$session: a password manager's copy is not recorded"
+    fi
+    wait $pid 2>/dev/null
 }
 
 history_has() { [ -f "$history" ] && grep -q -- "$1" "$history"; }
@@ -154,6 +183,8 @@ EOF
     else
         bad "wayland: copied image was not recorded"
     fi
+
+    secret_case wayland "hunter2-$$"
 
     # Popup, pick the second entry, and it is pasted into the focused field.
     wl-copy "first-$$"
@@ -265,6 +296,8 @@ x11_session() {
     else
         bad "x11: copied text was not recorded"
     fi
+
+    secret_case x11 "xhunter2-$$"
 
     printf 'xfirst-%s' "$$" | xclip -selection clipboard
     wait_for 30 history_has "xfirst-$$"

@@ -52,6 +52,10 @@ impl ClipboardMonitor {
                 let max = max_items.load(Ordering::Relaxed);
                 let capture_images = save_images.load(Ordering::Relaxed);
 
+                if is_secret(&ctx) {
+                    continue;
+                }
+
                 // Images take priority over text.
                 let capture = if capture_images && ctx.has(ContentFormat::Image) {
                     read_image(&ctx)
@@ -68,6 +72,19 @@ impl ClipboardMonitor {
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
     }
+}
+
+/// A password manager's copy, which is never recorded (see
+/// `capture::SECRET_HINT`). Windows password managers mark theirs
+/// differently, and Windows keeps the behaviour it has always had.
+#[cfg(not(windows))]
+fn is_secret(ctx: &ClipboardContext) -> bool {
+    ctx.has(ContentFormat::Other(super::capture::SECRET_HINT.to_owned()))
+}
+
+#[cfg(windows)]
+fn is_secret(_: &ClipboardContext) -> bool {
+    false
 }
 
 fn read_text(ctx: &ClipboardContext) -> Option<Capture> {
