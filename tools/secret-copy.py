@@ -40,8 +40,11 @@ def activate(app):
     def on_active(*_):
         if window.is_active() and not done:
             done.append(True)
-            copy(window)
-            GLib.timeout_add(int(keep * 1000), app.quit)
+            # Active comes from the toplevel's state, a moment before the
+            # keyboard focus whose serial the compositor checks the
+            # clipboard request against.
+            GLib.timeout_add(500, lambda: copy(window) or False)
+            GLib.timeout_add(int(keep * 1000) + 500, app.quit)
 
     window.connect("notify::is-active", on_active)
     window.present()
