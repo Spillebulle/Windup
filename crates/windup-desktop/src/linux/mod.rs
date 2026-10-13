@@ -3,6 +3,7 @@
 //! on Wayland, where Windup keeps no window open. See docs/linux.md.
 
 pub mod autostart;
+pub mod cosmic;
 pub mod ipc;
 pub mod portal;
 pub mod wayland;
@@ -169,6 +170,7 @@ pub fn run_background(
     ipc::serve(listener, move |c| {
         let _ = cmd_tx.send(c);
     });
+    cosmic::bind_once();
     portal::start_shortcuts(&runtime.plan);
 
     let mut host = Background {

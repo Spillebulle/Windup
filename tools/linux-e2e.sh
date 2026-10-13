@@ -6,7 +6,7 @@
 #
 #   tools/linux-e2e.sh <path-to-windup> [wayland|weston|x11|all] [artefact-dir]
 #
-# Needs, on Debian/Ubuntu: sway wl-clipboard wtype grim zenity xvfb xdotool
+# Needs, on Debian/Ubuntu: sway swaybg wl-clipboard wtype grim zenity xvfb xdotool
 # xclip x11-utils openbox imagemagick mesa-vulkan-drivers python3-gi
 # gir1.2-gtk-4.0 weston xwayland. CI installs them;
 # see the e2e job in ci.yml.
@@ -54,6 +54,12 @@ popup_shown() {
     wait_for 150 sh -c '[ "$(grep -c "popup: shown" "$1")" -ge "$2" ]' _ "$art/wayland-windup.log" "$1" ||
         echo "  (popup $1 was not shown in time)"
     sleep 0.3
+}
+
+# The colour of the pixel at $2,$3 of the picture $1, as "r,g,b".
+pixel() {
+    convert "$1" -format '%[fx:int(255*r)],%[fx:int(255*g)],%[fx:int(255*b)]' \
+        -crop "1x1+$2+$3" info: 2>/dev/null
 }
 
 # Types into the popup: wtype arguments, run after a $1 ms pause. Started
@@ -174,7 +180,7 @@ wayland_session() {
     fresh_home
     unset DISPLAY
     cat >"$home/sway.conf" <<'EOF'
-output HEADLESS-1 resolution 1600x1000 position 0 0
+output HEADLESS-1 resolution 1600x1000 position 0 0 bg #3a6ea5 solid_color
 default_border none
 EOF
     WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
@@ -239,6 +245,24 @@ EOF
     "$bin" --popup
     popup_shown 2
     grim "$art/wayland-popup.png" 2>/dev/null && ok "wayland: screenshot of the popup taken"
+    # The popup covers the output to learn where the pointer is. Around the
+    # card the window underneath must still show: on drivers whose GPU
+    # surfaces cannot be transparent, and from the second popup on anywhere,
+    # it went black. The card itself, in the middle, must show too.
+    under=$(pixel "$art/wayland-field.png" 10 990)
+    around=$(pixel "$art/wayland-popup.png" 10 990)
+    if [ -z "$under" ] || [ "$under" = "0,0,0" ]; then
+        echo "  (no window colour to compare the popup with: '$under')"
+    elif [ "$around" = "$under" ]; then
+        ok "wayland: the window under the popup still shows around the card"
+    else
+        bad "wayland: around the card the screen is $around, the window under it $under"
+    fi
+    if [ "$(pixel "$art/wayland-popup.png" 800 500)" != "$(pixel "$art/wayland-field.png" 800 500)" ]; then
+        ok "wayland: the card is drawn"
+    else
+        bad "wayland: no card in the middle of the screen"
+    fi
     wait $keys_pid
     sleep 0.8
     wtype -k Return

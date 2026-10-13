@@ -11,7 +11,7 @@ says what that means on yours, and how to bind the shortcut where you have to.
 
 | | Super+V | Watches the clipboard | Popup | Pastes into your window |
 |---|---|---|---|---|
-| **COSMIC** | bind once (below) | yes | at the cursor | yes |
+| **COSMIC** | by itself | yes | at the cursor | yes |
 | **KDE Plasma 6** | asks on first start | yes | at the cursor | yes, or asks once |
 | **Sway, Hyprland, river, Wayfire, labwc, niri** | bind once (Hyprland asks) | yes | at the cursor | yes |
 | **GNOME 48+** (Wayland) | asks on first start | best effort, through XWayland | middle of the screen | asks once |
@@ -34,9 +34,13 @@ Bind **Super+V** to `windup --popup` and **Super+Shift+V** to
 
 ### COSMIC
 
-Settings → Keyboard → Keyboard shortcuts → Custom shortcuts → **Add shortcut**.
-Name it "Clipboard history", command `windup --popup`, then press Super+V.
-Add a second one, "Paste plain text", `windup --paste-plain`, Super+Shift+V.
+Windup adds both shortcuts to COSMIC's custom shortcuts the first time it
+starts, as "Clipboard history" and "Paste plain text"; they show in Settings →
+Keyboard → Keyboard shortcuts → Custom shortcuts, where they can be changed or
+removed. It does this once, and never takes a key you have already bound: if
+Super+V does something else on your machine, bind `windup --popup` to another
+key there. To have Windup check again, delete
+`~/.config/windup/cosmic-shortcuts`.
 
 ### GNOME
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- On COSMIC, Windup binds Super+V and Super+Shift+V itself the first time it starts, in COSMIC's own custom shortcuts, where they can be changed or removed. A key you have already bound is left as it is.
+- On Linux, the screen no longer turns black when the clipboard history opens. Only the card is drawn by the graphics card now; the rest of the screen stays as it was, on every driver.
+
 ## 0.1.0
 
 - Clipboard history at your cursor with Win+V, images included, replacing the Windows clipboard panel.

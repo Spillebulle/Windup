@@ -28,8 +28,9 @@ const KEY_V: i32 = 47;
 static PASTER: Mutex<Option<Sender<()>>> = Mutex::new(None);
 
 /// Asks for Super+V and Super+Shift+V through the GlobalShortcuts portal
-/// when nothing else delivers them. A desktop without the portal (COSMIC
-/// today) is left to its own shortcut settings and `windup --popup`.
+/// when nothing else delivers them. A desktop without the portal is left
+/// to its own shortcut settings and `windup --popup`, except COSMIC, where
+/// `cosmic::bind_once` writes them into those settings.
 pub fn start_shortcuts(plan: &Plan) {
     if plan.hotkeys != HotkeysVia::Command {
         return;

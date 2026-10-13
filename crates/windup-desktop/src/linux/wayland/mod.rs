@@ -36,10 +36,12 @@ use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
     LayerSurfaceConfigure,
 };
+use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
+use smithay_client_toolkit::subcompositor::SubcompositorState;
 use smithay_client_toolkit::{
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
-    delegate_registry, delegate_seat, delegate_shm, registry_handlers,
+    delegate_registry, delegate_seat, delegate_shm, delegate_subcompositor, registry_handlers,
 };
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -47,7 +49,9 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use wayland_client::globals::{GlobalList, registry_queue_init};
-use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface};
+use wayland_client::protocol::{
+    wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface,
+};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
@@ -232,6 +236,7 @@ pub struct State {
     output_state: OutputState,
     compositor: CompositorState,
     shm: Shm,
+    subcompositor: Option<SubcompositorState>,
     layer_shell: Option<LayerShell>,
     fractional: Option<WpFractionalScaleManagerV1>,
     viewporter: Option<WpViewporter>,
@@ -247,8 +252,22 @@ pub struct State {
     gpu: Option<Gpu>,
     popup: Option<Popup>,
     layer: Option<LayerSurface>,
-    popup_scale: Option<(WpFractionalScaleV1, WpViewport)>,
+    /// The layer surface's transparent buffer, and the viewport that
+    /// stretches it over the output where the compositor has viewporter.
+    backdrop: Option<(SlotPool, Buffer)>,
+    layer_viewport: Option<WpViewport>,
+    card: Option<Card>,
+    /// Only with a viewport on the card to apply it.
+    popup_scale: Option<WpFractionalScaleV1>,
     redraw_queued: bool,
+}
+
+/// The card: a subsurface of the popup's layer surface, and the only part of
+/// the popup the GPU draws.
+struct Card {
+    subsurface: wl_subsurface::WlSubsurface,
+    surface: wl_surface::WlSurface,
+    viewport: Option<WpViewport>,
 }
 
 impl State {
@@ -280,6 +299,8 @@ impl State {
 
         let compositor = CompositorState::bind(&globals, &qh).map_err(|e| e.to_string())?;
         let shm = Shm::bind(&globals, &qh).map_err(|e| e.to_string())?;
+        let subcompositor =
+            SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh).ok();
         let layer_shell = LayerShell::bind(&globals, &qh).ok();
         let clip = match plan.watch {
             Watch::DataControl(DataControl::Ext) => globals
@@ -310,6 +331,7 @@ impl State {
             ingest: Ingest::new(),
             compositor,
             shm,
+            subcompositor,
             layer_shell,
             vk_manager,
             seat: None,
@@ -321,6 +343,9 @@ impl State {
             gpu: None,
             popup: None,
             layer: None,
+            backdrop: None,
+            layer_viewport: None,
+            card: None,
             popup_scale: None,
             redraw_queued: false,
         };
@@ -490,19 +515,43 @@ impl State {
         layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         layer.set_size(0, 0);
 
-        if let (Some(fractional), Some(viewporter)) = (&self.fractional, &self.viewporter) {
-            let f = fractional.get_fractional_scale(layer.wl_surface(), &self.qh, ());
-            let v = viewporter.get_viewport(layer.wl_surface(), &self.qh, ());
-            self.popup_scale = Some((f, v));
+        if let Some(viewporter) = &self.viewporter {
+            self.layer_viewport = Some(viewporter.get_viewport(layer.wl_surface(), &self.qh, ()));
+            // The preferred scale is the layer's; it is applied to the card.
+            if let Some(fractional) = &self.fractional {
+                self.popup_scale =
+                    Some(fractional.get_fractional_scale(layer.wl_surface(), &self.qh, ()));
+            }
         }
         layer.commit();
 
+        let Some(subcompositor) = &self.subcompositor else {
+            log::warn!("no wl_subcompositor; the popup cannot open here");
+            self.layer = Some(layer);
+            self.close_popup();
+            return;
+        };
+        let (subsurface, surface) =
+            subcompositor.create_subsurface(layer.wl_surface().clone(), &self.qh);
+        // Shown when wgpu presents, not at the layer's next commit.
+        subsurface.set_desync();
+        let viewport = self
+            .viewporter
+            .as_ref()
+            .map(|v| v.get_viewport(&surface, &self.qh, ()));
+        let wgpu_surface = self.wgpu_surface(&surface);
+        self.card = Some(Card {
+            subsurface,
+            surface,
+            viewport,
+        });
+        self.layer = Some(layer);
+
         let mut popup = Popup::new(setup);
-        match self.wgpu_surface(&layer) {
+        match wgpu_surface {
             Ok(surface) => popup.surface = Some(surface),
             Err(e) => {
                 log::error!("{e}");
-                self.layer = Some(layer);
                 self.close_popup();
                 return;
             }
@@ -512,7 +561,6 @@ impl State {
             gpu.view.reset();
         }
         self.popup = Some(popup);
-        self.layer = Some(layer);
         let _ = self.handle.insert_source(
             Timer::from_duration(ENTER_GRACE),
             |_, _, state: &mut State| {
@@ -525,11 +573,14 @@ impl State {
         );
     }
 
-    fn wgpu_surface(&mut self, layer: &LayerSurface) -> Result<wgpu::Surface<'static>, String> {
+    fn wgpu_surface(
+        &mut self,
+        surface: &wl_surface::WlSurface,
+    ) -> Result<wgpu::Surface<'static>, String> {
         let display = NonNull::new(self.conn.backend().display_ptr() as *mut _)
             .ok_or("no Wayland display pointer")?;
-        let window = NonNull::new(layer.wl_surface().id().as_ptr() as *mut _)
-            .ok_or("no Wayland surface pointer")?;
+        let window =
+            NonNull::new(surface.id().as_ptr() as *mut _).ok_or("no Wayland surface pointer")?;
         let target = wgpu::SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(display)),
             raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(window)),
@@ -538,8 +589,8 @@ impl State {
             wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default())
         });
         // SAFETY: the display outlives the surface (it lives as long as this
-        // thread), and the wl_surface is destroyed only after the wgpu surface
-        // is dropped, in `close_popup`.
+        // thread), and the card's wl_surface is destroyed only after the wgpu
+        // surface is dropped, in `close_popup`.
         unsafe { instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())
     }
 
@@ -549,11 +600,21 @@ impl State {
             // The wgpu surface before the wl_surface it draws to.
             popup.surface = None;
         }
-        if let Some((f, v)) = self.popup_scale.take() {
+        if let Some(card) = self.card.take() {
+            if let Some(v) = card.viewport {
+                v.destroy();
+            }
+            card.subsurface.destroy();
+            card.surface.destroy();
+        }
+        if let Some(f) = self.popup_scale.take() {
             f.destroy();
+        }
+        if let Some(v) = self.layer_viewport.take() {
             v.destroy();
         }
         self.layer = None;
+        self.backdrop = None;
         let _ = self.conn.flush();
     }
 
@@ -572,7 +633,8 @@ impl State {
         let Some(popup) = self.popup.as_mut() else {
             return;
         };
-        if !popup.configured || popup.surface.is_none() {
+        // Nothing to draw until the card has a place.
+        if !popup.configured || popup.surface.is_none() || popup.card.is_none() {
             return;
         }
         if self.gpu.is_none() {
@@ -580,19 +642,18 @@ impl State {
                 return;
             };
             match Gpu::new(instance, surface) {
-                Ok((gpu, alpha)) => {
-                    popup.alpha = alpha;
-                    self.gpu = Some(gpu);
-                }
+                Ok(gpu) => self.gpu = Some(gpu),
                 Err(e) => {
                     log::error!("{e}");
                     self.close_popup();
                     return;
                 }
             }
-            popup.configure_surface(self.gpu.as_ref().unwrap());
         }
-        let gpu = self.gpu.as_mut().unwrap();
+        self.sync_card();
+        let (Some(popup), Some(gpu)) = (self.popup.as_mut(), self.gpu.as_mut()) else {
+            return;
+        };
         let (action, again) = {
             let history = self.shared.history.lock().unwrap();
             popup.draw(gpu, &history)
@@ -617,6 +678,82 @@ impl State {
         if let Some(action) = action {
             self.popup_action(action);
         }
+    }
+
+    /// Moves and sizes the card's subsurface to where the popup has it, when
+    /// that has changed since last time.
+    fn sync_card(&mut self) {
+        let (Some(popup), Some(card), Some(layer), Some(gpu)) =
+            (self.popup.as_mut(), &self.card, &self.layer, &self.gpu)
+        else {
+            return;
+        };
+        let Some(at) = popup.card else {
+            return;
+        };
+        let now = (at, popup.card_size, popup.scale);
+        if popup.synced == Some(now) {
+            return;
+        }
+        popup.synced = Some(now);
+        let (w, h) = popup.logical_size();
+        card.subsurface
+            .set_position(at.x.round() as i32, at.y.round() as i32);
+        match &card.viewport {
+            Some(v) => v.set_destination(w as i32, h as i32),
+            // Without a viewport the scale is a whole number.
+            None => card
+                .surface
+                .set_buffer_scale(popup.scale.round().max(1.0) as i32),
+        }
+        popup.configure_surface(gpu);
+        // A subsurface's position belongs to its parent: it moves when the
+        // layer surface next commits.
+        layer.wl_surface().commit();
+    }
+
+    /// Gives the layer surface its transparent buffer: one pixel stretched
+    /// over the output where there is a viewport, the output's size where not.
+    fn attach_backdrop(&mut self, layer: &LayerSurface, w: u32, h: u32) {
+        let (bw, bh) = match &self.layer_viewport {
+            Some(v) => {
+                v.set_destination(w as i32, h as i32);
+                (1, 1)
+            }
+            None => (w as i32, h as i32),
+        };
+        let mut pool = match SlotPool::new((bw * bh * 4) as usize, &self.shm) {
+            Ok(pool) => pool,
+            Err(e) => {
+                log::error!("popup: no shared memory for the backdrop: {e}");
+                return;
+            }
+        };
+        let buffer = match pool.create_buffer(bw, bh, bw * 4, wl_shm::Format::Argb8888) {
+            Ok((buffer, canvas)) => {
+                canvas.fill(0);
+                buffer
+            }
+            Err(e) => {
+                log::error!("popup: no backdrop buffer: {e}");
+                return;
+            }
+        };
+        let surface = layer.wl_surface();
+        if buffer.attach_to(surface).is_err() {
+            return;
+        }
+        surface.damage_buffer(0, 0, bw, bh);
+        surface.commit();
+        self.backdrop = Some((pool, buffer));
+    }
+
+    /// The popup's layer surface or its card.
+    fn is_popup_surface(&self, surface: &wl_surface::WlSurface) -> bool {
+        self.layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+            || self.card.as_ref().is_some_and(|c| &c.surface == surface)
     }
 
     fn popup_action(&mut self, action: PopupAction) {
@@ -694,11 +831,9 @@ impl CompositorHandler for State {
         if let (Some(layer), Some(popup)) = (&self.layer, self.popup.as_mut())
             && layer.wl_surface() == surface
         {
-            surface.set_buffer_scale(factor);
+            // Applied to the card by `sync_card`; the backdrop has no detail
+            // to lose.
             popup.scale = factor as f64;
-            if let Some(gpu) = &self.gpu {
-                popup.configure_surface(gpu);
-            }
             self.queue_redraw();
         }
     }
@@ -755,21 +890,19 @@ impl LayerShellHandler for State {
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
+        let (w, h) = configure.new_size;
+        if w == 0 || h == 0 || self.popup.is_none() {
+            return;
+        }
+        self.attach_backdrop(layer, w, h);
         let Some(popup) = self.popup.as_mut() else {
             return;
         };
-        let (w, h) = configure.new_size;
-        if w == 0 || h == 0 {
-            return;
-        }
         if !popup.configured {
             log::info!("popup: configured at {w}x{h}");
         }
         popup.size = (w, h);
         popup.configured = true;
-        if let Some((_, viewport)) = &self.popup_scale {
-            viewport.set_destination(w as i32, h as i32);
-        }
         if let Some(at) = popup.pointer {
             popup.place_at(at);
         }
@@ -777,10 +910,6 @@ impl LayerShellHandler for State {
         if popup.opened.elapsed() >= ENTER_GRACE {
             popup.place_fallback();
         }
-        if let Some(gpu) = &self.gpu {
-            popup.configure_surface(gpu);
-        }
-        let _ = layer;
         self.queue_redraw();
     }
 }
@@ -894,8 +1023,8 @@ impl KeyboardHandler for State {
         _: &[u32],
         _: &[Keysym],
     ) {
-        if let (Some(layer), Some(popup)) = (&self.layer, self.popup.as_mut())
-            && layer.wl_surface() == surface
+        if self.is_popup_surface(surface)
+            && let Some(popup) = self.popup.as_mut()
         {
             popup.keyboard_entered = true;
             log::info!("popup: has the keyboard");
@@ -912,11 +1041,7 @@ impl KeyboardHandler for State {
     ) {
         // Something else took the keyboard: a notification, a lock screen,
         // a click on another output. The popup goes, as on Windows.
-        if self
-            .layer
-            .as_ref()
-            .is_some_and(|l| l.wl_surface() == surface)
-            && self.popup.as_ref().is_some_and(|p| p.keyboard_entered)
+        if self.is_popup_surface(surface) && self.popup.as_ref().is_some_and(|p| p.keyboard_entered)
         {
             log::info!("popup: lost the keyboard");
             self.close_popup();
@@ -987,14 +1112,21 @@ impl PointerHandler for State {
         events: &[PointerEvent],
     ) {
         for event in events {
-            let ours = self
-                .layer
-                .as_ref()
-                .is_some_and(|l| l.wl_surface() == &event.surface);
-            if !ours {
+            if !self.is_popup_surface(&event.surface) {
                 continue;
             }
-            let pos = egui::pos2(event.position.0 as f32, event.position.1 as f32);
+            let on_card = self
+                .card
+                .as_ref()
+                .is_some_and(|c| c.surface == event.surface);
+            let raw = egui::pos2(event.position.0 as f32, event.position.1 as f32);
+            // Where the pointer is on the layer surface, which covers the
+            // output, and on the card, which is where egui draws.
+            let at = match self.popup.as_ref().and_then(|p| p.card) {
+                Some(card) if on_card => raw + card.to_vec2(),
+                _ => raw,
+            };
+            let mut pos = self.popup.as_ref().map_or(at, |p| p.to_card(at));
             let modifiers = self.popup.as_ref().map(|p| p.modifiers).unwrap_or_default();
             match event.kind {
                 PointerEventKind::Enter { .. } => {
@@ -1002,15 +1134,16 @@ impl PointerHandler for State {
                         let _ = pointer.set_cursor(conn, CursorIcon::Default);
                     }
                     if let Some(popup) = self.popup.as_mut() {
-                        popup.pointer = Some(pos);
-                        popup.place_at(pos);
+                        popup.pointer = Some(at);
+                        popup.place_at(at);
+                        pos = popup.to_card(at);
                     }
                     self.popup_input(egui::Event::PointerMoved(pos));
                 }
                 PointerEventKind::Leave { .. } => self.popup_input(egui::Event::PointerGone),
                 PointerEventKind::Motion { .. } => {
                     if let Some(popup) = self.popup.as_mut() {
-                        popup.pointer = Some(pos);
+                        popup.pointer = Some(at);
                     }
                     self.popup_input(egui::Event::PointerMoved(pos));
                 }
@@ -1023,7 +1156,7 @@ impl PointerHandler for State {
                         .popup
                         .as_ref()
                         .and_then(|p| p.card_rect())
-                        .is_some_and(|r| !r.contains(pos));
+                        .is_some_and(|r| !r.contains(at));
                     if pressed && outside {
                         log::info!("popup: click outside the card");
                         self.close_popup();
@@ -1094,9 +1227,6 @@ impl Dispatch<WpFractionalScaleV1, ()> for State {
             && let Some(popup) = state.popup.as_mut()
         {
             popup.scale = scale as f64 / 120.0;
-            if let Some(gpu) = &state.gpu {
-                popup.configure_surface(gpu);
-            }
             state.queue_redraw();
         }
     }
@@ -1129,6 +1259,7 @@ impl Dispatch<WpViewport, ()> for State {
 delegate_compositor!(State);
 delegate_output!(State);
 delegate_shm!(State);
+delegate_subcompositor!(State);
 delegate_seat!(State);
 delegate_keyboard!(State);
 delegate_pointer!(State);

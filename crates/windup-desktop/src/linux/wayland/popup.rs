@@ -1,10 +1,16 @@
 //! The clipboard popup as a layer-shell surface.
 //!
-//! The surface covers the whole output on the overlay layer and is
-//! transparent; the card is drawn inside it where the pointer is. Wayland
-//! never tells a client where the pointer is on the screen, but it does say
-//! where it is when it enters one of the client's surfaces, and a surface
-//! covering the output is entered wherever the pointer happens to be.
+//! The layer surface covers the whole output on the overlay layer, holding a
+//! transparent shared-memory buffer, and the card is a subsurface of it placed
+//! where the pointer is. Wayland never tells a client where the pointer is on
+//! the screen, but it does say where it is when it enters one of the client's
+//! surfaces, and a surface covering the output is entered wherever the pointer
+//! happens to be.
+//!
+//! Only the card is drawn by the GPU. A GPU surface the size of the output
+//! would have to be transparent, and some drivers (NVIDIA's Vulkan among
+//! them) offer only opaque ones on Wayland: the whole screen went black. A
+//! shared-memory buffer is transparent on every compositor and every driver.
 //!
 //! egui runs here exactly as eframe runs it, through `egui-wgpu`, and draws
 //! the same `windup_ui::PopupView` the Windows popup draws.
@@ -37,6 +43,9 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub format: wgpu::TextureFormat,
+    /// Chosen once, with the adapter, for every popup after it: a surface
+    /// configured with `Auto` is opaque on most Wayland drivers.
+    pub alpha: wgpu::CompositeAlphaMode,
     pub renderer: egui_wgpu::Renderer,
     pub ctx: egui::Context,
     pub view: PopupView,
@@ -48,7 +57,7 @@ impl Gpu {
     pub fn new(
         instance: &wgpu::Instance,
         surface: &wgpu::Surface<'static>,
-    ) -> Result<(Self, wgpu::CompositeAlphaMode), String> {
+    ) -> Result<Self, String> {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(surface),
@@ -62,6 +71,13 @@ impl Gpu {
         .map_err(|e| format!("no graphics device for the popup: {e}"))?;
 
         let caps = surface.get_capabilities(&adapter);
+        let info = adapter.get_info();
+        log::info!(
+            "popup: {} on {:?}, alpha modes {:?}",
+            info.name,
+            info.backend,
+            caps.alpha_modes
+        );
         // egui blends in linear space and expects a non-sRGB target, as eframe
         // chooses one.
         let format = caps
@@ -76,38 +92,44 @@ impl Gpu {
         let ctx = egui::Context::default();
         windup_ui::install_fonts(&ctx);
 
-        Ok((
-            Self {
-                device,
-                queue,
-                format,
-                renderer,
-                ctx,
-                view: PopupView::new(),
-                epoch: Instant::now(),
-            },
+        Ok(Self {
+            device,
+            queue,
+            format,
             alpha,
-        ))
+            renderer,
+            ctx,
+            view: PopupView::new(),
+            epoch: Instant::now(),
+        })
     }
 }
 
 fn pick_alpha(modes: &[wgpu::CompositeAlphaMode]) -> wgpu::CompositeAlphaMode {
     use wgpu::CompositeAlphaMode::*;
-    // egui's output is premultiplied; the transparent margin must stay
-    // transparent or the whole output goes black.
+    // egui's output is premultiplied; with an opaque surface the card's
+    // rounded corners show square, in the card's own colour.
     [PreMultiplied, PostMultiplied, Inherit]
         .into_iter()
         .find(|m| modes.contains(m))
         .unwrap_or(Auto)
 }
 
+/// Whether a surface configured with `mode` shows what is behind it.
+fn transparent(mode: wgpu::CompositeAlphaMode) -> bool {
+    use wgpu::CompositeAlphaMode::*;
+    matches!(mode, PreMultiplied | PostMultiplied | Inherit)
+}
+
 /// One open popup.
 pub struct Popup {
     pub setup: PopupSetup,
     pub surface: Option<wgpu::Surface<'static>>,
-    pub alpha: wgpu::CompositeAlphaMode,
     /// Logical size of the layer surface, from its configure.
     pub size: (u32, u32),
+    /// The card's position, size and scale as last given to the compositor,
+    /// so the subsurface is moved and resized only when one of them changes.
+    pub synced: Option<(Pos2, Vec2, f64)>,
     pub scale: f64,
     pub configured: bool,
     /// Where the card is, once known; `None` until the pointer enters or the
@@ -130,8 +152,8 @@ impl Popup {
         Self {
             setup,
             surface: None,
-            alpha: wgpu::CompositeAlphaMode::Auto,
             size: (0, 0),
+            synced: None,
             scale: 1.0,
             configured: false,
             card: None,
@@ -178,11 +200,29 @@ impl Popup {
         self.card.map(|p| Rect::from_min_size(p, self.card_size))
     }
 
-    pub fn physical_size(&self) -> (u32, u32) {
+    /// The card's size in whole logical pixels, as the subsurface has it.
+    pub fn logical_size(&self) -> (u32, u32) {
         (
-            ((self.size.0 as f64) * self.scale).round().max(1.0) as u32,
-            ((self.size.1 as f64) * self.scale).round().max(1.0) as u32,
+            self.card_size.x.ceil().max(1.0) as u32,
+            self.card_size.y.ceil().max(1.0) as u32,
         )
+    }
+
+    /// The card's size in buffer pixels.
+    pub fn physical_size(&self) -> (u32, u32) {
+        let (w, h) = self.logical_size();
+        (
+            ((w as f64) * self.scale).round().max(1.0) as u32,
+            ((h as f64) * self.scale).round().max(1.0) as u32,
+        )
+    }
+
+    /// Where a point on the layer surface is on the card.
+    pub fn to_card(&self, at: Pos2) -> Pos2 {
+        match self.card {
+            Some(card) => at - card.to_vec2(),
+            None => at,
+        }
     }
 
     pub fn configure_surface(&self, gpu: &Gpu) {
@@ -198,7 +238,7 @@ impl Popup {
                 width,
                 height,
                 present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: self.alpha,
+                alpha_mode: gpu.alpha,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             },
@@ -213,10 +253,11 @@ impl Popup {
         history: &ClipboardHistory,
     ) -> (Option<PopupAction>, Option<Duration>) {
         self.dirty = false;
-        let Some(surface) = &self.surface else {
+        let (Some(surface), Some(_)) = (&self.surface, self.card) else {
             return (None, None);
         };
-        let logical = vec2(self.size.0 as f32, self.size.1 as f32);
+        let (w, h) = self.logical_size();
+        let logical = vec2(w as f32, h as f32);
         let mut raw = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, logical)),
             // One clock for the life of the context, which outlives popups.
@@ -231,7 +272,7 @@ impl Popup {
         info.focused = Some(true);
 
         let mut action = None;
-        let card = self.card_rect();
+        let card = Rect::from_min_size(Pos2::ZERO, self.card_size);
         let setup = &self.setup;
         let view = &mut gpu.view;
         let output = gpu.ctx.run(raw, |ctx| {
@@ -239,12 +280,10 @@ impl Popup {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ctx, |ui| {
-                    if let Some(rect) = card {
-                        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                            ui.set_clip_rect(rect);
-                            action = view.ui(ui, history, &setup.palette);
-                        });
-                    }
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
+                        ui.set_clip_rect(card);
+                        action = view.ui(ui, history, &setup.palette);
+                    });
                 });
         });
 
@@ -267,6 +306,20 @@ impl Popup {
                 log::warn!("popup frame skipped: {e}");
                 return (action, Some(Duration::from_millis(16)));
             }
+        };
+        // Transparent around the rounded corners; where the surface cannot be
+        // transparent, the card's own colour, so the corners show square
+        // rather than black.
+        let clear = if !transparent(gpu.alpha) {
+            let [r, g, b, _] = self.setup.palette.dock.to_normalized_gamma_f32();
+            wgpu::Color {
+                r: r as f64,
+                g: g as f64,
+                b: b as f64,
+                a: 1.0,
+            }
+        } else {
+            wgpu::Color::TRANSPARENT
         };
         let target = frame
             .texture
@@ -292,7 +345,7 @@ impl Popup {
                         view: &target,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            load: wgpu::LoadOp::Clear(clear),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
