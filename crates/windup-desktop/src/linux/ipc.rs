@@ -100,6 +100,8 @@ pub fn serve(listener: UnixListener, mut on_command: impl FnMut(Command) + Send 
             if BufReader::new(stream).read_line(&mut line).is_ok() {
                 match Command::parse(&line) {
                     Some(command) => on_command(command),
+                    // `bind` in another Windup checking whether we are alive.
+                    None if line.is_empty() => {}
                     None => log::warn!("ignoring unknown command {line:?} on the socket"),
                 }
             }

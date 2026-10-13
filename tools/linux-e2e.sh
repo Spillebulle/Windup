@@ -51,8 +51,13 @@ history_has() { [ -f "$history" ] && grep -q -- "$1" "$history"; }
 # Starts a GTK text field and prints what it held when Enter was pressed.
 # Its window takes focus, which is what a paste goes back to.
 field() {
-    zenity --entry --title=target --text=target >"$1" 2>/dev/null &
+    zenity --entry --title=target --text=target >"$1" 2>>"$art/field.log" &
     field_pid=$!
+    if [ -n "${SWAYSOCK:-}" ]; then
+        wait_for 100 sh -c 'swaymsg -t get_tree | grep -q "\"name\": \"target\""' ||
+            echo "  (the text field did not appear; see field.log)"
+    fi
+    sleep 0.5
 }
 
 # Waits up to five seconds for the field to close, then closes it, so a paste
@@ -102,6 +107,8 @@ EOF
     export WAYLAND_DISPLAY
     export SWAYSOCK=$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock 2>/dev/null | head -1)
     export GDK_BACKEND=wayland
+    # GTK 4 wants a GPU for its default renderer; there is none here.
+    export GSK_RENDERER=cairo
 
     start_windup wayland || { kill $sway_pid; return; }
 
@@ -136,7 +143,7 @@ EOF
     wl-copy "second-$$"
     wait_for 30 history_has "second-$$"
     field "$home/field1"
-    sleep 1.5
+    grim "$art/wayland-field.png" 2>/dev/null
     "$bin" --popup
     sleep 0.8
     grim "$art/wayland-popup.png" 2>/dev/null && ok "wayland: screenshot of the popup taken"
@@ -215,7 +222,7 @@ EOF
 x11_session() {
     echo "== X11 (Xvfb + openbox)"
     fresh_home
-    unset WAYLAND_DISPLAY
+    unset WAYLAND_DISPLAY SWAYSOCK GSK_RENDERER
     export DISPLAY=:77 GDK_BACKEND=x11
     Xvfb $DISPLAY -screen 0 1600x1000x24 >"$art/x11-xvfb.log" 2>&1 &
     xvfb_pid=$!
