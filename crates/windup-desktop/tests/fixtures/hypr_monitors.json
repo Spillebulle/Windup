@@ -1,22 +1,74 @@
 [
-  {
-    "id": 0, "name": "DP-1", "description": "Dell Inc. DELL U2723QE", "make": "Dell Inc.",
-    "model": "DELL U2723QE", "serial": "ABC1234", "width": 3840, "height": 2160,
-    "refreshRate": 60.000, "x": 0, "y": 0,
-    "activeWorkspace": {"id": 1, "name": "1"},
-    "specialWorkspace": {"id": 0, "name": ""},
-    "reserved": [0, 30, 0, 0], "scale": 2.00, "transform": 0, "focused": true,
-    "dpmsStatus": true, "vrr": false, "disabled": false, "currentFormat": "XRGB8888",
+{
+    "id": 0,
+    "name": "DP-1",
+    "description": "Dell Inc. DELL U2723QE ABC1234",
+    "make": "Dell Inc.",
+    "model": "DELL U2723QE",
+    "serial": "ABC1234",
+    "width": 3840,
+    "height": 2160,
+    "physicalWidth": 600,
+    "physicalHeight": 340,
+    "refreshRate": 60.00000,
+    "x": 0,
+    "y": 0,
+    "activeWorkspace": {
+        "address": "0x55d0c0a1",
+        "id": 1,
+        "type": "numbered",
+        "name": "1"
+    },
+    "specialWorkspace": {
+        "address": "",
+        "type": "",
+        "name": ""
+    },
+    "reserved": [0, 30, 0, 0],
+    "scale": 2.00,
+    "transform": 0,
+    "focused": true,
+    "dpmsStatus": true,
+    "vrr": false,
+    "disabled": false,
+    "currentFormat": "XRGB8888",
+    "mirrorOf": "none",
     "availableModes": ["3840x2160@60.00Hz"]
-  },
-  {
-    "id": 1, "name": "HDMI-A-1", "description": "LG Electronics LG ULTRAGEAR", "make": "LG Electronics",
-    "model": "LG ULTRAGEAR", "serial": "XYZ789", "width": 1920, "height": 1080,
-    "refreshRate": 144.000, "x": 1920, "y": 0,
-    "activeWorkspace": {"id": 3, "name": "3"},
-    "specialWorkspace": {"id": 0, "name": ""},
-    "reserved": [0, 0, 0, 0], "scale": 1.00, "transform": 0, "focused": false,
-    "dpmsStatus": true, "vrr": false, "disabled": false, "currentFormat": "XRGB8888",
+},
+{
+    "id": 1,
+    "name": "HDMI-A-1",
+    "description": "LG Electronics LG ULTRAGEAR XYZ789",
+    "make": "LG Electronics",
+    "model": "LG ULTRAGEAR",
+    "serial": "XYZ789",
+    "width": 1920,
+    "height": 1080,
+    "physicalWidth": 530,
+    "physicalHeight": 300,
+    "refreshRate": 144.00000,
+    "x": 1920,
+    "y": 0,
+    "activeWorkspace": {
+        "address": "0x55d0c0a3",
+        "id": 3,
+        "type": "numbered",
+        "name": "3"
+    },
+    "specialWorkspace": {
+        "address": "",
+        "type": "",
+        "name": ""
+    },
+    "reserved": [0, 0, 0, 0],
+    "scale": 1.00,
+    "transform": 0,
+    "focused": false,
+    "dpmsStatus": true,
+    "vrr": false,
+    "disabled": false,
+    "currentFormat": "XRGB8888",
+    "mirrorOf": "none",
     "availableModes": ["1920x1080@144.00Hz"]
-  }
+}
 ]

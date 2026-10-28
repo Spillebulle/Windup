@@ -654,6 +654,12 @@ fn main() -> eframe::Result<()> {
         std::process::exit(capture_test(&path));
     }
 
+    if windup_core::ipc::parse_args(std::env::args().skip(1))
+        == windup_core::ipc::Launch::WindowRectsTest
+    {
+        std::process::exit(window_rects_test());
+    }
+
     #[cfg(target_os = "linux")]
     let Some(startup) = linux_startup() else {
         return Ok(());
@@ -694,6 +700,26 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(WindupApp::new(cc, startup)))),
     )
+}
+
+/// `windup --window-rects-test`: the window rectangles the capture overlay
+/// would use, through the same dispatch. Prints `rects: N`, then one line per
+/// rectangle (topmost first).
+fn window_rects_test() -> i32 {
+    let shot = match capture::grab_all() {
+        Ok(shot) => shot,
+        Err(e) => {
+            eprintln!("windup: {}", e.message());
+            return 1;
+        }
+    };
+    let rects = capture::window_rects(&shot);
+    println!("rects: {}", rects.len());
+    for w in &rects {
+        let r = w.rect;
+        println!("  {} {} {}x{} {}", r.x, r.y, r.w, r.h, w.title);
+    }
+    0
 }
 
 /// `windup --capture-test out.png`: the whole desktop as one PNG. The exit
@@ -747,7 +773,7 @@ fn linux_startup() -> Option<Startup> {
             return None;
         }
         // Handled in `main` before this runs.
-        Launch::CaptureTest(_) => return None,
+        Launch::CaptureTest(_) | Launch::WindowRectsTest => return None,
         Launch::Unknown(why) => {
             eprintln!("windup: {why}\n\n{}", ipc::USAGE);
             std::process::exit(2);

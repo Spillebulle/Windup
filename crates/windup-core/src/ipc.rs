@@ -83,6 +83,9 @@ pub enum Launch {
     /// `--capture-test <file.png>`: grab every monitor, write the picture,
     /// exit. A development aid, so it is not in `USAGE`.
     CaptureTest(PathBuf),
+    /// `--window-rects-test`: print how many window rectangles the desktop
+    /// reports, one line each, and exit. A test aid, so not in `USAGE`.
+    WindowRectsTest,
     /// `--help`.
     Help,
     /// Something we do not understand; the text says what.
@@ -120,6 +123,7 @@ where
             "--show" => Launch::Send(Command::Show),
             "--background" => Launch::Background,
             "--settings" => Launch::Settings,
+            "--window-rects-test" => Launch::WindowRectsTest,
             "--capture-test" => Launch::Unknown("--capture-test needs a file name".into()),
             "--help" | "-h" => Launch::Help,
             other => Launch::Unknown(format!("unknown option '{other}'")),
@@ -199,6 +203,16 @@ mod tests {
             Launch::Send(Command::Screenshot)
         );
         assert!(USAGE.contains("--capture") && USAGE.contains("--screenshot"));
+    }
+
+    #[test]
+    fn window_rects_test_is_a_hidden_flag() {
+        assert_eq!(parse_args(["--window-rects-test"]), Launch::WindowRectsTest);
+        assert!(matches!(
+            parse_args(["--window-rects-test", "x"]),
+            Launch::Unknown(_)
+        ));
+        assert!(!USAGE.contains("window-rects-test"));
     }
 
     #[test]

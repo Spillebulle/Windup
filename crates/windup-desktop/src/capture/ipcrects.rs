@@ -22,16 +22,20 @@ fn rect(x: Option<f32>, y: Option<f32>, w: Option<f32>, h: Option<f32>) -> Optio
     (r.w > 0.0 && r.h > 0.0).then_some(r)
 }
 
-/// Windows from Sway's `GET_TREE` reply, topmost first. Only windows on a
-/// workspace that is showing count (the scratchpad's `__i3` output never is).
-/// On each workspace floating windows come before tiled ones, and within each
-/// group the `focus` arrays (child ids, most recently focused first) order
-/// them, which is the closest Sway gives to a stacking order.
+/// Windows from Sway's `GET_TREE` reply, topmost first. Checked against
+/// sway/ipc-json.c: workspace nodes carry no `visible`, so a workspace is
+/// showing when its output's `current_workspace` names it (or, without that
+/// key, when it is first in the output's `focus`); the scratchpad's `__i3`
+/// output never counts. On each workspace floating windows come before tiled
+/// ones, and within each group the `focus` arrays (child ids, most recently
+/// focused first) order them, the closest Sway gives to a stacking order.
 ///
-/// The rectangle is the container's `rect`, which sway-ipc(7) documents as
-/// absolute and including the border and title bar, so `deco_rect` (relative
-/// to the container, inside it) adds nothing. A window is a leaf with a `pid`,
-/// `app_id` or `window_properties`; the title is `name`.
+/// A window is a container with a `pid` (only views have one); the title is
+/// `name`. Its `rect` excludes the title bar: `ipc_json_describe_node` moves
+/// `y` down and shrinks `height` by `deco_rect.height * count`, where `count`
+/// is the number of siblings when the parent's layout is `stacked` and 1
+/// otherwise. That is undone here, so the rectangle is the whole window,
+/// borders and title bar included.
 pub(crate) fn sway_rects(json: &str) -> Vec<WindowRect> {
     let Ok(root) = serde_json::from_str::<Value>(json) else {
         return Vec::new();
@@ -65,43 +69,79 @@ fn children<'a>(node: &'a Value, key: &str) -> Vec<&'a Value> {
 }
 
 fn find_workspaces(node: &Value, out: &mut Vec<WindowRect>) {
-    if node.get("type").and_then(Value::as_str) == Some("workspace") {
-        if node.get("visible").and_then(Value::as_bool) == Some(true) {
-            for k in children(node, "floating_nodes") {
-                sway_windows(k, out);
-            }
-            for k in children(node, "nodes") {
-                sway_windows(k, out);
-            }
+    if node.get("type").and_then(Value::as_str) != Some("output") {
+        for k in children(node, "nodes") {
+            find_workspaces(k, out);
         }
         return;
     }
-    for k in children(node, "nodes") {
-        find_workspaces(k, out);
+    if node.get("name").and_then(Value::as_str) == Some("__i3") {
+        return;
+    }
+    let current = node.get("current_workspace").and_then(Value::as_str);
+    let first_focus = node
+        .get("focus")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(Value::as_i64);
+    for ws in children(node, "nodes") {
+        if ws.get("type").and_then(Value::as_str) != Some("workspace") {
+            continue;
+        }
+        let showing = match current {
+            Some(name) => ws.get("name").and_then(Value::as_str) == Some(name),
+            None => first_focus.is_some() && ws.get("id").and_then(Value::as_i64) == first_focus,
+        };
+        if showing {
+            let stacked = ws.get("layout").and_then(Value::as_str) == Some("stacked");
+            let floating = children(ws, "floating_nodes");
+            let count = if stacked { floating.len() } else { 1 };
+            for k in floating {
+                sway_windows(k, count, out);
+            }
+            let tiled = children(ws, "nodes");
+            let count = if stacked { tiled.len() } else { 1 };
+            for k in tiled {
+                sway_windows(k, count, out);
+            }
+        }
     }
 }
 
-fn sway_windows(node: &Value, out: &mut Vec<WindowRect>) {
-    let kids: Vec<&Value> = children(node, "floating_nodes")
-        .into_iter()
-        .chain(children(node, "nodes"))
-        .collect();
-    if !kids.is_empty() {
+/// `count` is how many title bars the compositor took off this container's
+/// `rect` (see `sway_rects`).
+fn sway_windows(node: &Value, count: usize, out: &mut Vec<WindowRect>) {
+    let kids = children(node, "nodes");
+    let floating = children(node, "floating_nodes");
+    if !kids.is_empty() || !floating.is_empty() {
+        let stacked = node.get("layout").and_then(Value::as_str) == Some("stacked");
+        let n = if stacked { kids.len() } else { 1 };
         for k in kids {
-            sway_windows(k, out);
+            sway_windows(k, n, out);
+        }
+        for k in floating {
+            sway_windows(k, 1, out);
         }
         return;
     }
-    let is_window = node.get("pid").is_some()
-        || node.get("app_id").is_some_and(|a| !a.is_null())
-        || node.get("window_properties").is_some();
-    // Newer Sway marks a hidden tab or stacked sibling `visible: false`.
-    if !is_window || node.get("visible").and_then(Value::as_bool) == Some(false) {
+    // Only views have a pid. `visible` is false for a hidden tab or stacked
+    // sibling.
+    if node.get("pid").is_none() || node.get("visible").and_then(Value::as_bool) == Some(false) {
         return;
     }
     let r = node.get("rect");
     let field = |k: &str| r.and_then(|r| r.get(k)).and_then(num);
-    if let Some(rect) = rect(field("x"), field("y"), field("width"), field("height")) {
+    let deco = node
+        .get("deco_rect")
+        .and_then(|d| d.get("height"))
+        .and_then(num)
+        .unwrap_or(0.0)
+        * count as f32;
+    let (y, h) = (
+        field("y").map(|y| y - deco),
+        field("height").map(|h| h + deco),
+    );
+    if let Some(rect) = rect(field("x"), y, field("width"), h) {
         out.push(WindowRect {
             rect,
             title: node
@@ -117,8 +157,10 @@ fn sway_windows(node: &Value, out: &mut Vec<WindowRect>) {
 /// unhidden ones on a workspace `hyprctl monitors -j` says is showing (each
 /// monitor's active workspace, and its special workspace when one is open).
 /// Fullscreen windows come first, then floating, then tiled; within each
-/// group `focusHistoryID` (0 is the most recent) orders them. `at` and
-/// `size` are in the compositor's logical layout.
+/// group `focusHistoryID` (0 is the most recent) orders them. Checked against
+/// hyprland's src/ipc/s1/Commands.cpp: `at` and `size` are the window's
+/// geometric goal position and size in the global layout (monitors are placed
+/// by `x`/`y` there), not pixels of a monitor.
 pub(crate) fn hyprland_rects(clients_json: &str, monitors_json: &str) -> Vec<WindowRect> {
     let (Ok(Value::Array(clients)), Ok(Value::Array(monitors))) = (
         serde_json::from_str::<Value>(clients_json),
@@ -126,13 +168,19 @@ pub(crate) fn hyprland_rects(clients_json: &str, monitors_json: &str) -> Vec<Win
     ) else {
         return Vec::new();
     };
-    let mut shown = Vec::new();
+    // Workspaces are matched by name: `id` is only written for numbered
+    // workspaces, while both commands write `name` (HyprCtl's displayName).
+    // A monitor with no special workspace open reports an empty name.
+    let mut shown: Vec<&str> = Vec::new();
     for m in &monitors {
         for key in ["activeWorkspace", "specialWorkspace"] {
-            if let Some(id) = m.get(key).and_then(|w| w.get("id")).and_then(Value::as_i64)
-                && id != 0
+            if let Some(name) = m
+                .get(key)
+                .and_then(|w| w.get("name"))
+                .and_then(Value::as_str)
+                && !name.is_empty()
             {
-                shown.push(id);
+                shown.push(name);
             }
         }
     }
@@ -141,8 +189,8 @@ pub(crate) fn hyprland_rects(clients_json: &str, monitors_json: &str) -> Vec<Win
         let flag = |k: &str| c.get(k).and_then(Value::as_bool).unwrap_or(false);
         let ws = c
             .get("workspace")
-            .and_then(|w| w.get("id"))
-            .and_then(Value::as_i64);
+            .and_then(|w| w.get("name"))
+            .and_then(Value::as_str);
         if !flag("mapped") || flag("hidden") || !ws.is_some_and(|w| shown.contains(&w)) {
             continue;
         }
@@ -255,7 +303,8 @@ fn hypr_request(command: &str) -> std::io::Result<String> {
 
     let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
         .map_err(|_| Error::new(ErrorKind::NotFound, "no Hyprland instance signature"))?;
-    // Newer Hyprland keeps its sockets under the runtime dir, older in /tmp.
+    // Hyprland's own hyprctl uses `$XDG_RUNTIME_DIR/hypr/<sig>/.socket.sock`
+    // and sends `j/clients` for JSON. Older releases kept sockets in /tmp.
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR") {
         dirs.push(PathBuf::from(run).join("hypr").join(&sig));
@@ -263,15 +312,19 @@ fn hypr_request(command: &str) -> std::io::Result<String> {
     dirs.push(PathBuf::from("/tmp/hypr").join(&sig));
     let mut last = Error::new(ErrorKind::NotFound, "no Hyprland socket");
     for dir in dirs {
-        match UnixStream::connect(dir.join(".socket.sock")) {
-            Ok(mut s) => {
-                s.set_read_timeout(Some(READ_TIMEOUT))?;
-                s.set_write_timeout(Some(READ_TIMEOUT))?;
-                s.write_all(command.as_bytes())?;
-                let mut reply = String::new();
-                s.read_to_string(&mut reply)?;
-                return Ok(reply);
-            }
+        // One attempt per directory: a socket that connects but fails the
+        // request falls through to the next directory too.
+        let attempt = || -> std::io::Result<String> {
+            let mut s = UnixStream::connect(dir.join(".socket.sock"))?;
+            s.set_read_timeout(Some(READ_TIMEOUT))?;
+            s.set_write_timeout(Some(READ_TIMEOUT))?;
+            s.write_all(command.as_bytes())?;
+            let mut reply = String::new();
+            s.read_to_string(&mut reply)?;
+            Ok(reply)
+        };
+        match attempt() {
+            Ok(reply) => return Ok(reply),
             Err(e) => last = e,
         }
     }
@@ -282,13 +335,13 @@ fn hypr_request(command: &str) -> std::io::Result<String> {
 mod tests {
     use super::*;
 
-    // Fixtures are hand-made, not recorded, but shaped field for field like
-    // the real replies (trimmed to what matters): Sway's GET_TREE per
-    // sway-ipc(7), https://man.archlinux.org/man/sway-ipc.7, and Hyprland's
-    // `hyprctl clients -j` / `monitors -j` per
-    // https://wiki.hypr.land/Configuring/Using-hyprctl/ and the JSON written
-    // by Hyprland's HyprCtl.cpp. Replace with recordings when a session is at
-    // hand.
+    // Fixtures are hand-made, not recordings, but every key is one the source
+    // writes (trimmed of the rest): Sway's from sway/ipc-json.c,
+    // https://raw.githubusercontent.com/swaywm/sway/master/sway/ipc-json.c
+    // (workspaces carry no `visible`; outputs carry `current_workspace`;
+    // `rect` excludes the title bar), and Hyprland's from src/ipc/s1/Commands.cpp,
+    // https://raw.githubusercontent.com/hyprwm/Hyprland/main/src/ipc/s1/Commands.cpp.
+    // Values are invented. Replace with recordings when a session is at hand.
     const SWAY: &str = include_str!("../../tests/fixtures/sway_tree.json");
     const CLIENTS: &str = include_str!("../../tests/fixtures/hypr_clients.json");
     const MONITORS: &str = include_str!("../../tests/fixtures/hypr_monitors.json");
@@ -332,16 +385,48 @@ mod tests {
 
     #[test]
     fn hyprland_special_workspace_counts_when_shown() {
-        let monitors = MONITORS.replace(
-            r#""specialWorkspace": {"id": 0, "name": ""}"#,
-            r#""specialWorkspace": {"id": -98, "name": "special:s"}"#,
-        );
-        let clients = CLIENTS.replace(
-            r#""id": 2, "name": "2""#,
-            r#""id": -98, "name": "special:s""#,
-        );
+        let mut monitors: serde_json::Value = serde_json::from_str(MONITORS).unwrap();
+        monitors[0]["specialWorkspace"]["name"] = "special:s".into();
+        let mut clients: serde_json::Value = serde_json::from_str(CLIENTS).unwrap();
+        for c in clients.as_array_mut().unwrap() {
+            if c["title"] == "Hidden editor" {
+                c["workspace"]["name"] = "special:s".into();
+            }
+        }
+        let (clients, monitors) = (clients.to_string(), monitors.to_string());
         assert!(titles(&hyprland_rects(&clients, &monitors)).contains(&"Hidden editor"));
         assert!(!titles(&hyprland_rects(&clients, MONITORS)).contains(&"Hidden editor"));
+    }
+
+    #[test]
+    fn sway_title_bar_is_added_back() {
+        let r = sway_rects(SWAY);
+        let rect = |t: &str| {
+            let d = r.iter().find(|w| w.title == t).unwrap().rect;
+            (d.x, d.y, d.w, d.h)
+        };
+        // Reported y=20 h=1060 under a 20 px bar; the window is 0..1080.
+        assert_eq!(rect("~/code"), (0.0, 0.0, 960.0, 1080.0));
+        assert_eq!(rect("Calculator"), (700.0, 300.0, 400.0, 500.0));
+        // No bar (deco_rect empty): unchanged.
+        assert_eq!(rect("Mozilla Firefox"), (960.0, 0.0, 960.0, 1080.0));
+    }
+
+    #[test]
+    fn sway_stacked_siblings_add_back_every_bar() {
+        let tree = r#"{"type":"root","nodes":[{"type":"output","name":"X","current_workspace":"1",
+          "nodes":[{"type":"workspace","name":"1","id":2,"layout":"stacked","focus":[3,4],
+            "nodes":[
+              {"id":3,"type":"con","name":"a","pid":1,"visible":true,
+               "rect":{"x":0,"y":40,"width":100,"height":160},
+               "deco_rect":{"x":0,"y":0,"width":100,"height":20}},
+              {"id":4,"type":"con","name":"b","pid":2,"visible":false,
+               "rect":{"x":0,"y":40,"width":100,"height":160},
+               "deco_rect":{"x":0,"y":20,"width":100,"height":20}}],
+            "floating_nodes":[]}]}]}"#;
+        let r = sway_rects(tree);
+        assert_eq!(titles(&r), ["a"]);
+        assert_eq!((r[0].rect.y, r[0].rect.h), (0.0, 200.0));
     }
 
     #[test]

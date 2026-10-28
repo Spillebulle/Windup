@@ -210,6 +210,15 @@ sway_capture() {
         echo "  (the marker window did not appear; see wayland-marker.log)"
     swaymsg '[title="windup-marker"] floating enable, resize set 300 300, move position 0 0' >/dev/null
     sleep 0.5
+    # The marker is mapped and floating on the visible workspace, so the
+    # window rectangles read from Sway's get_tree must include it.
+    local rects_out
+    rects_out=$("$bin" --window-rects-test 2>>"$log")
+    if [ "$(echo "$rects_out" | sed -n 's/^rects: //p')" -ge 1 ] 2>/dev/null; then
+        ok "wayland: --window-rects-test found windows ($(echo "$rects_out" | head -1))"
+    else
+        bad "wayland: --window-rects-test found no windows ($rects_out)"
+    fi
     # Only a marker seen where it was put proves anything about rotation.
     local marked=false
     if "$bin" --capture-test "$art/wayland-marker.png" >>"$log" 2>&1 &&
