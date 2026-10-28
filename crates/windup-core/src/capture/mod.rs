@@ -1,6 +1,7 @@
 //! Screenshots: desktop geometry and stitching. No UI, no platform code.
 
 pub mod annotate;
+pub mod backend;
 pub mod geometry;
 pub mod output;
 pub mod pick;
