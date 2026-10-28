@@ -19,3 +19,6 @@ rfd = { workspace = true }
 # the tree through epaint, so this adds nothing to the build.
 [dev-dependencies]
 ab_glyph = "0.2"
+# `examples/capture-view.rs` opens a window. eframe brings wgpu without a
+# backend; the desktop crate enables them through this same dependency.
+wgpu = { workspace = true }

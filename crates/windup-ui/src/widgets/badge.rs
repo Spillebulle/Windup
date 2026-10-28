@@ -1,35 +1,52 @@
 use crate::theme::{Palette, metrics, strong, text};
-use egui::{Align2, Color32, Key, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align2, Color32, Key, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use std::hash::Hash;
 use windup_core::shortcut::Shortcut;
 
 /// Static keycap badge displaying a keyboard shortcut string.
 pub fn shortcut_badge(ui: &mut Ui, p: &Palette, text: &str) {
-    let font_id = egui::FontId::monospace(text::TINY);
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_string(), font_id, p.text);
-    let text_size = galley.size();
-
-    let pad_x = metrics::S2;
-    let pad_y = 3.0;
-    let badge_size = vec2(text_size.x + pad_x * 2.0, text_size.y + pad_y * 2.0);
-
-    let (rect, _) = ui.allocate_exact_size(badge_size, Sense::hover());
-
+    let size = keycap_size(ui.painter(), p, text);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        painter.rect_filled(rect, metrics::RADIUS_TIGHT, p.control);
-        painter.rect_stroke(
-            rect,
-            metrics::RADIUS_TIGHT,
-            Stroke::new(metrics::HAIRLINE, p.line),
-            egui::StrokeKind::Inside,
-        );
-
-        let text_pos = pos2(rect.min.x + pad_x, rect.min.y + pad_y);
-        painter.galley(text_pos, galley, p.text);
+        paint_keycap(ui.painter(), p, rect.min, text);
     }
+}
+
+const KEYCAP_PAD_X: f32 = metrics::S2;
+const KEYCAP_PAD_Y: f32 = 3.0;
+
+/// The size [`paint_keycap`] will take for `text`.
+pub fn keycap_size(painter: &Painter, p: &Palette, text: &str) -> Vec2 {
+    let font_id = egui::FontId::monospace(text::TINY);
+    let size = painter
+        .layout_no_wrap(text.to_string(), font_id, p.text)
+        .size();
+    vec2(size.x + KEYCAP_PAD_X * 2.0, size.y + KEYCAP_PAD_Y * 2.0)
+}
+
+/// Paints a keycap with its top-left at `min`, for places that draw rather
+/// than allocate (a tooltip on the capture overlay). Returns its rect.
+pub fn paint_keycap(painter: &Painter, p: &Palette, min: Pos2, text: &str) -> Rect {
+    let font_id = egui::FontId::monospace(text::TINY);
+    let galley = painter.layout_no_wrap(text.to_string(), font_id, p.text);
+    let size = galley.size();
+    let rect = Rect::from_min_size(
+        min,
+        vec2(size.x + KEYCAP_PAD_X * 2.0, size.y + KEYCAP_PAD_Y * 2.0),
+    );
+    painter.rect_filled(rect, metrics::RADIUS_TIGHT, p.control);
+    painter.rect_stroke(
+        rect,
+        metrics::RADIUS_TIGHT,
+        Stroke::new(metrics::HAIRLINE, p.line),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        pos2(rect.min.x + KEYCAP_PAD_X, rect.min.y + KEYCAP_PAD_Y),
+        galley,
+        p.text,
+    );
+    rect
 }
 
 /// Interactive shortcut recorder badge.

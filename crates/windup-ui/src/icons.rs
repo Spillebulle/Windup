@@ -46,10 +46,11 @@ pub enum Icon {
     Download,
     ChevronDown,
     Blur,
+    ChevronUp,
 }
 
 impl Icon {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::Sliders,
         Self::Clipboard,
         Self::FileText,
@@ -85,6 +86,7 @@ impl Icon {
         Self::Download,
         Self::ChevronDown,
         Self::Blur,
+        Self::ChevronUp,
     ];
 
     pub fn nodes(self) -> &'static [Node] {
@@ -410,6 +412,8 @@ impl Icon {
             ],
             // Lucide chevron-down
             Self::ChevronDown => &[Node::Path("m6 9 6 6 6-6")],
+            // Lucide chevron-up
+            Self::ChevronUp => &[Node::Path("m18 15-6-6-6 6")],
             // Lucide droplet (blur: a drop reads as soft focus, and no Lucide mark is named for it)
             Self::Blur => &[Node::Path(
                 "M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z",

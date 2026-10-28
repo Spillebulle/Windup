@@ -54,6 +54,51 @@ pub mod metrics {
     pub const LOUPE: f32 = 112.0;
     /// Magnification of the loupe.
     pub const LOUPE_ZOOM: f32 = 8.0;
+    /// Height of the position caption under the loupe's grid.
+    pub const LOUPE_CAPTION: f32 = 18.0;
+    /// The gap kept between the pointer and the loupe (Umber's `CLEARANCE`).
+    pub const LOUPE_CLEARANCE: f32 = 22.0;
+    /// Opacity of the black hairlines between the loupe's texels (the
+    /// mockup's `#0003`). Black, not a token: a mark over user pixels (§2.6).
+    pub const LOUPE_GRID_ALPHA: u8 = 0x33;
+
+    // The capture bar and the overlay's marks (owner's mockups
+    // `launcher-c2.html` and `editor-placement.html`).
+    /// A floating panel's fill opacity: `chrome` at 96 % (§5).
+    pub const FLOAT_ALPHA: f32 = 0.96;
+    /// Opacity of a disabled control (§7.6).
+    pub const DISABLED_ALPHA: f32 = 0.45;
+    /// Padding and gap inside a segmented control (§7.9).
+    pub const SEG_PAD: f32 = 2.0;
+    /// A segment's corner radius (§7.9).
+    pub const RADIUS_SEG: f32 = 4.0;
+    /// Width of an icon-only segment in the capture bar (mockup `.si`).
+    pub const SEG_ICON_W: f32 = 28.0;
+    /// The chevron of a dropdown trigger (§7.7, mockup `.dd svg.chev`).
+    pub const CHEVRON: f32 = 12.0;
+    /// Gap between an icon and its label inside a control (mockup `gap: 6px`).
+    pub const ICON_GAP: f32 = 6.0;
+    /// The colour swatch in the tool bar (mockup `.sw`).
+    pub const SWATCH_SMALL: f32 = 18.0;
+    /// A menu's inner padding (§7.1).
+    pub const MENU_PAD: f32 = 5.0;
+    /// A menu item's padding, vertical then horizontal (§7.1).
+    pub const MENU_ITEM_PAD_Y: f32 = 6.0;
+    pub const MENU_ITEM_PAD_X: f32 = 10.0;
+    /// How far a menu or popover opens from its trigger (§7.7, §7.17).
+    pub const POPOVER_GAP: f32 = 4.0;
+    /// A tooltip's padding, vertical then horizontal (§7.17).
+    pub const TOOLTIP_PAD_Y: f32 = 4.0;
+    pub const TOOLTIP_PAD_X: f32 = 8.0;
+    /// How long the pointer rests on a control before its tooltip (§7.17).
+    pub const TOOLTIP_DELAY_MS: u64 = 400;
+    /// A read-only figure chip's padding (mockup `.chip`, §7.13).
+    pub const CHIP_PAD_X: f32 = 7.0;
+    pub const CHIP_PAD_Y: f32 = 2.0;
+    /// Side of a resize handle on the selection or an annotation.
+    pub const HANDLE: f32 = 7.0;
+    /// Side of the colour wheel in the swatch's popover.
+    pub const WHEEL_POPOVER: f32 = 168.0;
 
     // Colour wheel, from Umber's picker.
     /// Width of the hue ring. A wheel too small for it keeps a quarter of its

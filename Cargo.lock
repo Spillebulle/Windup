@@ -4580,6 +4580,7 @@ dependencies = [
  "image",
  "log",
  "rfd",
+ "wgpu",
  "windup-core",
 ]
 
