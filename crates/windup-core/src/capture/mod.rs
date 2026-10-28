@@ -2,6 +2,7 @@
 
 pub mod annotate;
 pub mod geometry;
+pub mod raster;
 pub mod selection;
 
 pub use geometry::{DRect, DesktopShot, MonitorShot};
