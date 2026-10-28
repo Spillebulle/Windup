@@ -2,6 +2,7 @@
 
 pub mod annotate;
 pub mod geometry;
+pub mod output;
 pub mod pick;
 pub mod raster;
 pub mod selection;
