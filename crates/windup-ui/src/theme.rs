@@ -54,6 +54,20 @@ pub mod metrics {
     pub const LOUPE: f32 = 112.0;
     /// Magnification of the loupe.
     pub const LOUPE_ZOOM: f32 = 8.0;
+
+    // Colour wheel, from Umber's picker.
+    /// Width of the hue ring. A wheel too small for it keeps a quarter of its
+    /// radius as hub and narrows the band instead.
+    pub const WHEEL_RING: f32 = 20.0;
+    /// Smallest wheel that is still a wheel: below this a ring's inner radius
+    /// would go negative and its mesh turn inside out.
+    pub const WHEEL_MIN: f32 = 48.0;
+    /// Radius of the hue marker on the ring.
+    pub const WHEEL_HUE_MARKER: f32 = 6.0;
+    /// Radius of the saturation and value marker in the triangle.
+    pub const WHEEL_SV_MARKER: f32 = 5.0;
+    /// Stroke width of both markers.
+    pub const WHEEL_MARKER_STROKE: f32 = 2.0;
 }
 
 pub const STRONG: &str = "archivo-semibold";
