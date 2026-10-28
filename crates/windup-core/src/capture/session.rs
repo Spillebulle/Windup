@@ -303,9 +303,25 @@ impl Session {
                 // off it would render nothing, and Copy and Save would do
                 // nothing without a word.
                 let bounds = self.shot.bounds();
+                let resizing = self.edge.is_some_and(|h| h != Handle::Move);
                 if let Some(r) = &mut self.selection.rect {
-                    r.x = r.x.min(bounds.right() - r.w).max(bounds.x);
-                    r.y = r.y.min(bounds.bottom() - r.h).max(bounds.y);
+                    if resizing {
+                        // A nudged edge stops at the border; the opposite
+                        // edge stays where it is.
+                        let l = r.x.max(bounds.x).min(bounds.right() - 1.0);
+                        let t = r.y.max(bounds.y).min(bounds.bottom() - 1.0);
+                        let right = r.right().min(bounds.right()).max(l + 1.0);
+                        let bottom = r.bottom().min(bounds.bottom()).max(t + 1.0);
+                        *r = DRect {
+                            x: l,
+                            y: t,
+                            w: right - l,
+                            h: bottom - t,
+                        };
+                    } else {
+                        r.x = r.x.min(bounds.right() - r.w).max(bounds.x);
+                        r.y = r.y.min(bounds.bottom() - r.h).max(bounds.y);
+                    }
                 }
             }
             Action::Delete if editing => {
@@ -795,6 +811,36 @@ mod tests {
         s.scroll(1.0, 0.0);
         assert_eq!(s.doc.items[0].size, 7.5, "5 points");
         assert_eq!(s.size_flash.map(|f| f.0), Some(5.0), "shown in points");
+    }
+
+    #[test]
+    fn a_nudged_edge_stops_at_the_desktop_border() {
+        // The desktop is (0, 0)-(200, 100).
+        let whole = rect(0.0, 0.0, 200.0, 100.0);
+        for (edge, dx, dy) in [
+            (Handle::W, -1.0, 0.0),
+            (Handle::E, 1.0, 0.0),
+            (Handle::N, 0.0, -1.0),
+            (Handle::S, 0.0, 1.0),
+            (Handle::NW, -1.0, -1.0),
+            (Handle::SE, 10.0, 10.0),
+        ] {
+            let mut s = editing();
+            s.selection.set_rect(whole);
+            s.edge = Some(edge);
+            for _ in 0..3 {
+                s.act(Action::Nudge { dx, dy });
+            }
+            assert_eq!(s.selection.rect, Some(whole), "{edge:?}");
+        }
+    }
+
+    #[test]
+    fn a_nudged_edge_past_the_border_keeps_the_opposite_edge() {
+        let mut s = editing(); // (10, 10)-(90, 90)
+        s.edge = Some(Handle::W);
+        s.act(Action::Nudge { dx: -50.0, dy: 0.0 });
+        assert_eq!(s.selection.rect, Some(rect(0.0, 10.0, 90.0, 80.0)));
     }
 
     #[test]
