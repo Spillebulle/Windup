@@ -29,9 +29,9 @@ use windup_ui::{Palette, notice};
 
 /// How many taken names a save steps past before it gives up.
 const SAVE_TRIES: usize = 16;
-/// Frames the overlay under the pointer keeps asking for the keyboard until
-/// it has it.
-const FOCUS_FRAMES: u32 = 10;
+/// The frame by which the overlay under the pointer stops asking for the
+/// keyboard if it still does not have it.
+const FOCUS_FRAMES: u32 = 12;
 /// The notice's window title (also how Win32 finds its window).
 const NOTICE_TITLE: &str = "Windup notice";
 
@@ -71,6 +71,35 @@ struct Notice {
     rect: egui::Rect,
     frames: u32,
     had_focus: bool,
+}
+
+/// What a capture overlay does on its `frame`th frame.
+///
+/// Frame 0 is laid out at the scale the window was created with, and the
+/// placement then moves it, maybe onto another DPI, whose resize winit only
+/// delivers after that frame. So frame 0 stays hidden: it only places the
+/// window. Frame 1 is laid out at the right scale and asks to be shown and
+/// focused; egui carries out both after that frame is painted. From frame 2
+/// the window is on the screen, and Win32 may push it to the foreground.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Steps {
+    /// Set the window up while it is hidden (kept out of Alt+Tab).
+    pub setup: bool,
+    /// The builder's visibility.
+    pub visible: bool,
+    /// Send `Visible(true)` and `Focus`.
+    pub show: bool,
+    /// May take the foreground with Win32 (only while it lacks focus).
+    pub force_focus: bool,
+}
+
+pub(crate) fn steps(frame: u32) -> Steps {
+    Steps {
+        setup: frame == 0,
+        visible: frame >= 1,
+        show: frame == 1,
+        force_focus: (2..FOCUS_FRAMES).contains(&frame),
+    }
 }
 
 /// A monitor's layout in egui points, at `ppp` pixels per point.
@@ -261,7 +290,7 @@ impl WindupApp {
             frames,
             ..
         } = cap;
-        let first = *frames == 0;
+        let step = steps(*frames);
         let mut outcome = None;
         for (i, surface) in surfaces.iter_mut().enumerate() {
             let rect = points_rect(surface.layout, surface.ppp);
@@ -273,7 +302,7 @@ impl WindupApp {
                 .with_always_on_top()
                 .with_taskbar(false)
                 .with_active(i == *focus)
-                .with_visible(!first)
+                .with_visible(step.visible)
                 .with_position(rect.min)
                 .with_inner_size(rect.size());
             let id = egui::ViewportId::from_hash_of(("capture", i));
@@ -281,15 +310,22 @@ impl WindupApp {
                 if class != egui::ViewportClass::Immediate {
                     return;
                 }
-                let wants_focus = i == *focus
-                    && *frames < FOCUS_FRAMES
-                    && vctx.input(|inp| inp.viewport().focused) != Some(true);
-                place_overlay(&surface.title, surface.layout, first, wants_focus);
-                if first {
-                    vctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                let mine = i == *focus;
+                let unfocused = vctx.input(|inp| inp.viewport().focused) != Some(true);
+                if step.setup {
+                    make_tool_window(&surface.title);
                 }
-                if wants_focus {
-                    vctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                place_overlay(
+                    &surface.title,
+                    surface.layout,
+                    mine && unfocused && step.force_focus,
+                );
+                if step.show {
+                    // Both are carried out after this frame is painted.
+                    vctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    if mine {
+                        vctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
                 }
                 // Windows is placed exactly by `place_overlay`. Elsewhere the
                 // window may land at another scale than guessed: re-derive the
@@ -404,7 +440,7 @@ impl WindupApp {
             .with_always_on_top()
             .with_taskbar(false)
             .with_active(true)
-            .with_visible(n.frames > 0)
+            .with_visible(n.frames >= 2)
             .with_inner_size(n.rect.size())
             .with_position(n.rect.min);
         let mut close = false;
@@ -413,7 +449,14 @@ impl WindupApp {
             if class != egui::ViewportClass::Immediate {
                 return;
             }
-            if !n.had_focus {
+            // As the overlays, one frame later: frames 0 and 1 are painted
+            // hidden, so the first one shown is laid out at the window's own
+            // scale. The popup's clip-and-focus shows the window (after
+            // setting its region), so it waits for frame 2.
+            if n.frames == 0 {
+                make_tool_window(NOTICE_TITLE);
+            }
+            if n.frames >= 2 && !n.had_focus {
                 let size = n.rect.size();
                 crate::focus_and_clip_popup_window(
                     NOTICE_TITLE,
@@ -422,7 +465,7 @@ impl WindupApp {
                     vctx.pixels_per_point(),
                 );
             }
-            if n.frames == 0 {
+            if n.frames == 2 {
                 vctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 vctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
@@ -530,16 +573,15 @@ fn own_window(title: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
 }
 
 /// Puts the overlay exactly on its monitor in physical pixels, whatever
-/// winit made of the points, shows it on its first frame (after the
-/// placement, so it never appears anywhere else), and takes the keyboard for
-/// it when asked. Moving a window onto a monitor of another scale makes
-/// winit resize it for the new DPI, so the move is repeated until it holds.
+/// winit made of the points, and takes the foreground for it when asked.
+/// Never shows it: see [`steps`]. Moving a window onto a monitor of another
+/// scale makes winit resize it for the new DPI, so the move is repeated
+/// until it holds.
 #[cfg(target_os = "windows")]
-fn place_overlay(title: &str, layout: DRect, show: bool, focus: bool) {
+fn place_overlay(title: &str, layout: DRect, focus: bool) {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GCLP_HBRBACKGROUND, GetWindowRect, HWND_TOPMOST, SW_SHOW, SW_SHOWNA, SWP_NOACTIVATE,
-        SetClassLongPtrW, SetWindowPos, ShowWindow,
+        GetWindowRect, HWND_TOPMOST, SWP_NOACTIVATE, SetWindowPos,
     };
     let Some(hwnd) = own_window(title) else {
         return;
@@ -548,10 +590,6 @@ fn place_overlay(title: &str, layout: DRect, show: bool, focus: bool) {
     // SAFETY: `hwnd` is one of this process's windows, found just now on
     // this (its own) thread.
     unsafe {
-        if show {
-            // No erase with the class brush before the first frame.
-            SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, 0);
-        }
         for _ in 0..3 {
             let mut r: RECT = std::mem::zeroed();
             GetWindowRect(hwnd, &mut r);
@@ -559,9 +597,6 @@ fn place_overlay(title: &str, layout: DRect, show: bool, focus: bool) {
                 break;
             }
             SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
-        }
-        if show {
-            ShowWindow(hwnd, if focus { SW_SHOW } else { SW_SHOWNA });
         }
         if focus {
             force_foreground(hwnd);
@@ -572,14 +607,36 @@ fn place_overlay(title: &str, layout: DRect, show: bool, focus: bool) {
 /// X11: egui's focus request is an application's, which window managers may
 /// refuse; ask again as a pager does.
 #[cfg(target_os = "linux")]
-fn place_overlay(title: &str, _layout: DRect, _show: bool, focus: bool) {
+fn place_overlay(title: &str, _layout: DRect, focus: bool) {
     if focus && let Some(w) = crate::linux::x11::window_named(title) {
         crate::linux::x11::activate(w);
     }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn place_overlay(_title: &str, _layout: DRect, _show: bool, _focus: bool) {}
+fn place_overlay(_title: &str, _layout: DRect, _focus: bool) {}
+
+/// Keeps the window out of Alt+Tab. winit's `with_taskbar(false)` only takes
+/// the taskbar button away (through `ITaskbarList`).
+#[cfg(target_os = "windows")]
+fn make_tool_window(title: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    };
+    if let Some(hwnd) = own_window(title) {
+        // SAFETY: one of this process's windows; its other ex-styles are kept.
+        unsafe {
+            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let tool = (ex | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize);
+            if tool != ex {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, tool);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn make_tool_window(_title: &str) {}
 
 /// Foreground and keyboard focus for `hwnd`, with the input of the current
 /// foreground thread attached so Windows allows it (as the popup does).
@@ -687,6 +744,26 @@ mod tests {
     #[test]
     fn physical_rounds_edges_not_sizes() {
         assert_eq!(physical(rect(-0.4, 0.6, 100.4, 50.0)), (0, 1, 100, 50));
+    }
+
+    #[test]
+    fn frame_0_is_hidden_frame_1_shows_and_win32_focus_waits_for_frame_2() {
+        assert_eq!(
+            steps(0),
+            Steps {
+                setup: true,
+                visible: false,
+                show: false,
+                force_focus: false,
+            }
+        );
+        let f1 = steps(1);
+        assert!(f1.visible && f1.show && !f1.setup && !f1.force_focus);
+        let f2 = steps(2);
+        assert!(f2.visible && !f2.show && f2.force_focus);
+        assert!(steps(FOCUS_FRAMES - 1).force_focus);
+        assert!(!steps(FOCUS_FRAMES).force_focus);
+        assert!(steps(FOCUS_FRAMES).visible);
     }
 
     #[test]

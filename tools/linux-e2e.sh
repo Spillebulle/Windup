@@ -438,7 +438,7 @@ x11_session() {
     fresh_home
     unset WAYLAND_DISPLAY SWAYSOCK GSK_RENDERER
     export DISPLAY=:77 GDK_BACKEND=x11
-    screen=1600x1000
+    local screen=1600x1000
     Xvfb $DISPLAY -screen 0 ${screen}x24 >"$art/x11-xvfb.log" 2>&1 &
     xvfb_pid=$!
     wait_for 50 xdpyinfo || { bad "x11: Xvfb did not start"; return; }
@@ -448,6 +448,7 @@ x11_session() {
 
     # The capture back end: the whole root window as one PNG of its size.
     if "$bin" --capture-test "$art/x11.png" >"$art/x11-capture.log" 2>&1; then
+        local size
         size=$(png_size "$art/x11.png")
         if [ "$size" = "$screen" ]; then
             ok "x11: --capture-test wrote the whole screen ($size)"
