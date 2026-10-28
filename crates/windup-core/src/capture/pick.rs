@@ -19,6 +19,8 @@
 //!    side that fails (text, an icon, a gradient) moves to its next-nearest
 //!    candidate, and the sides are checked again. A real window edge covers
 //!    any part of its length, so it holds however small the rectangle is yet.
+//!    The monitor's border is each side's last candidate, so a maximised or
+//!    snapped window, which has no edge where it meets the border, is found.
 //! 3. Reject a rectangle under `MIN_SIDE` px either way or as large as the
 //!    monitor; give up (`None`) when a side runs out of candidates.
 //!
@@ -132,31 +134,38 @@ pub fn edge_rect(shot: &DesktopShot, at: (f32, f32)) -> Option<DRect> {
     // A left/top boundary is the first pixel inside, a right/bottom one the
     // first pixel outside; an edge at `x` lies between `x - 1` and `x`, so
     // the edge position is the boundary either way.
-    let lefts = candidates((1..=px).rev(), |x| luma.v_edge(x, py));
-    let rights = candidates(px + 1..w, |x| luma.v_edge(x, py));
-    let tops = candidates((1..=py).rev(), |y| luma.h_edge(px, y));
-    let bottoms = candidates(py + 1..h, |y| luma.h_edge(px, y));
-    if lefts.is_empty() || rights.is_empty() || tops.is_empty() || bottoms.is_empty() {
-        return None;
-    }
+    //
+    // The monitor's own border is every side's last candidate, and always
+    // covered: a maximised or snapped window has no edge where it meets it.
+    // A rectangle that ends up as the whole monitor is still rejected below.
+    let mut lefts = candidates((1..=px).rev(), |x| luma.v_edge(x, py));
+    let mut rights = candidates(px + 1..w, |x| luma.v_edge(x, py));
+    let mut tops = candidates((1..=py).rev(), |y| luma.h_edge(px, y));
+    let mut bottoms = candidates(py + 1..h, |y| luma.h_edge(px, y));
+    lefts.push(0);
+    rights.push(w);
+    tops.push(0);
+    bottoms.push(h);
+    let v_side = |x: usize, y: usize| x == 0 || x == w || luma.v_edge(x, y);
+    let h_side = |x: usize, y: usize| y == 0 || y == h || luma.h_edge(x, y);
 
     let (mut il, mut ir, mut it, mut ib) = (0, 0, 0, 0);
     let (l, r, t, b) = loop {
         let (l, r, t, b) = (lefts[il], rights[ir], tops[it], bottoms[ib]);
         let mut ok = true;
-        if !covered(t, b, |y| luma.v_edge(l, y)) {
+        if !covered(t, b, |y| v_side(l, y)) {
             il += 1;
             ok = false;
         }
-        if !covered(t, b, |y| luma.v_edge(r, y)) {
+        if !covered(t, b, |y| v_side(r, y)) {
             ir += 1;
             ok = false;
         }
-        if !covered(l, r, |x| luma.h_edge(x, t)) {
+        if !covered(l, r, |x| h_side(x, t)) {
             it += 1;
             ok = false;
         }
-        if !covered(l, r, |x| luma.h_edge(x, b)) {
+        if !covered(l, r, |x| h_side(x, b)) {
             ib += 1;
             ok = false;
         }
@@ -393,6 +402,39 @@ mod tests {
         let b = r(0.0, 0.0, 800.0, 600.0);
         let s = shot(boxed(800, 600, b), r(0.0, 0.0, 800.0, 600.0));
         assert_eq!(edge_rect(&s, (400.0, 300.0)), None);
+    }
+
+    #[test]
+    fn edges_find_a_half_snapped_window_touching_three_borders() {
+        // The window fills the left half, edge to edge; wallpaper on the right.
+        let mut img = RgbaImage::from_pixel(800, 600, Rgba([180, 180, 180, 255]));
+        for x in 400..800 {
+            for y in 0..600 {
+                img.put_pixel(x, y, Rgba([40, 40, 40, 255]));
+            }
+        }
+        let s = shot(img, r(0.0, 0.0, 800.0, 600.0));
+        near(
+            edge_rect(&s, (200.0, 300.0)).unwrap(),
+            r(0.0, 0.0, 400.0, 600.0),
+            2.0,
+        );
+    }
+
+    #[test]
+    fn edges_find_a_maximised_window_below_a_top_panel() {
+        let mut img = RgbaImage::from_pixel(800, 600, Rgba([180, 180, 180, 255]));
+        for x in 0..800 {
+            for y in 0..30 {
+                img.put_pixel(x, y, Rgba([30, 30, 30, 255]));
+            }
+        }
+        let s = shot(img, r(0.0, 0.0, 800.0, 600.0));
+        near(
+            edge_rect(&s, (400.0, 300.0)).unwrap(),
+            r(0.0, 30.0, 800.0, 570.0),
+            2.0,
+        );
     }
 
     #[test]
