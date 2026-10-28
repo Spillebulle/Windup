@@ -28,7 +28,8 @@ use smithay_client_toolkit::seat::keyboard::{
     KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers,
 };
 use smithay_client_toolkit::seat::pointer::{
-    CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer,
+    CursorIcon, PointerData, PointerDataExt, PointerEvent, PointerEventKind, PointerHandler,
+    ThemeSpec, ThemedPointer,
 };
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::WaylandSurface;
@@ -244,7 +245,7 @@ pub struct State {
 
     seat: Option<wl_seat::WlSeat>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
-    pointer: Option<ThemedPointer>,
+    pointer: Option<ThemedPointer<EnterFrames>>,
     clip: Option<Clip>,
     vkbd: Option<vkbd::VirtualKeyboard>,
 
@@ -899,7 +900,10 @@ impl LayerShellHandler for State {
             return;
         };
         if !popup.configured {
-            log::info!("popup: configured at {w}x{h}");
+            log::info!(
+                "popup: configured at {w}x{h}, {} ms after opening",
+                popup.opened.elapsed().as_millis()
+            );
         }
         popup.size = (w, h);
         popup.configured = true;
@@ -949,12 +953,13 @@ impl SeatHandler for State {
             let cursor_surface = self.compositor.create_surface(qh);
             self.pointer = self
                 .seat_state
-                .get_pointer_with_theme(
+                .get_pointer_with_theme_and_data(
                     qh,
                     &seat,
                     self.shm.wl_shm(),
                     cursor_surface,
                     ThemeSpec::default(),
+                    EnterFrames(PointerData::new(seat.clone())),
                 )
                 .ok();
         }
@@ -1134,6 +1139,10 @@ impl PointerHandler for State {
                         let _ = pointer.set_cursor(conn, CursorIcon::Default);
                     }
                     if let Some(popup) = self.popup.as_mut() {
+                        log::info!(
+                            "popup: pointer entered {} ms after opening",
+                            popup.opened.elapsed().as_millis()
+                        );
                         popup.pointer = Some(at);
                         popup.place_at(at);
                         pos = popup.to_card(at);
@@ -1263,5 +1272,48 @@ delegate_subcompositor!(State);
 delegate_seat!(State);
 delegate_keyboard!(State);
 delegate_pointer!(State);
+
+/// The pointer's data, for a pointer whose enter is handled the moment it
+/// arrives.
+///
+/// sctk holds a pointer's events until the `wl_pointer.frame` that ends them.
+/// COSMIC sometimes sends the enter on a new surface with no frame after it
+/// until the pointer next moves, and the popup places its card where the
+/// pointer enters: with the mouse still, the card was centred instead. An
+/// enter is whole on its own, so a frame of our own follows it; when the
+/// compositor's frame does come, nothing is left pending and it does nothing.
+pub struct EnterFrames(PointerData);
+
+impl PointerDataExt for EnterFrames {
+    fn pointer_data(&self) -> &PointerData {
+        &self.0
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, EnterFrames> for State {
+    fn event(
+        state: &mut Self,
+        pointer: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        data: &EnterFrames,
+        conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        let enter = matches!(event, wl_pointer::Event::Enter { .. });
+        <SeatState as Dispatch<wl_pointer::WlPointer, EnterFrames, Self>>::event(
+            state, pointer, event, data, conn, qh,
+        );
+        if enter {
+            <SeatState as Dispatch<wl_pointer::WlPointer, EnterFrames, Self>>::event(
+                state,
+                pointer,
+                wl_pointer::Event::Frame,
+                data,
+                conn,
+                qh,
+            );
+        }
+    }
+}
 delegate_layer!(State);
 delegate_registry!(State);

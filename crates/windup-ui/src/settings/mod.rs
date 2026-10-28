@@ -190,6 +190,8 @@ impl SettingsView {
         // Footer in rail: Restore all command per §9
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.add_space(metrics::S3);
+            version_line(ui, p);
+            ui.add_space(metrics::S2);
             ui.horizontal(|ui| {
                 ui.add_space(metrics::PAD_STRIP);
                 if ui
@@ -266,5 +268,50 @@ impl SettingsView {
                         }
                     });
             });
+    }
+}
+
+/// The version and licence at the foot of the rail (STYLE-GUIDE §9, §12), with
+/// the repository behind a link, as the other apps have it.
+fn version_line(ui: &mut Ui, p: &Palette) {
+    let font = egui::FontId::proportional(text::TINY);
+    let note = ui.painter().layout_no_wrap(
+        format!("v{} · GPL-3.0 · ", env!("CARGO_PKG_VERSION")),
+        font.clone(),
+        p.text_dim,
+    );
+    let link = ui
+        .painter()
+        .layout_no_wrap("GitHub".to_owned(), font, p.text_dim);
+    let size = vec2(
+        note.size().x + link.size().x,
+        note.size().y.max(link.size().y),
+    );
+    let (row, _) = ui.allocate_exact_size(vec2(metrics::SIDEBAR, size.y), egui::Sense::hover());
+    let start = pos2(row.min.x + metrics::PAD_STRIP, row.min.y);
+    let link_rect = Rect::from_min_size(pos2(start.x + note.size().x, start.y), link.size());
+    let response = ui
+        .interact(link_rect, ui.id().with("repository"), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(env!("CARGO_PKG_REPOSITORY"));
+    if response.clicked() {
+        ui.ctx()
+            .open_url(egui::OpenUrl::new_tab(env!("CARGO_PKG_REPOSITORY")));
+    }
+
+    let painter = ui.painter();
+    painter.galley(start, note, p.text_dim);
+    let link_color = if response.hovered() {
+        p.text
+    } else {
+        p.text_dim
+    };
+    painter.galley_with_override_text_color(link_rect.min, link, link_color);
+    if response.hovered() {
+        let y = link_rect.max.y - 0.5;
+        painter.line_segment(
+            [pos2(link_rect.min.x, y), pos2(link_rect.max.x, y)],
+            Stroke::new(metrics::HAIRLINE, link_color),
+        );
     }
 }

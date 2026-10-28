@@ -442,12 +442,9 @@ impl PopupView {
                         text_color,
                     );
 
-                    // Sub-info: char count & relative timestamp
-                    let info_text = format!(
-                        "{} chars  ·  {}",
-                        t.chars().count(),
-                        entry.relative_time_string()
-                    );
+                    // Sub-info: char count & when it was copied
+                    let info_text =
+                        format!("{} chars  ·  {}", t.chars().count(), entry.time_string());
                     let info_galley = fit_text(
                         ui,
                         &info_text,
@@ -518,7 +515,7 @@ impl PopupView {
 
                     let info_galley = fit_text(
                         ui,
-                        &entry.relative_time_string(),
+                        &entry.time_string(),
                         egui::FontId::monospace(text::TINY),
                         p.text_dim,
                         text_max_w,

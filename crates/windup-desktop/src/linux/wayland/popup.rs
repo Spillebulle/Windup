@@ -182,6 +182,10 @@ impl Popup {
         if self.card.is_none() && self.configured {
             let size = (self.card_size.x, self.card_size.y);
             let (x, y) = placement::place((at.x, at.y), self.area(), size);
+            log::info!(
+                "popup: placed at the pointer, {} ms after opening",
+                self.opened.elapsed().as_millis()
+            );
             self.card = Some(pos2(x, y));
             self.dirty = true;
         }
@@ -191,6 +195,10 @@ impl Popup {
     pub fn place_fallback(&mut self) {
         if self.card.is_none() && self.configured {
             let (x, y) = placement::centre(self.area(), (self.card_size.x, self.card_size.y));
+            log::info!(
+                "popup: no pointer {} ms after opening; centred",
+                self.opened.elapsed().as_millis()
+            );
             self.card = Some(pos2(x, y));
             self.dirty = true;
         }
