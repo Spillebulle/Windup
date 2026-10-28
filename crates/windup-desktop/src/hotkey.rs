@@ -135,6 +135,43 @@ fn match_binding(
         .map(|(_, _, a)| *a)
 }
 
+/// What the hook does with one key event.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// Let it through to the next hook and the focused app.
+    Pass,
+    /// Stop it, and act on the binding.
+    Fire(Action),
+    /// Stop it and do nothing: the rest of a press already acted on.
+    Swallow,
+}
+
+/// The hook's decision for key `vk` going down or up, given the binding a
+/// press matched. `held` is the keys whose press was swallowed and whose
+/// release is still to come: their release is swallowed too, so the shell
+/// never sees half a key (Windows 11 opens Snipping Tool on Print Screen's
+/// key-up), and their auto-repeat stays swallowed even once the modifiers
+/// no longer match.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn key_verdict(held: &mut Vec<u16>, vk: u16, is_down: bool, matched: Option<Action>) -> Verdict {
+    let was_held = held.contains(&vk);
+    match (is_down, matched) {
+        (true, Some(action)) => {
+            if !was_held {
+                held.push(vk);
+            }
+            Verdict::Fire(action)
+        }
+        (true, None) if was_held => Verdict::Swallow,
+        (false, _) if was_held => {
+            held.retain(|k| *k != vk);
+            Verdict::Swallow
+        }
+        _ => Verdict::Pass,
+    }
+}
+
 /// global-hotkey key code for a canonical key name.
 #[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
 fn code_for(key: &str) -> Option<global_hotkey::hotkey::Code> {
@@ -241,6 +278,12 @@ static BINDINGS: std::sync::RwLock<Vec<(u16, ShortcutModifiers, Action)>> =
     std::sync::RwLock::new(Vec::new());
 
 #[cfg(target_os = "windows")]
+thread_local! {
+    /// Keys whose press the hook swallowed, until their release (`key_verdict`).
+    static HELD: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_os = "windows")]
 fn set_windows_table(list: &[(Shortcut, Action)]) {
     if let Ok(mut table) = BINDINGS.write() {
         *table = windows_table(list);
@@ -282,10 +325,12 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                     let vk = p.vkCode as u16;
                     let is_down = wparam == WM_KEYDOWN as usize || wparam == WM_SYSKEYDOWN as usize;
 
+                    let mut matched = None;
+                    let mut win_down = false;
                     if is_down {
                         // Query real hardware key states directly via GetAsyncKeyState to prevent desync
                         let down = |vk: u16| GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0;
-                        let win_down = down(VK_LWIN) || down(VK_RWIN);
+                        win_down = down(VK_LWIN) || down(VK_RWIN);
                         let held = ShortcutModifiers {
                             super_key: win_down,
                             ctrl: down(VK_CONTROL) || down(VK_LCONTROL) || down(VK_RCONTROL),
@@ -294,12 +339,20 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                         };
 
                         // try_read: the hook must never wait on a lock.
-                        let action = BINDINGS
+                        matched = BINDINGS
                             .try_read()
                             .ok()
                             .and_then(|table| match_binding(&table, vk, held));
+                    }
 
-                        if let Some(action) = action {
+                    // Only the hook thread runs this, so a thread-local needs no lock.
+                    let verdict =
+                        HELD.with_borrow_mut(|keys| key_verdict(keys, vk, is_down, matched));
+                    match verdict {
+                        Verdict::Pass => {}
+                        // The release (or a repeat) of a press already acted on.
+                        Verdict::Swallow => return 1,
+                        Verdict::Fire(action) => {
                             let target = Target::Hwnd(GetForegroundWindow() as isize);
 
                             // Explicitly permit this process to take foreground window
@@ -506,6 +559,51 @@ mod tests {
         );
         assert_eq!(match_binding(&t, 0x56, WIN), None);
         assert_eq!(match_binding(&t, 0x56, WIN_SHIFT), Some(Action::PastePlain));
+    }
+
+    const PRINT: u16 = 0x2C;
+
+    #[test]
+    fn a_swallowed_press_swallows_its_release() {
+        let mut held = Vec::new();
+        assert_eq!(
+            key_verdict(&mut held, PRINT, true, Some(Action::Screenshot)),
+            Verdict::Fire(Action::Screenshot)
+        );
+        // Windows 11 opens Snipping Tool on Print Screen's key-up.
+        assert_eq!(key_verdict(&mut held, PRINT, false, None), Verdict::Swallow);
+        assert!(held.is_empty());
+        // Only that once.
+        assert_eq!(key_verdict(&mut held, PRINT, false, None), Verdict::Pass);
+    }
+
+    #[test]
+    fn unrelated_keys_pass() {
+        let mut held = Vec::new();
+        key_verdict(&mut held, PRINT, true, Some(Action::Screenshot));
+        assert_eq!(key_verdict(&mut held, 0x41, true, None), Verdict::Pass);
+        assert_eq!(key_verdict(&mut held, 0x41, false, None), Verdict::Pass);
+        assert_eq!(key_verdict(&mut held, PRINT, false, None), Verdict::Swallow);
+    }
+
+    #[test]
+    fn a_release_whose_press_was_not_swallowed_passes() {
+        // Pressed before the hook saw it, or with other modifiers, so the
+        // press went to whichever app had focus: its release goes there too.
+        let mut held = Vec::new();
+        assert_eq!(key_verdict(&mut held, PRINT, true, None), Verdict::Pass);
+        assert_eq!(key_verdict(&mut held, PRINT, false, None), Verdict::Pass);
+        assert_eq!(key_verdict(&mut held, 0x56, false, None), Verdict::Pass);
+    }
+
+    #[test]
+    fn auto_repeat_of_a_swallowed_key_stays_swallowed() {
+        let mut held = Vec::new();
+        key_verdict(&mut held, 0x56, true, Some(Action::ClipboardPopup));
+        // Win let go while V repeats: no binding matches any more.
+        assert_eq!(key_verdict(&mut held, 0x56, true, None), Verdict::Swallow);
+        assert_eq!(key_verdict(&mut held, 0x56, false, None), Verdict::Swallow);
+        assert!(held.is_empty());
     }
 
     #[test]
