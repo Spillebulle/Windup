@@ -12,6 +12,7 @@ use windup_core::capture::pick::WindowRect;
 
 pub(crate) mod finish;
 pub(crate) mod gate;
+pub(crate) mod ipcrects;
 pub(crate) mod kwin_rects;
 pub(crate) mod pixels;
 pub(crate) mod split;
@@ -161,7 +162,9 @@ pub fn window_rects(shot: &DesktopShot) -> Vec<WindowRect> {
         match rects(&facts()) {
             Rects::X11 => x11::window_rects(shot),
             Rects::KWinScript => crate::linux::kde::window_rects(),
-            // Sway and Hyprland arrive with their task; edges until then.
+            Rects::Sway => ipcrects::sway_live(),
+            Rects::Hyprland => ipcrects::hyprland_live(),
+            // Edge detection, per hover.
             _ => Vec::new(),
         }
     }

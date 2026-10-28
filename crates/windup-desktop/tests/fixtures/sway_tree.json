@@ -1,0 +1,80 @@
+{
+  "id": 1, "name": "root", "type": "root", "orientation": "horizontal",
+  "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+  "focus": [2, 2147483647], "floating_nodes": [],
+  "nodes": [
+    {
+      "id": 2147483647, "name": "__i3", "type": "output", "orientation": "horizontal",
+      "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+      "focus": [2147483646], "floating_nodes": [],
+      "nodes": [
+        {
+          "id": 2147483646, "name": "__i3_scratch", "type": "workspace", "visible": false,
+          "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+          "focus": [], "nodes": [],
+          "floating_nodes": [
+            {
+              "id": 90, "name": "scratch terminal", "type": "floating_con", "app_id": "foot", "pid": 900,
+              "visible": false, "focused": false, "nodes": [], "floating_nodes": [], "focus": [],
+              "rect": {"x": 300, "y": 200, "width": 800, "height": 500},
+              "deco_rect": {"x": 0, "y": 0, "width": 800, "height": 20}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2, "name": "eDP-1", "type": "output", "orientation": "horizontal", "active": true,
+      "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+      "focus": [3, 4], "floating_nodes": [],
+      "nodes": [
+        {
+          "id": 3, "name": "1", "type": "workspace", "num": 1, "visible": true, "focused": false,
+          "orientation": "horizontal",
+          "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+          "focus": [12, 11, 10], "layout": "splith",
+          "nodes": [
+            {
+              "id": 10, "name": "~/code", "type": "con", "app_id": "foot", "pid": 1001,
+              "visible": true, "focused": false, "nodes": [], "floating_nodes": [], "focus": [],
+              "rect": {"x": 0, "y": 0, "width": 960, "height": 1080},
+              "deco_rect": {"x": 0, "y": 0, "width": 960, "height": 0},
+              "window_rect": {"x": 2, "y": 0, "width": 956, "height": 1078}
+            },
+            {
+              "id": 11, "name": "Mozilla Firefox", "type": "con", "app_id": "firefox", "pid": 1002,
+              "visible": true, "focused": false, "nodes": [], "floating_nodes": [], "focus": [],
+              "rect": {"x": 960, "y": 0, "width": 960, "height": 1080},
+              "deco_rect": {"x": 0, "y": 0, "width": 960, "height": 0},
+              "window_rect": {"x": 2, "y": 0, "width": 956, "height": 1078}
+            }
+          ],
+          "floating_nodes": [
+            {
+              "id": 12, "name": "Calculator", "type": "floating_con", "app_id": "gnome-calculator", "pid": 1003,
+              "visible": true, "focused": true, "nodes": [], "floating_nodes": [], "focus": [],
+              "rect": {"x": 700, "y": 300, "width": 400, "height": 500},
+              "deco_rect": {"x": 0, "y": 0, "width": 400, "height": 0},
+              "window_rect": {"x": 2, "y": 0, "width": 396, "height": 498}
+            }
+          ]
+        },
+        {
+          "id": 4, "name": "2", "type": "workspace", "num": 2, "visible": false, "focused": false,
+          "orientation": "horizontal",
+          "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+          "focus": [20], "layout": "splith",
+          "nodes": [
+            {
+              "id": 20, "name": "Hidden editor", "type": "con", "app_id": "code", "pid": 1004,
+              "visible": false, "focused": false, "nodes": [], "floating_nodes": [], "focus": [],
+              "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+              "deco_rect": {"x": 0, "y": 0, "width": 1920, "height": 0}
+            }
+          ],
+          "floating_nodes": []
+        }
+      ]
+    }
+  ]
+}
