@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+- On COSMIC, the clipboard history opens at the pointer instead of in the middle of the screen, even when the mouse is not moving.
+- The clipboard history shows when each entry was copied as a clock time, such as 14:32, or 27 Oct 14:32 for an earlier day.
+- The settings window shows Windup's version at the bottom left, with a link to the source on GitHub.
+
 ## 0.1.1
 
 - On COSMIC, Windup binds Super+V and Super+Shift+V itself the first time it starts, in COSMIC's own custom shortcuts, where they can be changed or removed. A key you have already bound is left as it is.

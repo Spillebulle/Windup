@@ -47,6 +47,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.1.2" date="2026-10-28">
+      <description>
+        <p>The clipboard history opens at the pointer on COSMIC, the list shows when each entry was copied, and settings show the version with a link to the source.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-10-13">
       <description>
         <p>Binds Super+V by itself on COSMIC, and the screen no longer turns black when the clipboard history opens.</p>
