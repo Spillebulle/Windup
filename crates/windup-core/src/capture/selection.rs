@@ -91,7 +91,12 @@ impl Selection {
                     Handle::E | Handle::NE | Handle::SE => r = at.0,
                     _ => {}
                 }
-                DRect::from_corners((l, t), (r, b))
+                let rect = DRect::from_corners((l, t), (r, b));
+                DRect {
+                    w: rect.w.max(1.0),
+                    h: rect.h.max(1.0),
+                    ..rect
+                }
             }
             Drag::Move { grab, orig } => DRect {
                 x: (at.0 - grab.0).min(bounds.right() - orig.w).max(bounds.x),
@@ -101,13 +106,12 @@ impl Selection {
         });
     }
 
-    /// A new drag shorter than `MIN_DRAG` in both directions was a click:
+    /// A new drag shorter than `MIN_DRAG` in either direction was a click or a line:
     /// the previous rect comes back.
     pub fn release(&mut self) {
         if let Some(Drag::New { prev, .. }) = self.drag.take()
             && let Some(rect) = self.rect
-            && rect.w < MIN_DRAG
-            && rect.h < MIN_DRAG
+            && (rect.w < MIN_DRAG || rect.h < MIN_DRAG)
         {
             self.rect = prev;
         }
@@ -312,5 +316,26 @@ mod tests {
         let bounds = r(-1920.0, 0.0, 3840.0, 1080.0);
         sel.select_all(bounds);
         assert_eq!(sel.rect, Some(bounds));
+    }
+
+    #[test]
+    fn an_axis_aligned_drag_keeps_the_previous_rect() {
+        let mut sel = Selection::default();
+        drawn(&mut sel, (100.0, 100.0), (100.0, 400.0), desktop());
+        assert_eq!(sel.rect, None);
+        drawn(&mut sel, (100.0, 100.0), (200.0, 200.0), desktop());
+        drawn(&mut sel, (500.0, 100.0), (500.0, 400.0), desktop());
+        assert_eq!(sel.rect, Some(r(100.0, 100.0, 100.0, 100.0)));
+    }
+
+    #[test]
+    fn resizing_onto_the_opposite_edge_keeps_a_width() {
+        let mut sel = Selection::default();
+        sel.set_rect(r(100.0, 100.0, 100.0, 100.0));
+        sel.press((200.0, 200.0), 6.0);
+        sel.drag_to((100.0, 200.0), desktop());
+        sel.release();
+        let rect = sel.rect.unwrap();
+        assert!(rect.w >= 1.0 && rect.h >= 1.0, "{rect:?}");
     }
 }
