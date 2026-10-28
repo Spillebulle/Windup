@@ -69,6 +69,8 @@ fn function_key(key: &str) -> Option<u16> {
 
 /// Windows virtual-key code for a canonical key name.
 pub fn windows_vk(key: &str) -> Option<u16> {
+    let key = key.to_uppercase();
+    let key = key.as_str();
     if let [c @ (b'A'..=b'Z' | b'0'..=b'9')] = key.as_bytes() {
         return Some(*c as u16);
     }
@@ -92,6 +94,8 @@ pub fn windows_vk(key: &str) -> Option<u16> {
 
 /// X keysym name for a canonical key name (COSMIC and the portals use these).
 pub fn xkb_keysym_name(key: &str) -> Option<&'static str> {
+    let key = key.to_uppercase();
+    let key = key.as_str();
     const LETTERS: &str = "abcdefghijklmnopqrstuvwxyz";
     const DIGITS: &str = "0123456789";
     const FUNCTION: [&str; 24] = [
@@ -169,6 +173,25 @@ mod tests {
         assert_eq!(windows_vk("F25"), None);
         assert_eq!(windows_vk("F01"), None);
         assert_eq!(windows_vk("nonsense"), None);
+    }
+
+    #[test]
+    fn lookups_ignore_case() {
+        assert_eq!(windows_vk("Space"), Some(0x20));
+        assert_eq!(windows_vk("f5"), Some(0x74));
+        assert_eq!(xkb_keysym_name("PageDown"), Some("Next"));
+    }
+
+    #[test]
+    fn legacy_case_still_clashes() {
+        // Built by hand, as an unnormalised value would be.
+        let mut c = Config::default();
+        c.clipboard.shortcut.key = "SPACE".into();
+        c.clipboard.shortcut.modifiers = crate::shortcut::ShortcutModifiers::SUPER;
+        let json = r#"{"modifiers":{"super_key":true,"ctrl":false,"alt":false,"shift":false},"key":"Space"}"#;
+        c.paste_plain.shortcut = serde_json::from_str(json).unwrap();
+        assert_eq!(clashes(&c), vec![ToolId::PastePlainText]);
+        assert_eq!(bindings(&c).len(), 3);
     }
 
     #[test]

@@ -54,9 +54,24 @@ impl ShortcutModifiers {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[serde(from = "RawShortcut")]
 pub struct Shortcut {
     pub modifiers: ShortcutModifiers,
     pub key: String,
+}
+
+/// The stored shape. Older configs hold keys like "Space"; reading goes
+/// through `Shortcut::new` so they come out in the canonical uppercase.
+#[derive(Deserialize)]
+struct RawShortcut {
+    modifiers: ShortcutModifiers,
+    key: String,
+}
+
+impl From<RawShortcut> for Shortcut {
+    fn from(raw: RawShortcut) -> Self {
+        Shortcut::new(raw.modifiers, raw.key)
+    }
 }
 
 impl Shortcut {
@@ -122,5 +137,13 @@ mod tests {
     #[test]
     fn print_screen_displays_with_a_space() {
         assert_eq!(Shortcut::print_screen().to_string(), "Print Screen");
+    }
+
+    #[test]
+    fn stored_keys_are_uppercased_when_read() {
+        let json = r#"{"modifiers":{"super_key":true,"ctrl":false,"alt":false,"shift":false},"key":"Space"}"#;
+        let s: Shortcut = serde_json::from_str(json).unwrap();
+        assert_eq!(s.key, "SPACE");
+        assert_eq!(s, Shortcut::new(ShortcutModifiers::SUPER, "SPACE"));
     }
 }
