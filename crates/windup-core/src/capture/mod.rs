@@ -7,6 +7,7 @@ pub mod output;
 pub mod pick;
 pub mod raster;
 pub mod selection;
+pub mod session;
 
 pub use geometry::{DRect, DesktopShot, MonitorShot};
 pub use pick::{TWEEN_SECS, Tween, WindowRect, edge_rect, window_at};
