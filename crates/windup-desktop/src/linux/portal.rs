@@ -1,6 +1,6 @@
 //! The XDG desktop portals, for desktops whose compositor keeps the
 //! protocols Windup would otherwise use to itself: GlobalShortcuts to bind
-//! Super+V without a trip to the desktop's settings (KDE, GNOME 48+,
+//! the tools' keys without a trip to the desktop's settings (KDE, GNOME 48+,
 //! Hyprland), and RemoteDesktop to press Ctrl+V where there is no virtual
 //! keyboard (GNOME, KDE).
 //!
@@ -17,6 +17,8 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 use windup_core::Config;
+use windup_core::Shortcut;
+use windup_core::hotkeys::{Action, bindings, portal_trigger};
 use windup_core::ipc::Command;
 
 /// Evdev codes, which is what the portal's keycode call takes.
@@ -27,18 +29,19 @@ const KEY_V: i32 = 47;
 /// open, because each new session would ask the user again.
 static PASTER: Mutex<Option<Sender<()>>> = Mutex::new(None);
 
-/// Asks for Super+V and Super+Shift+V through the GlobalShortcuts portal
-/// when nothing else delivers them. A desktop without the portal is left
-/// to its own shortcut settings and `windup --popup`, except COSMIC, where
+/// Asks for the config's shortcuts through the GlobalShortcuts portal when
+/// nothing else delivers them. A desktop without the portal is left to its
+/// own shortcut settings and `windup --popup`, except COSMIC, where
 /// `cosmic::bind_once` writes them into those settings.
-pub fn start_shortcuts(plan: &Plan) {
+pub fn start_shortcuts(plan: &Plan, config: &Config) {
     if plan.hotkeys != HotkeysVia::Command {
         return;
     }
+    let bindings = bindings(config);
     let spawned = std::thread::Builder::new()
         .name("portal-shortcuts".into())
-        .spawn(|| {
-            if let Err(e) = pollster::block_on(shortcuts()) {
+        .spawn(move || {
+            if let Err(e) = pollster::block_on(shortcuts(&bindings)) {
                 log::info!(
                     "no GlobalShortcuts portal ({e}); bind `windup --popup` in the desktop's keyboard settings"
                 );
@@ -49,20 +52,27 @@ pub fn start_shortcuts(plan: &Plan) {
     }
 }
 
-async fn shortcuts() -> ashpd::Result<()> {
+async fn shortcuts(bindings: &[(Shortcut, Action)]) -> ashpd::Result<()> {
     let portal = GlobalShortcuts::new().await?;
     let session = portal.create_session().await?;
-    let wanted = [
-        NewShortcut::new(Command::Popup.as_str(), "Open clipboard history")
-            .preferred_trigger("LOGO+v"),
-        NewShortcut::new(Command::PastePlain.as_str(), "Paste as plain text")
-            .preferred_trigger("LOGO+SHIFT+v"),
-    ];
+    let wanted: Vec<NewShortcut> = bindings
+        .iter()
+        .map(|(shortcut, action)| {
+            let new = NewShortcut::new(
+                Command::for_action(*action).as_str(),
+                action.tool().display_name(),
+            );
+            match portal_trigger(shortcut) {
+                Some(trigger) => new.preferred_trigger(trigger.as_str()),
+                None => new,
+            }
+        })
+        .collect();
     portal
         .bind_shortcuts(&session, &wanted, None)
         .await?
         .response()?;
-    log::info!("Super+V bound through the GlobalShortcuts portal");
+    log::info!("shortcuts bound through the GlobalShortcuts portal");
     let mut activated = portal.receive_activated().await?;
     while let Some(event) = activated.next().await {
         // Back through our own socket, so a portal shortcut is handled

@@ -16,34 +16,94 @@
 //! it is copied here): `{ (modifiers: [Super, Shift], key: "v",
 //! description: Some("…")): Spawn("command"), … }`.
 
+use crate::config::Config;
+use crate::hotkeys::{bindings, xkb_keysym_name};
+use crate::ipc::Command;
+
 /// A shortcut Windup wants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wanted {
     /// COSMIC's modifier names: `Super`, `Ctrl`, `Alt`, `Shift`.
-    pub modifiers: &'static [&'static str],
+    pub modifiers: Vec<String>,
     /// An xkb keysym name.
-    pub key: &'static str,
+    pub key: String,
     /// The name COSMIC Settings shows for it.
-    pub description: &'static str,
+    pub description: String,
     /// The arguments after the program, e.g. `--popup`.
-    pub args: &'static str,
+    pub args: String,
 }
 
-/// Super+V and Super+Shift+V, as on Windows.
-pub const WANTED: [Wanted; 2] = [
-    Wanted {
-        modifiers: &["Super"],
-        key: "v",
-        description: "Clipboard history",
-        args: "--popup",
-    },
-    Wanted {
-        modifiers: &["Super", "Shift"],
-        key: "v",
-        description: "Paste plain text",
-        args: "--paste-plain",
-    },
-];
+/// The shortcuts the config binds, one per enabled tool.
+pub fn wanted(config: &Config) -> Vec<Wanted> {
+    bindings(config)
+        .into_iter()
+        .filter_map(|(shortcut, action)| {
+            let m = &shortcut.modifiers;
+            let modifiers = [
+                (m.super_key, "Super"),
+                (m.ctrl, "Ctrl"),
+                (m.alt, "Alt"),
+                (m.shift, "Shift"),
+            ]
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, name)| name.to_owned())
+            .collect();
+            Some(Wanted {
+                modifiers,
+                key: xkb_keysym_name(&shortcut.key)?.to_owned(),
+                description: action.tool().display_name().to_owned(),
+                args: format!("--{}", Command::for_action(action).as_str()),
+            })
+        })
+        .collect()
+}
+
+const MARKER_HEADER: &str =
+    "Windup offered these shortcuts to COSMIC, once each. Delete this file to have it check again.";
+const MARKER_LINE: &str = "offered ";
+
+/// The arguments Windup has already offered to COSMIC, from the marker file's
+/// text (`None` when there is no file). A marker from before the capture tools
+/// lists nothing: it stands for the two shortcuts that existed then.
+pub fn offered(marker: Option<&str>) -> Vec<String> {
+    let Some(text) = marker else {
+        return Vec::new();
+    };
+    let listed: Vec<String> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix(MARKER_LINE))
+        .map(|a| a.trim().to_owned())
+        .collect();
+    if listed.is_empty() {
+        vec!["--popup".into(), "--paste-plain".into()]
+    } else {
+        listed
+    }
+}
+
+/// The wanted shortcuts not offered yet.
+pub fn pending(wanted: Vec<Wanted>, offered: &[String]) -> Vec<Wanted> {
+    wanted
+        .into_iter()
+        .filter(|w| !offered.contains(&w.args))
+        .collect()
+}
+
+/// The marker file's text once `offered` have been offered.
+pub fn marker_text(offered: &[String]) -> String {
+    let mut out = format!(
+        "{MARKER_HEADER}
+"
+    );
+    for a in offered {
+        out.push_str(&format!(
+            "{MARKER_LINE}{a}
+"
+        ));
+    }
+    out
+}
 
 /// What happened to one wanted shortcut.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,7 +146,7 @@ pub fn merge(
     let mut added = Vec::new();
     let mut outcomes = Vec::new();
     for w in wanted {
-        let outcome = if entries.iter().any(|e| runs_windup(&e.action, w.args)) {
+        let outcome = if entries.iter().any(|e| runs_windup(&e.action, &w.args)) {
             Outcome::AlreadyBound
         } else if entries.iter().any(|e| same_keys(e, w)) {
             Outcome::KeyTaken
@@ -133,9 +193,9 @@ fn render(w: &Wanted, program: &str) -> String {
     format!(
         "(modifiers: [{}], key: {}, description: Some({})): Spawn({})",
         w.modifiers.join(", "),
-        ron_string(w.key),
-        ron_string(w.description),
-        ron_string(&command(program, w.args)),
+        ron_string(&w.key),
+        ron_string(&w.description),
+        ron_string(&command(program, &w.args)),
     )
 }
 
@@ -177,7 +237,7 @@ fn same_keys(e: &Entry, w: &Wanted) -> bool {
     a == b
         && e.key
             .as_deref()
-            .is_some_and(|k| k.eq_ignore_ascii_case(w.key))
+            .is_some_and(|k| k.eq_ignore_ascii_case(&w.key))
 }
 
 // --- a reader for the little of RON this file uses ---------------------------
@@ -377,6 +437,56 @@ fn parse(text: &str) -> Result<(Vec<Entry>, usize), Unreadable> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+
+    /// Clipboard history and paste plain text, the shortcuts of 0.1.x.
+    fn two() -> Vec<Wanted> {
+        wanted(&Config::default())[..2].to_vec()
+    }
+
+    #[test]
+    fn wanted_follows_the_config() {
+        let w = wanted(&Config::default());
+        assert!(
+            w.iter().any(|w| w.args == "--capture"
+                && w.key == "s"
+                && w.modifiers == ["Super", "Shift"])
+        );
+        assert!(
+            w.iter()
+                .any(|w| w.args == "--screenshot" && w.key == "Print" && w.modifiers.is_empty())
+        );
+        let mut c = Config::default();
+        c.screenshot.enabled = false;
+        assert!(wanted(&c).iter().all(|w| w.args != "--screenshot"));
+    }
+
+    #[test]
+    fn no_marker_offers_everything() {
+        assert!(offered(None).is_empty());
+        assert_eq!(pending(wanted(&Config::default()), &offered(None)).len(), 4);
+    }
+
+    #[test]
+    fn an_old_marker_means_the_first_two_were_offered() {
+        let old =
+            "Windup added its shortcuts to COSMIC's once. Delete this file to have it check again.
+";
+        let left = pending(wanted(&Config::default()), &offered(Some(old)));
+        let args: Vec<&str> = left.iter().map(|w| w.args.as_str()).collect();
+        assert_eq!(args, ["--capture", "--screenshot"]);
+    }
+
+    #[test]
+    fn the_marker_round_trips() {
+        let args: Vec<String> = ["--popup", "--capture"].map(String::from).to_vec();
+        assert_eq!(offered(Some(&marker_text(&args))), args);
+        let all: Vec<String> = wanted(&Config::default())
+            .into_iter()
+            .map(|w| w.args)
+            .collect();
+        assert!(pending(wanted(&Config::default()), &all).is_empty());
+    }
 
     fn added(o: &[Outcome]) -> usize {
         o.iter().filter(|o| **o == Outcome::Added).count()
@@ -384,7 +494,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_gets_both() {
-        let (new, outcomes) = merge(None, &WANTED, "windup").unwrap();
+        let (new, outcomes) = merge(None, &two(), "windup").unwrap();
         let new = new.unwrap();
         assert_eq!(added(&outcomes), 2);
         assert_eq!(
@@ -399,7 +509,7 @@ mod tests {
 
     #[test]
     fn an_empty_map_gets_both() {
-        let (new, outcomes) = merge(Some("{}"), &WANTED, "windup").unwrap();
+        let (new, outcomes) = merge(Some("{}"), &two(), "windup").unwrap();
         assert_eq!(added(&outcomes), 2);
         assert!(
             new.unwrap()
@@ -420,7 +530,7 @@ mod tests {
 
     #[test]
     fn the_users_shortcuts_are_kept_and_ours_appended() {
-        let (new, outcomes) = merge(Some(SETTINGS), &WANTED, "windup").unwrap();
+        let (new, outcomes) = merge(Some(SETTINGS), &two(), "windup").unwrap();
         let new = new.unwrap();
         assert_eq!(added(&outcomes), 2);
         assert!(new.starts_with(&SETTINGS[..SETTINGS.len() - 1]));
@@ -433,7 +543,7 @@ mod tests {
     #[test]
     fn a_last_entry_without_a_comma_gets_one() {
         let text = "{\n    (modifiers: [Super], key: \"t\"): Spawn(\"cosmic-term\")\n}";
-        let (new, _) = merge(Some(text), &WANTED, "windup").unwrap();
+        let (new, _) = merge(Some(text), &two(), "windup").unwrap();
         let new = new.unwrap();
         assert!(new.contains("Spawn(\"cosmic-term\"),\n    (modifiers: [Super], key: \"v\""));
         assert_eq!(parse(&new).unwrap().0.len(), 3);
@@ -442,7 +552,7 @@ mod tests {
     #[test]
     fn a_key_the_user_bound_is_not_taken() {
         let text = "{ (modifiers: [Super], key: \"V\"): Spawn(\"cliphist-menu\") }";
-        let (new, outcomes) = merge(Some(text), &WANTED, "windup").unwrap();
+        let (new, outcomes) = merge(Some(text), &two(), "windup").unwrap();
         assert_eq!(outcomes, [Outcome::KeyTaken, Outcome::Added]);
         assert!(new.unwrap().contains("--paste-plain"));
     }
@@ -450,7 +560,7 @@ mod tests {
     #[test]
     fn modifier_order_does_not_matter() {
         let text = "{ (modifiers: [Shift, Super], key: \"v\"): Disable }";
-        let (_, outcomes) = merge(Some(text), &WANTED, "windup").unwrap();
+        let (_, outcomes) = merge(Some(text), &two(), "windup").unwrap();
         assert_eq!(outcomes, [Outcome::Added, Outcome::KeyTaken]);
     }
 
@@ -460,7 +570,7 @@ mod tests {
             (modifiers: [Ctrl, Alt], key: "v"): Spawn("/opt/Windup.AppImage --popup"),
             (modifiers: [Super, Shift], key: "v"): Spawn("windup --paste-plain"),
         }"#;
-        let (new, outcomes) = merge(Some(text), &WANTED, "windup").unwrap();
+        let (new, outcomes) = merge(Some(text), &two(), "windup").unwrap();
         assert_eq!(outcomes, [Outcome::AlreadyBound, Outcome::AlreadyBound]);
         assert_eq!(new, None);
     }
@@ -474,7 +584,7 @@ mod tests {
     (modifiers: [], key: "Print"): System(Screenshot),
 }
 "#;
-        let (new, outcomes) = merge(Some(text), &WANTED, "windup").unwrap();
+        let (new, outcomes) = merge(Some(text), &two(), "windup").unwrap();
         assert_eq!(added(&outcomes), 2);
         assert!(new.unwrap().ends_with("}\n"));
     }
@@ -486,7 +596,7 @@ mod tests {
             "[1, 2]",
             "{ oops }",
         ] {
-            assert!(merge(Some(text), &WANTED, "windup").is_err(), "{text}");
+            assert!(merge(Some(text), &two(), "windup").is_err(), "{text}");
         }
     }
 
@@ -497,7 +607,7 @@ mod tests {
             command("/home/a b/Windup.AppImage", "--popup"),
             "'/home/a b/Windup.AppImage' --popup"
         );
-        let (new, _) = merge(None, &WANTED[..1], "/home/a b/it's.AppImage").unwrap();
+        let (new, _) = merge(None, &two()[..1], "/home/a b/it's.AppImage").unwrap();
         assert!(
             new.unwrap()
                 .contains(r#"Spawn("'/home/a b/it'\\''s.AppImage' --popup")"#)

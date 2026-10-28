@@ -170,8 +170,8 @@ pub fn run_background(
     ipc::serve(listener, move |c| {
         let _ = cmd_tx.send(c);
     });
-    cosmic::bind_once();
-    portal::start_shortcuts(&runtime.plan);
+    cosmic::bind_once(&config);
+    portal::start_shortcuts(&runtime.plan, &config);
 
     let mut host = Background {
         runtime,
@@ -280,6 +280,10 @@ impl Background {
             }
             Command::PastePlain if config.is_tool_enabled(ToolId::PastePlainText) => {
                 crate::paste::paste_current_clipboard_as_plain(Target::None);
+            }
+            // The capture tools arrive with start_capture.
+            Command::Capture | Command::Screenshot => {
+                log::debug!("{} requested", command.as_str());
             }
             Command::Show => self.show_settings(),
             Command::Reload => {

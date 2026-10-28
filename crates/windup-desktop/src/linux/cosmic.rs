@@ -1,21 +1,24 @@
-//! Super+V on COSMIC, bound by Windup itself.
+//! Windup's shortcuts on COSMIC, bound by Windup itself.
 //!
 //! COSMIC has no GlobalShortcuts portal, but its compositor watches the
-//! custom-shortcuts file COSMIC Settings writes, so Windup adds its two
-//! shortcuts there (`windup_core::cosmic_shortcuts` decides what to add). It
-//! does so once: a marker in Windup's own config directory remembers it, so a
-//! shortcut the user removes in Settings stays removed.
+//! custom-shortcuts file COSMIC Settings writes, so Windup adds its shortcuts
+//! there (`windup_core::cosmic_shortcuts` decides what to add, from the
+//! config). It offers each one once: a marker in Windup's own config directory
+//! lists the commands already offered, so a shortcut the user removes in
+//! Settings stays removed, while a tool added by a later Windup is still
+//! offered. A key changed in Windup's own settings is not carried over to a
+//! binding COSMIC already has.
 
 use std::path::PathBuf;
 use std::{fs, io};
 use windup_core::config::Config;
-use windup_core::cosmic_shortcuts::{self, WANTED};
+use windup_core::cosmic_shortcuts::{self, Wanted};
 
 const MARKER: &str = "cosmic-shortcuts";
 
-/// Adds Super+V and Super+Shift+V to COSMIC's custom shortcuts, the first
-/// time Windup runs on COSMIC.
-pub fn bind_once() {
+/// Adds the config's shortcuts to COSMIC's custom shortcuts, each the first
+/// time Windup runs on COSMIC with it.
+pub fn bind_once(config: &Config) {
     if !is_cosmic() {
         return;
     }
@@ -23,16 +26,16 @@ pub fn bind_once() {
         return;
     };
     let marker = dir.join(MARKER);
-    if marker.exists() {
+    let mut offered = cosmic_shortcuts::offered(fs::read_to_string(&marker).ok().as_deref());
+    let pending = cosmic_shortcuts::pending(cosmic_shortcuts::wanted(config), &offered);
+    if pending.is_empty() {
         return;
     }
-    match bind() {
+    match bind(&pending) {
         Ok(()) => {
+            offered.extend(pending.into_iter().map(|w| w.args));
             let _ = fs::create_dir_all(&dir);
-            let _ = fs::write(
-                &marker,
-                "Windup added its shortcuts to COSMIC's once. Delete this file to have it check again.\n",
-            );
+            let _ = fs::write(&marker, cosmic_shortcuts::marker_text(&offered));
         }
         Err(e) => log::warn!("COSMIC shortcuts not added: {e}"),
     }
@@ -51,7 +54,7 @@ fn shortcuts_file() -> Option<PathBuf> {
     Some(base.join("cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom"))
 }
 
-fn bind() -> Result<(), String> {
+fn bind(wanted: &[Wanted]) -> Result<(), String> {
     let file = shortcuts_file().ok_or("no home directory")?;
     let existing = match fs::read_to_string(&file) {
         Ok(text) => Some(text),
@@ -63,9 +66,9 @@ fn bind() -> Result<(), String> {
         .ok()
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| "windup".into());
-    let (new, outcomes) = cosmic_shortcuts::merge(existing.as_deref(), &WANTED, &program)
+    let (new, outcomes) = cosmic_shortcuts::merge(existing.as_deref(), wanted, &program)
         .map_err(|e| format!("{} is left alone, it did not read: {}", file.display(), e.0))?;
-    for (wanted, outcome) in WANTED.iter().zip(&outcomes) {
+    for (wanted, outcome) in wanted.iter().zip(&outcomes) {
         log::info!(
             "COSMIC shortcut {}+{} ({}): {outcome:?}",
             wanted.modifiers.join("+"),

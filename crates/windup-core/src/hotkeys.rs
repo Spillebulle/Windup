@@ -24,6 +24,18 @@ impl Action {
     }
 }
 
+impl Action {
+    /// The tool this action belongs to.
+    pub fn tool(self) -> ToolId {
+        match self {
+            Action::ClipboardPopup => ToolId::ClipboardHistory,
+            Action::PastePlain => ToolId::PastePlainText,
+            Action::CaptureLauncher => ToolId::CaptureLauncher,
+            Action::Screenshot => ToolId::Screenshot,
+        }
+    }
+}
+
 /// Enabled tools in `ToolId::ALL` order. A shortcut already taken by an
 /// earlier tool is left out: the first one wins.
 pub fn bindings(config: &Config) -> Vec<(Shortcut, Action)> {
@@ -128,9 +140,36 @@ pub fn xkb_keysym_name(key: &str) -> Option<&'static str> {
     })
 }
 
+/// The GlobalShortcuts portal's trigger string: modifiers (`CTRL`, `ALT`,
+/// `LOGO`, `SHIFT`) and the keysym name, joined with `+`, e.g. `LOGO+SHIFT+s`.
+pub fn portal_trigger(shortcut: &Shortcut) -> Option<String> {
+    let m = &shortcut.modifiers;
+    let mut parts: Vec<&str> = [
+        (m.ctrl, "CTRL"),
+        (m.alt, "ALT"),
+        (m.super_key, "LOGO"),
+        (m.shift, "SHIFT"),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .map(|(_, name)| name)
+    .collect();
+    parts.push(xkb_keysym_name(&shortcut.key)?);
+    Some(parts.join("+"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portal_triggers() {
+        let c = Config::default();
+        let t = |tool| portal_trigger(c.tool_shortcut(tool)).unwrap();
+        assert_eq!(t(ToolId::ClipboardHistory), "LOGO+v");
+        assert_eq!(t(ToolId::CaptureLauncher), "LOGO+SHIFT+s");
+        assert_eq!(t(ToolId::Screenshot), "Print");
+    }
 
     #[test]
     fn defaults_bind_all_four() {

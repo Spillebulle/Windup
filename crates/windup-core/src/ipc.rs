@@ -6,6 +6,7 @@
 //! starting over. This module is the protocol and the argument parsing; the
 //! socket itself is in `windup-desktop`.
 
+use crate::hotkeys::Action;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,6 +15,10 @@ pub enum Command {
     Popup,
     /// Paste the clipboard as plain text into the focused window.
     PastePlain,
+    /// Open the capture launcher.
+    Capture,
+    /// Take a screenshot.
+    Screenshot,
     /// Bring up the settings window.
     Show,
     /// Re-read `config.json`; sent by the settings window after it saves.
@@ -21,9 +26,11 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 4] = [
+    pub const ALL: [Command; 6] = [
         Command::Popup,
         Command::PastePlain,
+        Command::Capture,
+        Command::Screenshot,
         Command::Show,
         Command::Reload,
     ];
@@ -33,8 +40,20 @@ impl Command {
         match self {
             Command::Popup => "popup",
             Command::PastePlain => "paste-plain",
+            Command::Capture => "capture",
+            Command::Screenshot => "screenshot",
             Command::Show => "show",
             Command::Reload => "reload",
+        }
+    }
+
+    /// The command that runs a hotkey action.
+    pub fn for_action(action: Action) -> Command {
+        match action {
+            Action::ClipboardPopup => Command::Popup,
+            Action::PastePlain => Command::PastePlain,
+            Action::CaptureLauncher => Command::Capture,
+            Action::Screenshot => Command::Screenshot,
         }
     }
 
@@ -73,10 +92,12 @@ Usage: windup [OPTION]
   (none)          Open Windup, or its window if it is already running
   --popup         Open the clipboard history at the cursor
   --paste-plain   Paste the clipboard as plain text
+  --capture       Open the capture launcher
+  --screenshot    Take a screenshot
   --background    Start without opening the window
   --help          Show this text
 
-Bind --popup and --paste-plain to keys in your desktop's keyboard settings
+Bind --popup, --paste-plain, --capture and --screenshot to keys in your desktop's keyboard settings
 where Windup cannot grab them itself (most Wayland desktops).";
 
 /// Parses the arguments after the program name.
@@ -91,6 +112,8 @@ where
         [one] => match one.as_str() {
             "--popup" => Launch::Send(Command::Popup),
             "--paste-plain" => Launch::Send(Command::PastePlain),
+            "--capture" => Launch::Send(Command::Capture),
+            "--screenshot" => Launch::Send(Command::Screenshot),
             "--show" => Launch::Send(Command::Show),
             "--background" => Launch::Background,
             "--settings" => Launch::Settings,
@@ -161,6 +184,27 @@ mod tests {
             parse_args(["--popup", "--show"]),
             Launch::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn capture_flags_parse() {
+        assert_eq!(parse_args(["--capture"]), Launch::Send(Command::Capture));
+        assert_eq!(
+            parse_args(["--screenshot"]),
+            Launch::Send(Command::Screenshot)
+        );
+        assert!(USAGE.contains("--capture") && USAGE.contains("--screenshot"));
+    }
+
+    #[test]
+    fn actions_map_to_commands() {
+        assert_eq!(Command::for_action(Action::ClipboardPopup), Command::Popup);
+        assert_eq!(Command::for_action(Action::PastePlain), Command::PastePlain);
+        assert_eq!(
+            Command::for_action(Action::CaptureLauncher),
+            Command::Capture
+        );
+        assert_eq!(Command::for_action(Action::Screenshot), Command::Screenshot);
     }
 
     #[test]

@@ -126,13 +126,15 @@ impl WindupApp {
                     let event = match command {
                         Command::Popup => HotkeyEvent::ClipboardPopup { target },
                         Command::PastePlain => HotkeyEvent::PastePlainText { target },
+                        Command::Capture => HotkeyEvent::Capture { target },
+                        Command::Screenshot => HotkeyEvent::Screenshot { target },
                         Command::Show => HotkeyEvent::Show,
                         Command::Reload => HotkeyEvent::Reload,
                     };
                     let _ = tx.send(event);
                     ctx.request_repaint();
                 });
-                linux::portal::start_shortcuts(&plan);
+                linux::portal::start_shortcuts(&plan, &config);
             }
             hotkey_listener = Some(listener);
         }
