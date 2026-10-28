@@ -111,6 +111,14 @@ impl DesktopShot {
     /// pixel either way.
     pub fn compose(&self, rect: DRect) -> Option<RgbaImage> {
         let rect = rect.normalised();
+        if ![rect.x, rect.y, rect.w, rect.h]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return None;
+        }
+        // Never larger than the desktop, however far the rect reaches.
+        let rect = rect.intersect(&self.bounds())?;
         let touched: Vec<&MonitorShot> = self
             .monitors
             .iter()
@@ -252,6 +260,25 @@ mod tests {
         };
         assert!(shot.compose(rect(5.0, 5.0, 0.3, 40.0)).is_none());
         assert!(shot.compose(rect(500.0, 5.0, 40.0, 40.0)).is_none());
+    }
+
+    #[test]
+    fn a_non_finite_rect_composes_to_none() {
+        let shot = DesktopShot {
+            monitors: vec![mon(rect(0.0, 0.0, 100.0, 100.0), (100, 100), RED)],
+        };
+        assert!(shot.compose(rect(0.0, 0.0, f32::INFINITY, 10.0)).is_none());
+        assert!(shot.compose(rect(f32::NAN, 0.0, 10.0, 10.0)).is_none());
+    }
+
+    #[test]
+    fn a_huge_rect_is_clipped_to_the_desktop() {
+        let shot = DesktopShot {
+            monitors: vec![mon(rect(0.0, 0.0, 100.0, 50.0), (100, 50), RED)],
+        };
+        let img = shot.compose(rect(-1e9, -1e9, 2e9, 2e9)).unwrap();
+        assert_eq!(img.dimensions(), (100, 50));
+        assert!(img.pixels().all(|p| *p == RED));
     }
 
     #[test]
