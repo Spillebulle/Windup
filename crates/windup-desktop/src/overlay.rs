@@ -234,6 +234,9 @@ impl WindupApp {
                 if step.setup {
                     make_tool_window(&surface.title);
                 }
+                if fullscreen_now(step) {
+                    fullscreen_overlay(&surface.title);
+                }
                 place_overlay(
                     &surface.title,
                     surface.layout,
@@ -522,6 +525,60 @@ fn place_overlay(title: &str, _layout: DRect, focus: bool) {
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn place_overlay(_title: &str, _layout: DRect, _focus: bool) {}
 
+/// How an X11 overlay asks to be fullscreen and above the panels (EWMH
+/// `_NET_WM_STATE`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NetWmState {
+    /// Still unmapped: the window states it in its own property, which the
+    /// window manager reads when it maps it.
+    Property([u32; 2]),
+    /// Mapped: the window manager owns the property; ask it with a client
+    /// message to the root (`_NET_WM_STATE_ADD`, the two atoms, source 1).
+    Message([u32; 5]),
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn fullscreen_request(mapped: bool, fullscreen: u32, above: u32) -> NetWmState {
+    const ADD: u32 = 1;
+    const SOURCE_APPLICATION: u32 = 1;
+    if mapped {
+        NetWmState::Message([ADD, fullscreen, above, SOURCE_APPLICATION, 0])
+    } else {
+        NetWmState::Property([fullscreen, above])
+    }
+}
+
+/// The frames on which an X11 overlay asks for fullscreen: once while
+/// hidden (the property is in place before the map), then on each frame
+/// after it is shown while focus is still being settled (the window manager
+/// may map it a frame or two late; the request is idempotent).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn fullscreen_now(step: Steps) -> bool {
+    step.setup || step.force_focus
+}
+
+/// X11: makes the overlay cover its monitor, panels included. Mutter (GNOME
+/// on Xorg), Xfwm, Cinnamon and KWin keep an ordinary window, however it is
+/// sized, inside the work area, which would shift or squeeze the frozen
+/// picture against the live screen.
+///
+/// EWMH fullscreen rather than the alternatives: winit's borderless
+/// fullscreen picks its monitor before the window is mapped and is deferred
+/// until it is visible, so it fights the hidden-first-frame dance; and
+/// override-redirect cannot be set through eframe's viewport builder and
+/// gets no keyboard focus from the window manager. Every window manager puts
+/// a fullscreen window on the monitor that holds it, which the position
+/// already chose, so `_NET_WM_FULLSCREEN_MONITORS` (by Xinerama index, an
+/// order RandR's list need not share) is not needed.
+#[cfg(target_os = "linux")]
+fn fullscreen_overlay(title: &str) {
+    crate::linux::x11::fullscreen_above(title);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn fullscreen_overlay(_title: &str) {}
+
 /// Keeps the window out of Alt+Tab. winit's `with_taskbar(false)` only takes
 /// the taskbar button away (through `ITaskbarList`).
 #[cfg(target_os = "windows")]
@@ -634,6 +691,34 @@ mod tests {
             r,
             egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(30.0, 40.0))
         );
+    }
+
+    #[test]
+    fn a_hidden_overlay_states_fullscreen_and_above_in_its_property() {
+        let (full, above) = (301, 302);
+        assert_eq!(
+            fullscreen_request(false, full, above),
+            NetWmState::Property([full, above])
+        );
+    }
+
+    #[test]
+    fn a_mapped_overlay_asks_the_window_manager_to_add_both() {
+        let (full, above) = (301, 302);
+        // _NET_WM_STATE_ADD, both atoms, source 1 (an application).
+        assert_eq!(
+            fullscreen_request(true, full, above),
+            NetWmState::Message([1, full, above, 1, 0])
+        );
+    }
+
+    #[test]
+    fn x11_fullscreen_is_set_up_hidden_and_asked_again_once_mapped() {
+        assert!(fullscreen_now(steps(0)), "hidden: the property");
+        assert!(!fullscreen_now(steps(1)));
+        assert!(fullscreen_now(steps(2)), "mapped: the message");
+        assert!(fullscreen_now(steps(FOCUS_FRAMES - 1)));
+        assert!(!fullscreen_now(steps(FOCUS_FRAMES)), "not every frame");
     }
 
     #[test]

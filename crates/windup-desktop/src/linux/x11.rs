@@ -9,8 +9,10 @@ use windup_core::placement::Area;
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, InputFocus, Window,
+    AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, InputFocus, MapState, PropMode,
+    Window,
 };
+use x11rb::wrapper::ConnectionExt as _;
 
 pub(crate) fn connect() -> Option<(x11rb::rust_connection::RustConnection, Window)> {
     let (conn, screen) = x11rb::connect(None).ok()?;
@@ -130,6 +132,61 @@ pub fn activate(window: u32) {
     }
     let _ = conn.set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME);
     let _ = conn.flush();
+}
+
+/// Asks for our window titled `title` to be fullscreen and above others
+/// (`overlay::fullscreen_overlay` says why). Before it is mapped the window
+/// is not in the client list yet and is found among the root's children.
+pub fn fullscreen_above(title: &str) {
+    use crate::overlay::{NetWmState, fullscreen_request};
+    let Some((conn, root)) = connect() else {
+        return;
+    };
+    let Some(window) = window_named(title).or_else(|| unmapped_named(&conn, root, title)) else {
+        return;
+    };
+    let (Some(state), Some(full), Some(above)) = (
+        atom(&conn, "_NET_WM_STATE"),
+        atom(&conn, "_NET_WM_STATE_FULLSCREEN"),
+        atom(&conn, "_NET_WM_STATE_ABOVE"),
+    ) else {
+        return;
+    };
+    let mapped = conn
+        .get_window_attributes(window)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .is_some_and(|a| a.map_state != MapState::UNMAPPED);
+    match fullscreen_request(mapped, full, above) {
+        NetWmState::Property(atoms) => {
+            let _ =
+                conn.change_property32(PropMode::REPLACE, window, state, AtomEnum::ATOM, &atoms);
+        }
+        NetWmState::Message(data) => {
+            let event = ClientMessageEvent::new(32, window, state, data);
+            let _ = conn.send_event(
+                false,
+                root,
+                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                event,
+            );
+        }
+    }
+    let _ = conn.flush();
+}
+
+/// A window of the root titled `title` (`_NET_WM_NAME`): ours, created but
+/// not yet mapped, so not reparented or listed by the window manager.
+fn unmapped_named(conn: &impl Connection, root: Window, title: &str) -> Option<u32> {
+    let utf8 = atom(conn, "UTF8_STRING")?;
+    let name = atom(conn, "_NET_WM_NAME")?;
+    let children = conn.query_tree(root).ok()?.reply().ok()?.children;
+    children.into_iter().find(|&w| {
+        conn.get_property(false, w, name, utf8, 0, 256)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some_and(|r| r.value == title.as_bytes())
+    })
 }
 
 /// One of our own top-level windows, by its exact `_NET_WM_NAME`, from the
