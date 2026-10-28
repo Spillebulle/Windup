@@ -37,6 +37,9 @@ icon=$(sed -n 's/^Icon=\(.*\)$/\1/p' "$desktop" | head -1)
 wmclass=$(sed -n 's/^StartupWMClass=\(.*\)$/\1/p' "$desktop" | head -1)
 [ "$wmclass" = "$APP_ID" ] || fail "StartupWMClass is '$wmclass'"
 ok "desktop entry Icon and StartupWMClass"
+grep -q '^X-KDE-DBUS-Restricted-Interfaces=.*org\.kde\.KWin\.ScreenShot2' "$desktop" ||
+    fail "the desktop entry does not list org.kde.KWin.ScreenShot2 as a restricted interface KDE may grant"
+ok "desktop entry asks KWin for ScreenShot2"
 
 grep -q "const APP_ID: &str = \"$APP_ID\";" crates/windup-desktop/src/main.rs ||
     fail "main.rs does not set the window's app id to $APP_ID"

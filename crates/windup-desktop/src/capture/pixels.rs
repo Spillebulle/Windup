@@ -83,10 +83,39 @@ pub(crate) fn untransform(img: RgbaImage, transform: Transform) -> RgbaImage {
     }
 }
 
+/// The `QImage::Format` numbers KWin's ScreenShot2 reports, as the byte order
+/// they have in memory on a little-endian machine. Alpha is ignored by the
+/// callers (a screen is opaque), which also sidesteps premultiplication.
+/// `None` for anything else (16-bit, 30-bit, float, indexed).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn qimage_format(format: u32) -> Option<ShmFormat> {
+    match format {
+        // RGB32 (0xffRRGGBB), ARGB32, ARGB32_Premultiplied: B, G, R, A.
+        4..=6 => Some(ShmFormat::Xrgb8888),
+        // RGBX8888, RGBA8888, RGBA8888_Premultiplied: R, G, B, A.
+        16..=18 => Some(ShmFormat::Xbgr8888),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::Rgba;
+
+    #[test]
+    fn qimage_formats_map_to_byte_orders() {
+        for f in [4, 5, 6] {
+            assert_eq!(qimage_format(f), Some(ShmFormat::Xrgb8888), "{f}");
+        }
+        for f in [16, 17, 18] {
+            assert_eq!(qimage_format(f), Some(ShmFormat::Xbgr8888), "{f}");
+        }
+        // RGB16, RGB30, Invalid.
+        for f in [0, 7, 20, 99] {
+            assert_eq!(qimage_format(f), None, "{f}");
+        }
+    }
 
     #[test]
     fn argb_is_bgra_in_memory_and_keeps_alpha() {

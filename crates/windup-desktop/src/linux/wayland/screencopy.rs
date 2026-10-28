@@ -77,20 +77,11 @@ pub fn grab_by(
     globals: &GlobalList,
     method: Method,
 ) -> Result<DesktopShot, CaptureError> {
-    let mut queue = conn.new_event_queue::<CopyState>();
+    let (queue, state) = learn_outputs(conn, globals)?;
     let qh = queue.handle();
-    let mut state = CopyState {
-        registry: RegistryState::new(globals),
-        output_state: OutputState::new(globals, &qh),
-        job: Job::default(),
-    };
     let shm: wl_shm::WlShm = globals
         .bind(&qh, 1..=1, ())
         .map_err(|_| CaptureError::Unsupported)?;
-    // Two roundtrips: the first delivers wl_output, the second xdg_output.
-    for _ in 0..2 {
-        queue.roundtrip(&mut state).map_err(failed)?;
-    }
     let outputs = outputs_of(&state);
     if outputs.is_empty() {
         return Err(failed("the compositor reports no outputs"));
@@ -126,6 +117,44 @@ pub fn grab_by(
     }
     let _ = conn.flush();
     Ok(DesktopShot { monitors })
+}
+
+/// A queue and state that know every output.
+fn learn_outputs(
+    conn: &Connection,
+    globals: &GlobalList,
+) -> Result<(EventQueue<CopyState>, CopyState), CaptureError> {
+    let mut queue = conn.new_event_queue::<CopyState>();
+    let qh = queue.handle();
+    let mut state = CopyState {
+        registry: RegistryState::new(globals),
+        output_state: OutputState::new(globals, &qh),
+        job: Job::default(),
+    };
+    // Two roundtrips: the first delivers wl_output, the second xdg_output.
+    for _ in 0..2 {
+        queue.roundtrip(&mut state).map_err(failed)?;
+    }
+    Ok((queue, state))
+}
+
+/// Every output's name and logical rectangle, from a Wayland connection of
+/// its own. The back ends that do not read pixels through Wayland (KWin, the
+/// portal) take their monitors' places from this.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn output_layout_from_env() -> Result<Vec<(String, DRect)>, CaptureError> {
+    let conn = Connection::connect_to_env().map_err(|_| CaptureError::Unsupported)?;
+    let (globals, _queue) =
+        registry_queue_init::<super::Probe>(&conn).map_err(|_| CaptureError::Unsupported)?;
+    let (_queue, state) = learn_outputs(&conn, &globals)?;
+    let layout: Vec<_> = outputs_of(&state)
+        .into_iter()
+        .map(|o| (o.name, o.layout))
+        .collect();
+    if layout.is_empty() {
+        return Err(failed("the compositor reports no outputs"));
+    }
+    Ok(layout)
 }
 
 /// An output as the picture needs it.

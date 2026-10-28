@@ -5,6 +5,7 @@
 pub mod autostart;
 pub mod cosmic;
 pub mod ipc;
+pub mod kde;
 pub mod portal;
 pub mod wayland;
 pub mod window;

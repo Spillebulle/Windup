@@ -10,7 +10,9 @@ use windup_core::capture::backend::{Facts, Still, still_order};
 use windup_core::capture::geometry::DesktopShot;
 use windup_core::capture::pick::WindowRect;
 
+pub(crate) mod kwin_rects;
 pub(crate) mod pixels;
+pub(crate) mod split;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "linux")]
@@ -71,8 +73,9 @@ fn facts() -> Facts {
     #[cfg(target_os = "linux")]
     {
         let globals = crate::linux::wayland::probe().unwrap_or_default();
-        // The portal back end arrives with its task; until then it is not on offer.
-        Facts::from_env(globals, false)
+        // The screenshot portal is always tried last; where it is missing the
+        // call fails with `Unsupported`, which is what asking first would say.
+        Facts::from_env(globals, true)
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
@@ -96,13 +99,19 @@ fn grab_with(still: Still) -> Result<DesktopShot, CaptureError> {
             use crate::linux::wayland::screencopy::{Method, grab_from_env};
             grab_from_env(Method::WlrScreencopy)
         }
-        // These land with their back ends.
-        Still::KWin | Still::Portal => Err(CaptureError::Unsupported),
+        #[cfg(target_os = "linux")]
+        Still::KWin => crate::linux::kde::grab(),
+        #[cfg(target_os = "linux")]
+        Still::Portal => crate::linux::portal::screenshot(),
         // A back end for another OS, or nothing at all.
         #[allow(unreachable_patterns)]
-        Still::Gdi | Still::X11 | Still::ExtImageCopy | Still::WlrScreencopy | Still::None => {
-            Err(CaptureError::Unsupported)
-        }
+        Still::Gdi
+        | Still::X11
+        | Still::ExtImageCopy
+        | Still::WlrScreencopy
+        | Still::KWin
+        | Still::Portal
+        | Still::None => Err(CaptureError::Unsupported),
     }
 }
 
@@ -131,7 +140,13 @@ pub fn window_rects(shot: &DesktopShot) -> Vec<WindowRect> {
     }
     #[cfg(target_os = "linux")]
     {
-        x11::window_rects(shot)
+        use windup_core::capture::backend::{Rects, rects};
+        match rects(&facts()) {
+            Rects::X11 => x11::window_rects(shot),
+            Rects::KWinScript => crate::linux::kde::window_rects(),
+            // Sway and Hyprland arrive with their task; edges until then.
+            _ => Vec::new(),
+        }
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {

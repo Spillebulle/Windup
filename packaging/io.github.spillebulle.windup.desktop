@@ -11,6 +11,10 @@ Keywords=clipboard;history;paste;plain;text;hotkey;
 StartupNotify=true
 StartupWMClass=io.github.spillebulle.windup
 Actions=popup;paste-plain;
+# KDE: lets Windup ask KWin for a still of the screen (the screenshot overlay).
+# KWin matches the caller's executable path to this entry, so it does not
+# apply to the AppImage, which falls back to the screenshot portal.
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
 
 [Desktop Action popup]
 Name=Open clipboard history

@@ -8,6 +8,9 @@
 //! token in the config directory, so the question is not asked again at the
 //! next login on desktops that support persisting it.
 
+use crate::capture::CaptureError;
+use crate::capture::split::split_desktop;
+use crate::linux::wayland::screencopy::output_layout_from_env;
 use crate::platform::{HotkeysVia, Plan};
 use ashpd::desktop::PersistMode;
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
@@ -18,6 +21,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 use windup_core::Config;
 use windup_core::Shortcut;
+use windup_core::capture::geometry::DesktopShot;
 use windup_core::hotkeys::{Action, bindings, portal_trigger};
 use windup_core::ipc::Command;
 
@@ -151,4 +155,40 @@ async fn remote_session<'a>() -> ashpd::Result<(
 
 fn token_path() -> Option<std::path::PathBuf> {
     Config::config_dir().map(|d| d.join("remote-desktop-token"))
+}
+
+/// A still of the whole desktop through the Screenshot portal (GNOME, and
+/// anywhere else with a portal and no better route). The first time, the
+/// desktop asks the user whether Windup may take screenshots and remembers the
+/// answer; a refusal comes back as `Denied`. The portal returns one image of
+/// the whole desktop, which is cut up by the compositor's output layout.
+pub fn screenshot() -> Result<DesktopShot, CaptureError> {
+    use ashpd::desktop::screenshot::Screenshot;
+    let layout = output_layout_from_env()?;
+    let response = pollster::block_on(async {
+        Screenshot::request()
+            .interactive(false)
+            .modal(false)
+            .send()
+            .await?
+            .response()
+    });
+    let shot = match response {
+        Ok(shot) => shot,
+        Err(ashpd::Error::Response(_)) => return Err(CaptureError::Denied),
+        Err(ashpd::Error::Portal(ashpd::PortalError::NotAllowed(_))) => {
+            return Err(CaptureError::Denied);
+        }
+        Err(ashpd::Error::PortalNotFound(_)) => return Err(CaptureError::Unsupported),
+        Err(e) => return Err(CaptureError::Failed(e.to_string())),
+    };
+    let path = shot
+        .uri()
+        .to_file_path()
+        .map_err(|()| CaptureError::Failed(format!("not a file: {}", shot.uri())))?;
+    let img = image::open(&path);
+    // GNOME leaves the file in ~/Pictures; this one is ours to remove.
+    let _ = std::fs::remove_file(&path);
+    let img = img.map_err(|e| CaptureError::Failed(e.to_string()))?;
+    Ok(split_desktop(img.to_rgba8(), &layout))
 }

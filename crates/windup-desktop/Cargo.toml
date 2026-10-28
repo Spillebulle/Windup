@@ -23,6 +23,7 @@ global-hotkey = "0.8.0"
 enigo = "0.6.1"
 clipboard-rs = "0.3.5"
 image = { workspace = true }
+serde_json = { workspace = true }
 
 # Linux: our own Wayland connection for data-control, the virtual keyboard and
 # the layer-shell popup (egui drawn through egui-wgpu, as eframe does), and
@@ -42,6 +43,9 @@ rustix = { version = "1", features = ["fs", "process", "pipe", "event"] }
 # The same portal client and runtime rfd already brings in.
 ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
 futures-util = "0.3"
+# The very zbus ashpd uses (one version in Cargo.lock); the `interface` macro
+# names the crate, so it cannot go through ashpd::zbus.
+zbus = { version = "5.19", default-features = false, features = ["async-io"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
