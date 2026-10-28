@@ -53,6 +53,14 @@ struct WindupApp {
     last_icon_colors: Option<(egui::Color32, egui::Color32)>,
 }
 
+/// Windows key code of the Paste plain text shortcut, if it is bound.
+fn paste_plain_vk(list: &[(windup_core::Shortcut, windup_core::hotkeys::Action)]) -> Option<u16> {
+    use windup_core::hotkeys::{Action, windows_vk};
+    list.iter()
+        .find(|(_, a)| *a == Action::PastePlain)
+        .and_then(|(s, _)| windows_vk(&s.key))
+}
+
 impl WindupApp {
     fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
         install_fonts(&cc.egui_ctx);
@@ -130,6 +138,7 @@ impl WindupApp {
         }
 
         let applied_bindings = windup_core::hotkeys::bindings(&config);
+        paste::set_trigger_vk(paste_plain_vk(&applied_bindings));
         Self {
             config,
             settings_view: SettingsView::default(),
@@ -224,6 +233,7 @@ impl eframe::App for WindupApp {
             if let Some(l) = &self.hotkey_listener {
                 l.rebind(&self.config);
             }
+            paste::set_trigger_vk(paste_plain_vk(&wanted));
             self.applied_bindings = wanted;
         }
 

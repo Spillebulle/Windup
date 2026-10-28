@@ -3,6 +3,7 @@
 use crate::platform::Target;
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContext, RustImageData};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::thread;
 use std::time::Duration;
 use windup_core::clipboard::{ClipboardContent, ClipboardEntry};
@@ -121,6 +122,32 @@ pub fn paste_current_clipboard_as_plain(target: Target) {
     }
 }
 
+/// Virtual-key code of the key bound to Paste plain text; the paste waits for
+/// it to be physically released before sending Ctrl+V.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+static TRIGGER_VK: AtomicU16 = AtomicU16::new(0x56);
+
+/// Called when the bindings change, with the VK of the Paste plain text key
+/// (V if it is not bound).
+pub fn set_trigger_vk(vk: Option<u16>) {
+    TRIGGER_VK.store(vk.unwrap_or(0x56), Ordering::Relaxed);
+}
+
+/// Modifier virtual keys, generic and per side: Shift, Ctrl, Alt, Win.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+const MODIFIER_VKS: [u16; 11] = [
+    0x10, 0xA0, 0xA1, 0x11, 0xA2, 0xA3, 0x12, 0xA4, 0xA5, 0x5B, 0x5C,
+];
+
+/// Keys that must be up before the simulated Ctrl+V: the shortcut's own key,
+/// Enter, and every modifier the shortcut might have used.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn release_wait_keys(trigger_vk: u16) -> Vec<u16> {
+    let mut keys = vec![trigger_vk, 0x0D];
+    keys.extend(MODIFIER_VKS);
+    keys
+}
+
 pub fn dispatch_paste_to_target(target: Target) {
     thread::spawn(move || {
         #[cfg(target_os = "windows")]
@@ -134,7 +161,7 @@ pub fn dispatch_paste_to_target(target: Target) {
             use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
             use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
                 GetAsyncKeyState, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
-                VK_CONTROL, VK_LWIN, VK_RETURN, VK_RWIN, VK_V,
+                VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_V,
             };
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
@@ -168,21 +195,47 @@ pub fn dispatch_paste_to_target(target: Target) {
                 }
             }
 
-            // 2. Wait for physical keys (Enter, Win, V) to be fully released so they don't leak or collide
+            // 2. Wait for the shortcut's keys (its key, Enter, Win, Ctrl, Alt, Shift) to be fully released so they don't leak or collide
+            let wait_keys = release_wait_keys(TRIGGER_VK.load(Ordering::Relaxed));
+            let is_down = |vk: u16| GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0;
             let start = std::time::Instant::now();
             loop {
-                let enter_down = GetAsyncKeyState(VK_RETURN as i32) as u16 & 0x8000 != 0;
-                let win_down = (GetAsyncKeyState(VK_LWIN as i32) as u16 & 0x8000 != 0)
-                    || (GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000 != 0);
-                let v_down = GetAsyncKeyState(VK_V as i32) as u16 & 0x8000 != 0;
-
-                if !enter_down && !win_down && !v_down {
+                if !wait_keys.iter().any(|&vk| is_down(vk)) {
                     break;
                 }
                 if start.elapsed() > Duration::from_millis(300) {
                     break;
                 }
                 thread::sleep(Duration::from_millis(15));
+            }
+
+            // Still held at the cap: release them for the target, or it would
+            // see Ctrl+Alt+V, Ctrl+Shift+V and so on.
+            let stuck: Vec<u16> = [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
+                .into_iter()
+                .filter(|&vk| is_down(vk))
+                .collect();
+            if !stuck.is_empty() {
+                let mut ups: Vec<INPUT> = stuck
+                    .iter()
+                    .map(|&vk| {
+                        let mut i: INPUT = std::mem::zeroed();
+                        i.r#type = INPUT_KEYBOARD;
+                        i.Anonymous.ki = KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: KEYEVENTF_KEYUP,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        };
+                        i
+                    })
+                    .collect();
+                SendInput(
+                    ups.len() as u32,
+                    ups.as_mut_ptr(),
+                    std::mem::size_of::<INPUT>() as i32,
+                );
             }
 
             // Allow the target application message loop to settle its newly acquired focus
@@ -271,4 +324,23 @@ pub fn dispatch_paste_to_target(target: Target) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waits_for_the_key_and_every_modifier() {
+        // Alt+Shift+P
+        let keys = release_wait_keys(0x50);
+        for vk in [0x50, 0x12, 0x10, 0x11, 0x5B, 0x5C, 0x0D] {
+            assert!(keys.contains(&vk), "missing {vk:#x}");
+        }
+        // Per-side codes too.
+        for vk in [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5] {
+            assert!(keys.contains(&vk), "missing {vk:#x}");
+        }
+        assert!(!keys.contains(&0x56));
+    }
 }
