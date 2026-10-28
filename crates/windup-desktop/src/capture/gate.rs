@@ -41,9 +41,43 @@ impl Gate {
     }
 }
 
+/// The worker's way back: it sends its result with [`Reply::send`], and a
+/// worker that ends without one (a panic in the grab, the decoding, anything)
+/// sends `fallback` as it unwinds. The gate then always hears back, and never
+/// stays `Grabbing` until a restart.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct Reply<T> {
+    tx: std::sync::mpsc::Sender<T>,
+    fallback: Option<T>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl<T> Reply<T> {
+    pub fn new(tx: std::sync::mpsc::Sender<T>, fallback: T) -> Self {
+        Self {
+            tx,
+            fallback: Some(fallback),
+        }
+    }
+
+    pub fn send(mut self, value: T) {
+        self.fallback = None;
+        let _ = self.tx.send(value);
+    }
+}
+
+impl<T> Drop for Reply<T> {
+    fn drop(&mut self) {
+        if let Some(fallback) = self.fallback.take() {
+            let _ = self.tx.send(fallback);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::{Receiver, channel};
 
     #[test]
     fn a_second_capture_is_ignored_while_one_grabs_or_is_open() {
@@ -69,6 +103,50 @@ mod tests {
         g.opened();
         g.end();
         assert!(g.begin());
+    }
+
+    /// What the background loop does with whatever the worker sends: any
+    /// failure ends the capture.
+    fn drain(g: &mut Gate, rx: &Receiver<Result<(), String>>) {
+        while let Ok(r) = rx.try_recv() {
+            if r.is_err() {
+                g.end();
+            }
+        }
+    }
+
+    #[test]
+    fn a_panicking_job_still_reports_and_the_gate_reopens() {
+        let mut g = Gate::default();
+        assert!(g.begin());
+        let (tx, rx) = channel::<Result<(), String>>();
+        let reply = Reply::new(tx, Err("the grab thread panicked".to_owned()));
+        let joined = std::thread::spawn(move || {
+            let _reply = reply;
+            panic!("in the grab");
+        })
+        .join();
+        assert!(joined.is_err());
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Err("the grab thread panicked".to_owned()))
+        );
+        g.end();
+        assert!(g.begin(), "the next capture starts");
+    }
+
+    #[test]
+    fn a_dropped_job_reports_once_and_a_finished_one_only_its_result() {
+        let mut g = Gate::default();
+        assert!(g.begin());
+        let (tx, rx) = channel();
+        drop(Reply::new(tx.clone(), Err("dropped".to_owned())));
+        drain(&mut g, &rx);
+        assert!(g.begin());
+
+        Reply::new(tx, Err("dropped".to_owned())).send(Ok(()));
+        assert_eq!(rx.try_recv(), Ok(Ok(())));
+        assert!(rx.try_recv().is_err(), "nothing more after the result");
     }
 
     #[test]

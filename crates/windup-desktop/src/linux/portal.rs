@@ -25,6 +25,12 @@ use windup_core::capture::geometry::DesktopShot;
 use windup_core::hotkeys::{Action, bindings, portal_trigger};
 use windup_core::ipc::Command;
 
+/// How long a screenshot may wait on the portal, including the user
+/// reading and answering its first-time permission dialog: long enough for
+/// that, short enough that a portal that never answers does not block every
+/// later capture until a restart.
+const PORTAL_SCREENSHOT_WAIT: Duration = Duration::from_secs(120);
+
 /// Evdev codes, which is what the portal's keycode call takes.
 const KEY_LEFTCTRL: i32 = 29;
 const KEY_V: i32 = 47;
@@ -165,18 +171,32 @@ fn token_path() -> Option<std::path::PathBuf> {
 ///
 /// Blocks until the portal answers, which includes the user answering that
 /// first-time dialog: call it from a thread of its own, never the hotkey or
-/// event thread.
+/// event thread. A portal that never answers is given up on after
+/// `PORTAL_SCREENSHOT_WAIT`, so a capture cannot hang for good.
 pub fn screenshot() -> Result<DesktopShot, CaptureError> {
     use ashpd::desktop::screenshot::Screenshot;
     let layout = output_layout_from_env()?;
-    let response = pollster::block_on(async {
-        Screenshot::request()
-            .interactive(false)
-            .modal(false)
-            .send()
-            .await?
-            .response()
-    });
+    // The request runs on a thread of its own so the wait can be capped; a
+    // portal that never answers leaves that thread blocked, which is all it
+    // costs.
+    let (tx, rx) = channel();
+    std::thread::Builder::new()
+        .name("portal-screenshot".into())
+        .spawn(move || {
+            let response = pollster::block_on(async {
+                Screenshot::request()
+                    .interactive(false)
+                    .modal(false)
+                    .send()
+                    .await?
+                    .response()
+            });
+            let _ = tx.send(response);
+        })
+        .map_err(|e| CaptureError::Failed(e.to_string()))?;
+    let response = rx
+        .recv_timeout(PORTAL_SCREENSHOT_WAIT)
+        .map_err(|_| CaptureError::Failed("the screenshot portal did not answer".into()))?;
     let shot = match response {
         Ok(shot) => shot,
         Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => {

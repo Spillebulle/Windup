@@ -16,7 +16,7 @@
 
 use super::wayland::{CaptureEnd, CaptureSetup, NoticeSetup, Service, Shared};
 use super::{Background, config_stamp, copy_image, popup_setup, portal, window};
-use crate::capture::gate::Gate;
+use crate::capture::gate::{Gate, Reply};
 use crate::capture::{CaptureError, finish, grab_all, window_rects};
 use crate::platform::{Host, PasteVia, Plan, Watch};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -76,7 +76,14 @@ impl Background {
         }
         log::info!("capture: grabbing");
         self.capture.mode = mode;
-        let tx = self.capture.tx.clone();
+        // A worker that dies without a result (a panic), or never starts,
+        // still reports, so the gate never stays `Grabbing`.
+        let reply = Reply::new(
+            self.capture.tx.clone(),
+            Err(CaptureError::Failed(
+                "the grab thread ended without a picture".into(),
+            )),
+        );
         let spawned = std::thread::Builder::new()
             .name("capture-grab".into())
             .spawn(move || {
@@ -89,14 +96,11 @@ impl Background {
                         reduced_motion: motion.recv_timeout(MOTION_WAIT).unwrap_or(false),
                     }
                 });
-                let _ = tx.send(grabbed);
+                reply.send(grabbed);
             });
         if let Err(e) = spawned {
+            // The closure, and with it `reply`, is dropped: that reports.
             log::error!("capture: no thread for the grab: {e}");
-            let _ = self
-                .capture
-                .tx
-                .send(Err(CaptureError::Failed(e.to_string())));
         }
     }
 
