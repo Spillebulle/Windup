@@ -1,4 +1,5 @@
 pub mod art;
+pub mod capture;
 pub mod icons;
 pub mod lucide;
 pub mod popup;

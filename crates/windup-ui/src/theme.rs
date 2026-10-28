@@ -38,6 +38,22 @@ pub mod metrics {
     pub const S4: f32 = 16.0;
     pub const S5: f32 = 24.0;
     pub const S6: f32 = 32.0;
+
+    // Capture overlay. The ants are Umber's selection outline, same numbers.
+    /// Length of one marching-ants dash and the gap after it, in points.
+    pub const ANT_DASH: f32 = 4.0;
+    /// How fast the dashes travel, in points per second: one period a second.
+    pub const ANT_SPEED: f32 = 2.0 * ANT_DASH;
+    /// How often a frame is asked for while ants are on screen.
+    pub const ANT_FRAME_MS: u64 = 60;
+    /// Opacity of the dim laid over everything outside the selection.
+    pub const DIM_ALPHA: f32 = 0.6;
+    /// Duration of the highlight rectangle's tween between windows.
+    pub const TWEEN_MS: f32 = 160.0;
+    /// Side of the loupe, in points.
+    pub const LOUPE: f32 = 112.0;
+    /// Magnification of the loupe.
+    pub const LOUPE_ZOOM: f32 = 8.0;
 }
 
 pub const STRONG: &str = "archivo-semibold";
@@ -103,6 +119,31 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// The solid line under the marching ants.
+    ///
+    /// Derived from the accent, not stored, so it is not a theme token: the far
+    /// end of the lightness axis from whatever the accent is. `backdrop` and
+    /// `accent` are each dark in one theme and light in the other, so a pair
+    /// built from them can land within a hair of each other and the underlay
+    /// vanishes on mid-grey artwork. Black under a light accent and white under
+    /// a dark one reads on any screenshot, whichever half of the pair is
+    /// momentarily over a dark pixel. (Umber's `accent_underlay`, which takes
+    /// the same end by bisecting a contrast ratio; at its strongest rank that
+    /// lands on the extreme itself, so this goes there directly.)
+    pub fn accent_underlay(&self) -> Color32 {
+        // WCAG relative luminance; the end with more contrast headroom wins.
+        // Compared as ratios rather than distances: the +0.05 is worth far more
+        // at the dark end, so mid grey is still better served by black.
+        let l = luminance(self.accent);
+        let lighter = 1.05 / (l + 0.05);
+        let darker = (l + 0.05) / 0.05;
+        if lighter >= darker {
+            Color32::WHITE
+        } else {
+            Color32::BLACK
+        }
+    }
+
     pub fn of(mode: Mode, accent_h: f32) -> Self {
         match mode {
             Mode::Dark => Self::dark(accent_h),
@@ -236,6 +277,19 @@ pub mod shadow {
             color,
         }
     }
+}
+
+/// WCAG relative luminance of an sRGB colour.
+fn luminance(c: Color32) -> f64 {
+    let channel = |b: u8| {
+        let c = f64::from(b) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
 }
 
 pub fn oklch(l: f32, c: f32, h_deg: f32) -> Color32 {
