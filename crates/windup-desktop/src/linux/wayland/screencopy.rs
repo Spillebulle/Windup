@@ -163,6 +163,7 @@ impl OutputFacts {
             layout: self.layout,
             image,
             name: self.name.clone(),
+            scale: 1.0,
         }
     }
 }

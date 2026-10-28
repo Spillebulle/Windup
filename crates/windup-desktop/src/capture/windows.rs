@@ -21,7 +21,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
+    SetThreadDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
@@ -52,6 +53,8 @@ impl Drop for DpiScope {
 struct Monitor {
     rect: RECT,
     name: String,
+    /// Physical pixels (desktop units) per point: the monitor's DPI / 96.
+    scale: f32,
 }
 
 unsafe extern "system" fn collect_monitor(
@@ -72,9 +75,18 @@ unsafe extern "system" fn collect_monitor(
             .iter()
             .position(|&c| c == 0)
             .unwrap_or(info.szDevice.len());
+        let (mut dx, mut dy) = (0u32, 0u32);
+        // SAFETY: plain call with out-pointers to locals. The thread is
+        // per-monitor aware (`DpiScope`), so this is the monitor's own DPI.
+        let dpi = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) };
         list.push(Monitor {
             rect: info.monitorInfo.rcMonitor,
             name: String::from_utf16_lossy(&info.szDevice[..len]),
+            scale: if dpi == 0 && dx > 0 {
+                dx as f32 / 96.0
+            } else {
+                1.0
+            },
         });
     }
     TRUE
@@ -176,6 +188,7 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
                 },
                 image: blit(screen, &m.rect)?,
                 name: m.name.clone(),
+                scale: m.scale,
             })
         })
         .collect();

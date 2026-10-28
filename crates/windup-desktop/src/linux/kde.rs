@@ -79,6 +79,7 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
             layout: rect,
             image,
             name,
+            scale: 1.0,
         });
     }
     Ok(DesktopShot { monitors })

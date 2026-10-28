@@ -31,6 +31,7 @@ impl Rig {
             },
             image: RgbaImage::from_pixel(200 * ppu, 200 * ppu, image::Rgba([90, 90, 90, 255])),
             name: String::new(),
+            scale: 1.0,
         };
         let shot = DesktopShot {
             monitors: vec![monitor(-200.0, 1), monitor(0.0, 2)],

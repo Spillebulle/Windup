@@ -138,6 +138,8 @@ impl Default for EditorKeys {
     }
 }
 
+/// The editor's tool sizes, in screen points, so a size looks the same on
+/// every desktop and monitor. A drawn annotation keeps its own width.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolSizes {

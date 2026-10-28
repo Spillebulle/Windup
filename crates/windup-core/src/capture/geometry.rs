@@ -4,6 +4,8 @@
 //! Desktop units are whatever the platform lays monitors out in: Windows
 //! virtual-screen physical pixels, X11 root pixels, Wayland logical layout.
 //! A monitor's image may hold more pixels than its layout has units (HiDPI).
+//! Screen points are what the user sees and sizes are set in; each monitor
+//! says how many desktop units one point is (`MonitorShot::scale`).
 
 use image::imageops::{self, FilterType};
 use image::{Rgba, RgbaImage};
@@ -74,6 +76,11 @@ pub struct MonitorShot {
     pub layout: DRect,
     pub image: RgbaImage,
     pub name: String,
+    /// Desktop units per screen point on this monitor, so sizes the user
+    /// sees (handles, pen widths, a nudge) are alike everywhere: the OS
+    /// scale where desktop units are physical pixels (Windows DPI / 96,
+    /// X11 Xft.dpi / 96), and 1 on Wayland, whose layout is in points.
+    pub scale: f32,
 }
 
 impl MonitorShot {
@@ -193,6 +200,7 @@ mod tests {
             layout,
             image: RgbaImage::from_pixel(px.0, px.1, c),
             name: String::new(),
+            scale: 1.0,
         }
     }
 

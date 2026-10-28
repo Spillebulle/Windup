@@ -3,6 +3,7 @@
 use super::geometry::DRect;
 use crate::config::TargetKind;
 
+/// The shortest drag that is not a click, in screen points.
 pub const MIN_DRAG: f32 = 3.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,12 +107,12 @@ impl Selection {
         });
     }
 
-    /// A new drag shorter than `MIN_DRAG` in either direction was a click or a line:
-    /// the previous rect comes back.
-    pub fn release(&mut self) {
+    /// A new drag shorter than `min_drag` (desktop units) in either
+    /// direction was a click or a line: the previous rect comes back.
+    pub fn release(&mut self, min_drag: f32) {
         if let Some(Drag::New { prev, .. }) = self.drag.take()
             && let Some(rect) = self.rect
-            && (rect.w < MIN_DRAG || rect.h < MIN_DRAG)
+            && (rect.w < min_drag || rect.h < min_drag)
         {
             self.rect = prev;
         }
@@ -195,7 +196,7 @@ mod tests {
     fn drawn(sel: &mut Selection, from: (f32, f32), to: (f32, f32), bounds: DRect) {
         sel.press(from, 6.0);
         sel.drag_to(to, bounds);
-        sel.release();
+        sel.release(MIN_DRAG);
     }
 
     #[test]
@@ -209,7 +210,7 @@ mod tests {
     fn a_click_without_a_drag_selects_nothing() {
         let mut sel = Selection::default();
         sel.press((50.0, 50.0), 6.0);
-        sel.release();
+        sel.release(MIN_DRAG);
         assert_eq!(sel.rect, None);
         drawn(&mut sel, (50.0, 50.0), (51.0, 52.0), desktop());
         assert_eq!(sel.rect, None);
@@ -245,7 +246,7 @@ mod tests {
         assert_eq!(sel.handle_at((200.0, 200.0), 6.0), Some(Handle::SE));
         sel.press((200.0, 200.0), 6.0);
         sel.drag_to((50.0, 300.0), desktop());
-        sel.release();
+        sel.release(MIN_DRAG);
         assert_eq!(sel.rect, Some(r(50.0, 100.0, 50.0, 200.0)));
     }
 
@@ -273,7 +274,7 @@ mod tests {
         assert_eq!(sel.rect, Some(r(160.0, 120.0, 200.0, 100.0)));
         sel.drag_to((99999.0, 99999.0), desktop());
         assert_eq!(sel.rect, Some(r(800.0, 700.0, 200.0, 100.0)));
-        sel.release();
+        sel.release(MIN_DRAG);
     }
 
     #[test]
@@ -334,7 +335,7 @@ mod tests {
         sel.set_rect(r(100.0, 100.0, 100.0, 100.0));
         sel.press((200.0, 200.0), 6.0);
         sel.drag_to((100.0, 200.0), desktop());
-        sel.release();
+        sel.release(MIN_DRAG);
         let rect = sel.rect.unwrap();
         assert!(rect.w >= 1.0 && rect.h >= 1.0, "{rect:?}");
     }

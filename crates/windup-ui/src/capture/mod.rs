@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use windup_core::capture::annotate::Tool;
 use windup_core::capture::selection::Handle;
-use windup_core::capture::session::{Action, HANDLE_TOLERANCE, Mods, Outcome, Session, Stage};
+use windup_core::capture::session::{Action, Mods, Outcome, Session, Stage};
 use windup_core::capture::{DRect, TWEEN_SECS};
 use windup_core::config::{EditorKeys, TargetKind};
 use windup_core::shortcut::{Shortcut, ShortcutModifiers};
@@ -646,7 +646,10 @@ fn cursor(session: &Session, d: [f32; 2]) -> CursorIcon {
         Stage::Choosing if session.target == TargetKind::Area => CursorIcon::Crosshair,
         Stage::Choosing => CursorIcon::PointingHand,
         Stage::Editing if session.tool == Tool::Pipette => CursorIcon::Crosshair,
-        Stage::Editing => match session.selection.handle_at((d[0], d[1]), HANDLE_TOLERANCE) {
+        Stage::Editing => match session
+            .selection
+            .handle_at((d[0], d[1]), session.handle_tolerance((d[0], d[1])))
+        {
             Some(Handle::N | Handle::S) => CursorIcon::ResizeVertical,
             Some(Handle::E | Handle::W) => CursorIcon::ResizeHorizontal,
             Some(Handle::NE | Handle::SW) => CursorIcon::ResizeNeSw,

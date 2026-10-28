@@ -310,6 +310,7 @@ mod tests {
                 layout,
                 image: img,
                 name: "t".into(),
+                scale: 1.0,
             }],
         }
     }

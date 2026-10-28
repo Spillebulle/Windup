@@ -33,6 +33,7 @@ pub(crate) fn split_desktop(img: RgbaImage, layout: &[(String, DRect)]) -> Deskt
                 layout: *rect,
                 image: crop_imm(&img, x0, y0, x1 - x0, y1 - y0).to_image(),
                 name: name.clone(),
+                scale: 1.0,
             })
         })
         .collect();

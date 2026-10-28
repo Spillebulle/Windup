@@ -4,21 +4,28 @@
 //! Pure: no egui, no clock, no I/O. Every position is in desktop units and
 //! every time is passed in, so the view only converts pointer positions,
 //! forwards events and paints what is here.
+//!
+//! Sizes the user sees are in screen points, so the editor feels the same on
+//! every desktop and monitor: the handle tolerance, `MIN_DRAG`, the nudge
+//! step and the tool sizes. Each is turned into desktop units by the scale of
+//! the monitor under the pointer (`units_per_point`), or under the start of
+//! an annotation being drawn. An annotation keeps its width in desktop units
+//! from then on, so moving it never changes its size.
 
 use image::RgbaImage;
 
 use super::annotate::{Annotation, Doc, Shape, Tool, press_selects};
-use super::geometry::{DRect, DesktopShot};
+use super::geometry::{DRect, DesktopShot, MonitorShot};
 use super::pick::{Tween, WindowRect, edge_rect, window_at};
 use super::raster::render;
 use super::selection::{Handle, MIN_DRAG, Selection};
 use crate::config::{ScreenshotConfig, TargetKind, ToolSizes};
 
-/// How near the pointer must be to a handle or an outline, in desktop units.
+/// How near the pointer must be to a handle or an outline, in screen points.
 pub const HANDLE_TOLERANCE: f32 = 6.0;
 /// How long the size figure by the pointer stays, in seconds.
 pub const SIZE_FLASH_SECS: f64 = 0.8;
-/// One wheel step changes a size by this much.
+/// One wheel step changes a size by this much, in points.
 pub const SIZE_STEP: f32 = 1.0;
 pub const MIN_TOOL_SIZE: f32 = 1.0;
 pub const MAX_TOOL_SIZE: f32 = 64.0;
@@ -183,7 +190,7 @@ impl Session {
         match self.stage {
             Stage::Choosing => {
                 if self.target == TargetKind::Area {
-                    self.selection.press(at, HANDLE_TOLERANCE);
+                    self.selection.press(at, self.handle_tolerance(at));
                     self.grab = Grab::Selection;
                 }
             }
@@ -209,8 +216,9 @@ impl Session {
         let grab = std::mem::replace(&mut self.grab, Grab::Nothing);
         match grab {
             Grab::Selection => {
-                self.selection.release();
-                if self.stage == Stage::Choosing && self.has_selection() {
+                let min_drag = MIN_DRAG * self.units_per_point((p[0], p[1]));
+                self.selection.release(min_drag);
+                if self.stage == Stage::Choosing && self.has_selection(min_drag) {
                     self.enter_editing();
                 }
             }
@@ -239,9 +247,12 @@ impl Session {
         let size = if let Some(id) = self.doc.selected
             && let Some(current) = self.doc.get(id).map(|a| a.size)
         {
-            let size = (current + delta).clamp(MIN_TOOL_SIZE, MAX_TOOL_SIZE);
+            // The annotation's size is in desktop units; the step, the
+            // limits and the figure shown are in points.
+            let k = self.units_per_point(self.here());
+            let size = (current / k + delta).clamp(MIN_TOOL_SIZE, MAX_TOOL_SIZE);
             self.settle();
-            self.doc.set_size(id, size);
+            self.doc.set_size(id, size * k);
             size
         } else if let Some(current) = self.tool_size(self.tool) {
             let size = (current + delta).clamp(MIN_TOOL_SIZE, MAX_TOOL_SIZE);
@@ -285,7 +296,9 @@ impl Session {
                 }
             }
             Action::Nudge { dx, dy } if editing => {
-                self.selection.nudge(dx, dy, self.edge);
+                // A step is in points.
+                let k = self.units_per_point(self.here());
+                self.selection.nudge(dx * k, dy * k, self.edge);
                 // Kept on the desktop, as a drag keeps it: a rect wholly
                 // off it would render nothing, and Copy and Save would do
                 // nothing without a word.
@@ -325,7 +338,38 @@ impl Session {
         None
     }
 
+    /// Desktop units per screen point at `at`: the scale of the monitor
+    /// there, or of the nearest one when `at` is between monitors.
+    pub fn units_per_point(&self, at: (f32, f32)) -> f32 {
+        let gap = |m: &&MonitorShot| {
+            let dx = (m.layout.x - at.0).max(at.0 - m.layout.right()).max(0.0);
+            let dy = (m.layout.y - at.1).max(at.1 - m.layout.bottom()).max(0.0);
+            dx * dx + dy * dy
+        };
+        self.shot
+            .monitors
+            .iter()
+            .min_by(|a, b| gap(a).total_cmp(&gap(b)))
+            .map(|m| m.scale)
+            .filter(|k| k.is_finite() && *k > 0.0)
+            .unwrap_or(1.0)
+    }
+
+    /// `HANDLE_TOLERANCE` in desktop units at `at`.
+    pub fn handle_tolerance(&self, at: (f32, f32)) -> f32 {
+        HANDLE_TOLERANCE * self.units_per_point(at)
+    }
+
     // --- internals ---------------------------------------------------------
+
+    /// Where a key's step is measured: the pointer, else the selection.
+    fn here(&self) -> (f32, f32) {
+        match (self.pointer, self.selection.rect) {
+            (Some(p), _) => (p[0], p[1]),
+            (None, Some(r)) => (r.x, r.y),
+            (None, None) => (0.0, 0.0),
+        }
+    }
 
     fn result(&self, copy: bool, save: bool) -> Option<Outcome> {
         match self.finish(copy, save) {
@@ -334,10 +378,10 @@ impl Session {
         }
     }
 
-    fn has_selection(&self) -> bool {
+    fn has_selection(&self, min_drag: f32) -> bool {
         self.selection
             .rect
-            .is_some_and(|r| r.w >= MIN_DRAG && r.h >= MIN_DRAG)
+            .is_some_and(|r| r.w >= min_drag && r.h >= min_drag)
     }
 
     fn enter_editing(&mut self) {
@@ -420,13 +464,14 @@ impl Session {
             }
             return;
         }
+        let tolerance = self.handle_tolerance(at);
         // The transform box of the selected annotation: its edges and corners.
         if let Some(id) = self.doc.selected
             && let Some(a) = self.doc.get(id)
         {
             let mut probe = Selection::default();
             probe.set_rect(a.shape.bounds().normalised());
-            if let Some(h) = probe.handle_at(at, HANDLE_TOLERANCE)
+            if let Some(h) = probe.handle_at(at, tolerance)
                 && h != Handle::Move
             {
                 self.doc.begin_transform(id, h, at);
@@ -435,7 +480,7 @@ impl Session {
             }
         }
         // The tool that made an annotation, or Select, picks it up.
-        if let Some(id) = self.doc.hit(at, HANDLE_TOLERANCE / 2.0)
+        if let Some(id) = self.doc.hit(at, tolerance / 2.0)
             && press_selects(self.tool, self.doc.get(id))
         {
             self.doc.selected = Some(id);
@@ -444,12 +489,12 @@ impl Session {
             return;
         }
         // The selection's own edges win over drawing, whatever the tool.
-        let handle = self.selection.handle_at(at, HANDLE_TOLERANCE);
+        let handle = self.selection.handle_at(at, tolerance);
         if let Some(h) = handle
             && h != Handle::Move
         {
             self.edge = Some(h);
-            self.selection.press(at, HANDLE_TOLERANCE);
+            self.selection.press(at, tolerance);
             self.grab = Grab::Selection;
             return;
         }
@@ -457,7 +502,7 @@ impl Session {
             self.doc.selected = None;
             if handle.is_some() {
                 self.edge = None;
-                self.selection.press(at, HANDLE_TOLERANCE);
+                self.selection.press(at, tolerance);
                 self.grab = Grab::Selection;
             }
             return;
@@ -468,7 +513,8 @@ impl Session {
 
     fn start_draft(&mut self, at: (f32, f32)) {
         let tool = self.tool;
-        let Some(size) = self.tool_size(tool) else {
+        // Points now, desktop units for good.
+        let Some(size) = self.tool_size(tool).map(|pt| pt * self.units_per_point(at)) else {
             return;
         };
         let empty = DRect {
@@ -513,11 +559,12 @@ impl Session {
 
     fn commit_draft(&mut self) {
         let Some(d) = self.draft.take() else { return };
+        let min_drag = MIN_DRAG * self.units_per_point(self.draw_start);
         let worth_keeping = match &d.shape {
             Shape::Pen(points) => points.len() >= 2,
             shape => {
                 let b = shape.bounds();
-                b.w >= MIN_DRAG && b.h >= MIN_DRAG
+                b.w >= min_drag && b.h >= min_drag
             }
         };
         if worth_keeping {
@@ -537,7 +584,6 @@ fn squared(start: (f32, f32), at: (f32, f32)) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture::geometry::MonitorShot;
     use image::Rgba;
 
     const NONE: Mods = Mods {
@@ -558,11 +604,13 @@ mod tests {
                     layout: rect(0.0, 0.0, 100.0, 100.0),
                     image: RgbaImage::from_pixel(100, 100, Rgba([200, 10, 10, 255])),
                     name: "a".into(),
+                    scale: 1.0,
                 },
                 MonitorShot {
                     layout: rect(100.0, 0.0, 100.0, 100.0),
                     image: RgbaImage::from_pixel(200, 200, Rgba([10, 200, 10, 255])),
                     name: "b".into(),
+                    scale: 1.0,
                 },
             ],
         }
@@ -669,6 +717,84 @@ mod tests {
         s.release([40.0, 85.0], NONE);
         assert_ne!(s.selection.rect, Some(rect(10.0, 10.0, 80.0, 80.0)));
         assert_eq!(s.doc.items, before);
+    }
+
+    /// `editing()` with monitor 0 at 150 %: 1.5 desktop units per point.
+    fn editing_at_150() -> Session {
+        let mut shot = shot();
+        shot.monitors[0].scale = 1.5;
+        let mut s = Session::new(shot, vec![], &ScreenshotConfig::default());
+        drag_area(&mut s, [10.0, 10.0], [90.0, 90.0]);
+        assert_eq!(s.stage, Stage::Editing);
+        s
+    }
+
+    #[test]
+    fn the_handle_tolerance_is_in_points() {
+        // 8 units right of the east edge at x = 90: outside 6 units, inside
+        // 6 points (9 units) at 150 %.
+        let mut s = editing_at_150();
+        s.press([98.0, 50.0], NONE);
+        assert!(s.adjusting_edge(), "grabbed the edge 6 points away");
+        s.release([98.0, 50.0], NONE);
+
+        let mut s = editing();
+        s.press([98.0, 50.0], NONE);
+        assert!(!s.adjusting_edge(), "8 units is past 6 points at 100 %");
+    }
+
+    #[test]
+    fn a_pen_width_is_in_points_and_kept_in_units() {
+        let mut s = editing_at_150();
+        s.sizes.pen = 4.0;
+        draw(&mut s, Tool::Pen, [20.0, 20.0], [60.0, 50.0], NONE);
+        assert_eq!(s.doc.items[0].size, 6.0, "4 points at 150 %");
+        assert_eq!(s.sizes.pen, 4.0, "the tool size stays in points");
+        // Moved onto the 100 % monitor, it keeps its size.
+        s.act(Action::SetTool(Tool::Select));
+        s.press([40.0, 35.0], NONE);
+        s.drag([140.0, 35.0], NONE);
+        s.release([140.0, 35.0], NONE);
+        assert_ne!(s.doc.items[0].shape, Shape::Pen(vec![(20.0, 20.0)]));
+        assert_eq!(s.doc.items[0].size, 6.0);
+    }
+
+    #[test]
+    fn a_nudge_is_one_point() {
+        let mut s = editing_at_150();
+        s.pointer_moved([50.0, 50.0], 0.0);
+        s.act(Action::Nudge { dx: 1.0, dy: 0.0 });
+        assert_eq!(s.selection.rect, Some(rect(11.5, 10.0, 80.0, 80.0)));
+        let mut s = editing();
+        s.pointer_moved([50.0, 50.0], 0.0);
+        s.act(Action::Nudge { dx: 1.0, dy: 0.0 });
+        assert_eq!(s.selection.rect, Some(rect(11.0, 10.0, 80.0, 80.0)));
+    }
+
+    #[test]
+    fn the_shortest_drag_is_in_points() {
+        // 4 units is past 3 points at 100 %, short of them (4.5) at 150 %.
+        let mut s = session(TargetKind::Area);
+        drag_area(&mut s, [10.0, 10.0], [14.0, 14.0]);
+        assert_eq!(s.stage, Stage::Editing);
+        let mut shot = shot();
+        shot.monitors[0].scale = 1.5;
+        let mut s = Session::new(shot, vec![], &ScreenshotConfig::default());
+        drag_area(&mut s, [10.0, 10.0], [14.0, 14.0]);
+        assert_eq!(s.stage, Stage::Choosing);
+    }
+
+    #[test]
+    fn scrolling_an_annotation_steps_one_point() {
+        let mut s = editing_at_150();
+        s.sizes.rect = 4.0;
+        draw(&mut s, Tool::Rect, [20.0, 20.0], [60.0, 50.0], NONE);
+        assert_eq!(s.doc.items[0].size, 6.0);
+        s.press([40.0, 20.0], NONE);
+        s.release([40.0, 20.0], NONE);
+        s.scroll(1.0, 0.0);
+        assert_eq!(s.doc.items[0].size, 7.5, "5 points");
+        assert_eq!(s.size_flash.map(|f| f.0), Some(5.0), "shown in points");
     }
 
     #[test]

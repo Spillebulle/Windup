@@ -83,6 +83,7 @@ fn session() -> Session {
         layout,
         image: picture(layout, ppu, &windows),
         name: name.to_string(),
+        scale: 1.0,
     })
     .collect();
     Session::new(

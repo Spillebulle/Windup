@@ -279,6 +279,7 @@ mod tests {
                 layout: rect(0.0, 0.0, w as f32, h as f32),
                 image: RgbaImage::from_pixel(px.0, px.1, Rgba(c)),
                 name: String::new(),
+                scale: 1.0,
             }],
         }
     }
@@ -379,6 +380,7 @@ mod tests {
                 layout: rect(0.0, 0.0, 10.0, 10.0),
                 image: RgbaImage::from_pixel(10, 10, Rgba([0, 0, 255, 255])),
                 name: String::new(),
+                scale: 1.0,
             }],
         };
         let d = doc_with(vec![(
@@ -399,6 +401,7 @@ mod tests {
             layout: rect(x, 0.0, 10.0, 10.0),
             image: RgbaImage::from_pixel(10, 10, Rgba([0, 0, 255, 255])),
             name: String::new(),
+            scale: 1.0,
         };
         let s = DesktopShot {
             monitors: vec![mk(0.0), mk(20.0)],

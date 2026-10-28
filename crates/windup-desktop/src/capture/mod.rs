@@ -251,9 +251,34 @@ pub(crate) fn x_pixels_to_rgba(
     RgbaImage::from_raw(width, height, out).ok_or_else(|| "image size overflow".to_owned())
 }
 
+/// The X11 scale, screen points to pixels: `Xft.dpi` from the resource
+/// database (the root window's `RESOURCE_MANAGER`) over 96, which is what
+/// GNOME, KDE and Xfce set for their scaling. 1 when it is unset or unusable.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn xft_scale(resources: &str) -> f32 {
+    resources
+        .lines()
+        .filter_map(|line| line.strip_prefix("Xft.dpi:"))
+        .filter_map(|v| v.trim().parse::<f32>().ok())
+        .find(|dpi| dpi.is_finite() && *dpi > 0.0)
+        .map_or(1.0, |dpi| dpi / 96.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xft_dpi_gives_the_x11_scale() {
+        let db = "Xcursor.size:\t24\nXft.dpi:\t144\nXft.antialias:\t1\n";
+        assert_eq!(xft_scale(db), 1.5);
+        assert_eq!(xft_scale("Xft.dpi: 96.0\n"), 1.0);
+        // Unset, or nonsense: one point is one pixel.
+        assert_eq!(xft_scale("Xcursor.size:\t24\n"), 1.0);
+        assert_eq!(xft_scale("Xft.dpi:\tlots\n"), 1.0);
+        assert_eq!(xft_scale("Xft.dpi:\t0\n"), 1.0);
+        assert_eq!(xft_scale(""), 1.0);
+    }
 
     #[test]
     fn bgra_swaps_channels_and_forces_opaque() {

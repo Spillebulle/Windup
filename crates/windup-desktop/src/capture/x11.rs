@@ -2,9 +2,10 @@
 //! and the window manager's stacking list for the picker.
 //!
 //! Sizes are physical pixels and the images are exactly their layouts' size
-//! (X has no fractional scale), so `px_per_unit` is 1.
+//! (X has no fractional scale), so `px_per_unit` is 1. The desktop's scaling
+//! is `Xft.dpi`, which gives every monitor its `scale`.
 
-use super::{CaptureError, XFormat, x_pixels_to_rgba};
+use super::{CaptureError, XFormat, x_pixels_to_rgba, xft_scale};
 use crate::linux::x11::{atom, cardinals, connect};
 use windup_core::capture::geometry::{DRect, DesktopShot, MonitorShot};
 use windup_core::capture::pick::WindowRect;
@@ -93,6 +94,8 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
         ));
     }
 
+    // One scale for every monitor: X has no per-monitor one.
+    let scale = resources(&conn, root).map_or(1.0, |db| xft_scale(&db));
     let mut monitors = Vec::new();
     for (name, x, y, w, h) in rects {
         let reply = conn
@@ -118,9 +121,27 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
             },
             image,
             name,
+            scale,
         });
     }
     Ok(DesktopShot { monitors })
+}
+
+/// The resource database the desktop set on the root window (`xrdb`).
+fn resources(conn: &impl Connection, root: Window) -> Option<String> {
+    let reply = conn
+        .get_property(
+            false,
+            root,
+            AtomEnum::RESOURCE_MANAGER,
+            AtomEnum::STRING,
+            0,
+            1 << 16,
+        )
+        .ok()?
+        .reply()
+        .ok()?;
+    String::from_utf8(reply.value).ok()
 }
 
 fn atom_name(conn: &impl Connection, atom: u32) -> Option<String> {
