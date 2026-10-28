@@ -284,7 +284,17 @@ impl Session {
                     self.enter_editing();
                 }
             }
-            Action::Nudge { dx, dy } if editing => self.selection.nudge(dx, dy, self.edge),
+            Action::Nudge { dx, dy } if editing => {
+                self.selection.nudge(dx, dy, self.edge);
+                // Kept on the desktop, as a drag keeps it: a rect wholly
+                // off it would render nothing, and Copy and Save would do
+                // nothing without a word.
+                let bounds = self.shot.bounds();
+                if let Some(r) = &mut self.selection.rect {
+                    r.x = r.x.min(bounds.right() - r.w).max(bounds.x);
+                    r.y = r.y.min(bounds.bottom() - r.h).max(bounds.y);
+                }
+            }
             Action::Delete if editing => {
                 if let Some(id) = self.doc.selected {
                     self.settle();
@@ -659,6 +669,18 @@ mod tests {
         s.release([40.0, 85.0], NONE);
         assert_ne!(s.selection.rect, Some(rect(10.0, 10.0, 80.0, 80.0)));
         assert_eq!(s.doc.items, before);
+    }
+
+    #[test]
+    fn a_nudge_keeps_the_selection_on_the_desktop() {
+        let mut s = editing();
+        s.act(Action::Nudge {
+            dx: 10_000.0,
+            dy: -10_000.0,
+        });
+        // The desktop is (0, 0)-(200, 100); the selection is 80 x 80.
+        assert_eq!(s.selection.rect, Some(rect(120.0, 0.0, 80.0, 80.0)));
+        assert!(matches!(s.act(Action::Copy), Some(Outcome::Copy(_))));
     }
 
     #[test]
