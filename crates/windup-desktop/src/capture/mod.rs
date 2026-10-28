@@ -132,7 +132,6 @@ pub fn grab_all() -> Result<DesktopShot, CaptureError> {
 
 /// The windows on the desktop, topmost first, in the layout's coordinates.
 /// Empty when the desktop cannot say; the picker then looks for edges.
-#[allow(dead_code)] // the overlay (a later task) is the caller
 pub fn window_rects(shot: &DesktopShot) -> Vec<WindowRect> {
     #[cfg(target_os = "windows")]
     {

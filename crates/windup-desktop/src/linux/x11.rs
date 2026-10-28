@@ -131,3 +131,18 @@ pub fn activate(window: u32) {
     let _ = conn.set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME);
     let _ = conn.flush();
 }
+
+/// One of our own top-level windows, by its exact `_NET_WM_NAME`, from the
+/// window manager's client list.
+pub fn window_named(title: &str) -> Option<u32> {
+    let (conn, root) = connect()?;
+    let utf8 = atom(&conn, "UTF8_STRING")?;
+    let name = atom(&conn, "_NET_WM_NAME")?;
+    let clients = cardinals(&conn, root, "_NET_CLIENT_LIST", AtomEnum::WINDOW)?;
+    clients.into_iter().find(|&w| {
+        conn.get_property(false, w, name, utf8, 0, 256)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some_and(|r| r.value == title.as_bytes())
+    })
+}

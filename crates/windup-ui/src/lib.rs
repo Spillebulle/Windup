@@ -3,6 +3,7 @@ pub mod capture;
 pub mod colour;
 pub mod icons;
 pub mod lucide;
+pub mod notice;
 pub mod popup;
 pub mod settings;
 pub mod setup;

@@ -79,14 +79,20 @@ pub fn populate_clipboard(entry: &ClipboardEntry) {
             height,
             ..
         } => {
-            if let Ok(ctx) = ClipboardContext::new() {
-                let img = RustImageData::from_dynamic_image(image::DynamicImage::ImageRgba8(
-                    image::RgbaImage::from_raw(*width, *height, rgba.clone()).unwrap_or_default(),
-                ));
-                let _ = ctx.set_image(img);
-            }
+            set_clipboard_image(
+                image::RgbaImage::from_raw(*width, *height, rgba.clone()).unwrap_or_default(),
+            );
         }
     }
+}
+
+/// Puts a picture on the clipboard. False when the clipboard would not take it.
+pub fn set_clipboard_image(img: image::RgbaImage) -> bool {
+    let Ok(ctx) = ClipboardContext::new() else {
+        return false;
+    };
+    let img = RustImageData::from_dynamic_image(image::DynamicImage::ImageRgba8(img));
+    ctx.set_image(img).is_ok()
 }
 
 pub fn paste_entry_to_target(target: Target, entry: &ClipboardEntry) {

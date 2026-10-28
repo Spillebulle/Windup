@@ -5,15 +5,17 @@ mod cursor;
 mod hotkey;
 #[cfg(target_os = "linux")]
 mod linux;
+mod overlay;
 mod paste;
 mod platform;
 mod setup;
 
 use eframe::egui;
 use hotkey::{HotkeyEvent, HotkeyListener};
-use platform::{Plan, Target};
+use platform::{Host, Plan, Target};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use windup_core::capture::session::CaptureMode;
 use windup_core::clipboard::{ClipboardHistory, ClipboardMonitor};
 use windup_core::placement::{self, Area};
 use windup_core::{Config, ThemeMode, ToolId};
@@ -46,6 +48,9 @@ struct WindupApp {
     popup_pos: Option<(f32, f32)>,
     popup_logical_pos: Option<[f32; 2]>,
     target: Target,
+    /// Where overlays go: only the viewport host draws them here.
+    host: Host,
+    overlay: overlay::Overlay,
     last_saved_state: (usize, u64),
     max_items_atomic: Arc<AtomicUsize>,
     save_images_atomic: Arc<AtomicBool>,
@@ -158,6 +163,8 @@ impl WindupApp {
             popup_pos: None,
             popup_logical_pos: None,
             target: Target::None,
+            host: plan.host,
+            overlay: overlay::Overlay::default(),
             last_saved_state: initial_state,
             max_items_atomic,
             save_images_atomic,
@@ -275,8 +282,17 @@ impl eframe::App for WindupApp {
                         paste::paste_current_clipboard_as_plain(target);
                     }
                 }
-                HotkeyEvent::Capture { .. } => log::debug!("hotkey: Capture"),
-                HotkeyEvent::Screenshot { .. } => log::debug!("hotkey: Screenshot"),
+                // Phase 1 has one mode, so both open the same overlay; the
+                // launcher's mode buttons arrive with Video and Steps.
+                HotkeyEvent::Capture { target } => self.start_capture(
+                    ctx,
+                    CaptureMode::Screenshot,
+                    ToolId::CaptureLauncher,
+                    target,
+                ),
+                HotkeyEvent::Screenshot { target } => {
+                    self.start_capture(ctx, CaptureMode::Screenshot, ToolId::Screenshot, target)
+                }
                 HotkeyEvent::Show => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -469,6 +485,8 @@ impl eframe::App for WindupApp {
                 reset_popup_clipping_cache();
             }
         }
+
+        self.drive_capture(ctx, &palette);
 
         // Keep UI smooth and responsive (60fps when popup is open, 100ms when idle)
         if self.popup_open {

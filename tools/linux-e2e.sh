@@ -62,6 +62,12 @@ pixel() {
         -crop "1x1+$2+$3" info: 2>/dev/null
 }
 
+# The width x height in the header of the PNG $1.
+png_size() {
+    od -An -tu1 -j16 -N8 "$1" |
+        awk '{ printf "%dx%d", (($1*256+$2)*256+$3)*256+$4, (($5*256+$6)*256+$7)*256+$8 }'
+}
+
 # Types into the popup: wtype arguments, run after a $1 ms pause. Started
 # before the popup opens, because Sway hands keyboard focus back to the
 # focused window whenever a keyboard device appears, and each wtype is a new
@@ -432,12 +438,25 @@ x11_session() {
     fresh_home
     unset WAYLAND_DISPLAY SWAYSOCK GSK_RENDERER
     export DISPLAY=:77 GDK_BACKEND=x11
-    Xvfb $DISPLAY -screen 0 1600x1000x24 >"$art/x11-xvfb.log" 2>&1 &
+    screen=1600x1000
+    Xvfb $DISPLAY -screen 0 ${screen}x24 >"$art/x11-xvfb.log" 2>&1 &
     xvfb_pid=$!
     wait_for 50 xdpyinfo || { bad "x11: Xvfb did not start"; return; }
     openbox >"$art/x11-openbox.log" 2>&1 &
     wm_pid=$!
     sleep 0.5
+
+    # The capture back end: the whole root window as one PNG of its size.
+    if "$bin" --capture-test "$art/x11.png" >"$art/x11-capture.log" 2>&1; then
+        size=$(png_size "$art/x11.png")
+        if [ "$size" = "$screen" ]; then
+            ok "x11: --capture-test wrote the whole screen ($size)"
+        else
+            bad "x11: --capture-test wrote $size, wanted $screen"
+        fi
+    else
+        bad "x11: --capture-test failed (see x11-capture.log)"
+    fi
 
     start_windup x11 || { kill $wm_pid $xvfb_pid; return; }
 

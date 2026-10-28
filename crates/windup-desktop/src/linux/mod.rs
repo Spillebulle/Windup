@@ -283,6 +283,8 @@ impl Background {
                 crate::paste::paste_current_clipboard_as_plain(Target::None);
             }
             // The capture tools arrive with start_capture.
+            // Task 19: `start_capture` for the layer and window hosts. The
+            // viewport host (X11) captures in `overlay.rs` instead.
             Command::Capture | Command::Screenshot => {
                 log::debug!("{} requested", command.as_str());
             }

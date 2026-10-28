@@ -38,6 +38,11 @@ pub fn file_name(pattern: &str, when: Zoned, format: ImageFormat) -> String {
     format!("{stem}.{ext}")
 }
 
+/// [`file_name`] for the current local time.
+pub fn file_name_now(pattern: &str, format: ImageFormat) -> String {
+    file_name(pattern, Zoned::now(), format)
+}
+
 /// Windows device names, which cannot be file names (with or without extension).
 fn is_reserved(base: &str) -> bool {
     let up = base.to_ascii_uppercase();

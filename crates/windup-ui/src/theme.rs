@@ -101,6 +101,8 @@ pub mod metrics {
     pub const HANDLE: f32 = 7.0;
     /// Side of the colour wheel in the swatch's popover.
     pub const WHEEL_POPOVER: f32 = 168.0;
+    /// Width of the notice card (a capture error with an OK button).
+    pub const NOTICE_W: f32 = 320.0;
 
     // Colour wheel, from Umber's picker.
     /// Width of the hue ring. A wheel too small for it keeps a quarter of its
