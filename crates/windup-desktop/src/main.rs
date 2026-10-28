@@ -35,6 +35,7 @@ struct WindupApp {
     history: Arc<Mutex<ClipboardHistory>>,
     _monitor: Option<ClipboardMonitor>,
     hotkey_listener: Option<HotkeyListener>,
+    applied_bindings: Vec<(windup_core::Shortcut, windup_core::hotkeys::Action)>,
     settings_only: bool,
     popup_view: PopupView,
     popup_open: bool,
@@ -106,7 +107,7 @@ impl WindupApp {
                 monitor = Some(m);
             }
 
-            let listener = HotkeyListener::new(&plan);
+            let listener = HotkeyListener::new(&plan, &config);
             #[cfg(target_os = "linux")]
             if let Some(socket) = startup.listener {
                 let tx = listener.sender();
@@ -128,12 +129,14 @@ impl WindupApp {
             hotkey_listener = Some(listener);
         }
 
+        let applied_bindings = windup_core::hotkeys::bindings(&config);
         Self {
             config,
             settings_view: SettingsView::default(),
             history,
             _monitor: monitor,
             hotkey_listener,
+            applied_bindings,
             settings_only: startup.settings_only,
             popup_view: PopupView::new(),
             popup_open: false,
@@ -216,6 +219,14 @@ impl eframe::App for WindupApp {
         #[cfg(target_os = "linux")]
         self.keep_running_when_closed(ctx);
 
+        let wanted = windup_core::hotkeys::bindings(&self.config);
+        if wanted != self.applied_bindings {
+            if let Some(l) = &self.hotkey_listener {
+                l.rebind(&self.config);
+            }
+            self.applied_bindings = wanted;
+        }
+
         // -------------------------------------------------------------
         // Poll Global Hotkeys
         // -------------------------------------------------------------
@@ -251,6 +262,8 @@ impl eframe::App for WindupApp {
                         paste::paste_current_clipboard_as_plain(target);
                     }
                 }
+                HotkeyEvent::Capture { .. } => log::debug!("hotkey: Capture"),
+                HotkeyEvent::Screenshot { .. } => log::debug!("hotkey: Screenshot"),
                 HotkeyEvent::Show => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));

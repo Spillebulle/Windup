@@ -1,5 +1,6 @@
 //! Global hotkey listener.
-//! On Windows, uses low-level keyboard hook to intercept Win+V and Win+Shift+V reliably.
+//! On Windows, uses low-level keyboard hook to intercept the configured
+//! shortcuts (Win+V and friends) reliably.
 //! On X11 and macOS, uses the global-hotkey crate. On Wayland nothing can grab
 //! a key, so the events come from the socket instead (`linux::ipc`), sent
 //! through [`HotkeyListener::sender`].
@@ -9,6 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
+use windup_core::hotkeys::{Action, bindings, windows_vk};
+use windup_core::{Config, Shortcut, ShortcutModifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HotkeyEvent {
@@ -16,6 +19,12 @@ pub enum HotkeyEvent {
         target: Target,
     },
     PastePlainText {
+        target: Target,
+    },
+    Capture {
+        target: Target,
+    },
+    Screenshot {
         target: Target,
     },
     /// Bring the settings window up (`windup` run a second time).
@@ -26,30 +35,68 @@ pub enum HotkeyEvent {
     Reload,
 }
 
+impl HotkeyEvent {
+    fn from_action(action: Action, target: Target) -> Self {
+        match action {
+            Action::ClipboardPopup => Self::ClipboardPopup { target },
+            Action::PastePlain => Self::PastePlainText { target },
+            Action::CaptureLauncher => Self::Capture { target },
+            Action::Screenshot => Self::Screenshot { target },
+        }
+    }
+}
+
 pub struct HotkeyListener {
     rx: Receiver<HotkeyEvent>,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     tx: Sender<HotkeyEvent>,
+    /// New binding lists for the grab thread (X11 and macOS).
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    rebind_tx: Option<Sender<Vec<(Shortcut, Action)>>>,
     _running: Arc<AtomicBool>,
 }
 
 impl HotkeyListener {
-    pub fn new(plan: &Plan) -> Self {
+    pub fn new(plan: &Plan, config: &Config) -> Self {
         let (tx, rx) = channel();
         let running = Arc::new(AtomicBool::new(true));
+        #[allow(unused_mut)]
+        let mut rebind_tx = None;
+        let initial = bindings(config);
 
         match plan.hotkeys {
             #[cfg(target_os = "windows")]
-            HotkeysVia::Hook => start_windows_hook(tx.clone(), Arc::clone(&running)),
+            HotkeysVia::Hook => {
+                set_windows_table(&initial);
+                start_windows_hook(tx.clone(), Arc::clone(&running));
+            }
             #[cfg(not(target_os = "windows"))]
-            HotkeysVia::XGrab => start_crossplatform_hotkeys(tx.clone(), Arc::clone(&running)),
-            _ => {}
+            HotkeysVia::XGrab => {
+                let (btx, brx) = channel();
+                let _ = btx.send(initial);
+                rebind_tx = Some(btx);
+                start_crossplatform_hotkeys(tx.clone(), brx, Arc::clone(&running));
+            }
+            _ => {
+                let _ = initial;
+            }
         }
 
         Self {
             rx,
             tx,
+            rebind_tx,
             _running: running,
+        }
+    }
+
+    /// Replace the active shortcuts with what the config now says.
+    pub fn rebind(&self, config: &Config) {
+        let list = bindings(config);
+        #[cfg(target_os = "windows")]
+        set_windows_table(&list);
+        if let Some(tx) = &self.rebind_tx {
+            let _ = tx.send(list);
         }
     }
 
@@ -64,8 +111,141 @@ impl HotkeyListener {
     }
 }
 
+/// The shortcuts the hook acts on, as virtual-key code + exact modifiers.
+/// Keys `windows_vk` does not know are left out.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn windows_table(bindings: &[(Shortcut, Action)]) -> Vec<(u16, ShortcutModifiers, Action)> {
+    bindings
+        .iter()
+        .filter_map(|(s, a)| Some((windows_vk(&s.key)?, s.modifiers, *a)))
+        .collect()
+}
+
+/// What a key press does: the binding for this key whose modifiers are
+/// exactly the ones held.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn match_binding(
+    table: &[(u16, ShortcutModifiers, Action)],
+    vk: u16,
+    held: ShortcutModifiers,
+) -> Option<Action> {
+    table
+        .iter()
+        .find(|(k, m, _)| *k == vk && *m == held)
+        .map(|(_, _, a)| *a)
+}
+
+/// global-hotkey key code for a canonical key name.
+#[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
+fn code_for(key: &str) -> Option<global_hotkey::hotkey::Code> {
+    use global_hotkey::hotkey::Code;
+    const LETTERS: [Code; 26] = [
+        Code::KeyA,
+        Code::KeyB,
+        Code::KeyC,
+        Code::KeyD,
+        Code::KeyE,
+        Code::KeyF,
+        Code::KeyG,
+        Code::KeyH,
+        Code::KeyI,
+        Code::KeyJ,
+        Code::KeyK,
+        Code::KeyL,
+        Code::KeyM,
+        Code::KeyN,
+        Code::KeyO,
+        Code::KeyP,
+        Code::KeyQ,
+        Code::KeyR,
+        Code::KeyS,
+        Code::KeyT,
+        Code::KeyU,
+        Code::KeyV,
+        Code::KeyW,
+        Code::KeyX,
+        Code::KeyY,
+        Code::KeyZ,
+    ];
+    const DIGITS: [Code; 10] = [
+        Code::Digit0,
+        Code::Digit1,
+        Code::Digit2,
+        Code::Digit3,
+        Code::Digit4,
+        Code::Digit5,
+        Code::Digit6,
+        Code::Digit7,
+        Code::Digit8,
+        Code::Digit9,
+    ];
+    const FUNCTION: [Code; 24] = [
+        Code::F1,
+        Code::F2,
+        Code::F3,
+        Code::F4,
+        Code::F5,
+        Code::F6,
+        Code::F7,
+        Code::F8,
+        Code::F9,
+        Code::F10,
+        Code::F11,
+        Code::F12,
+        Code::F13,
+        Code::F14,
+        Code::F15,
+        Code::F16,
+        Code::F17,
+        Code::F18,
+        Code::F19,
+        Code::F20,
+        Code::F21,
+        Code::F22,
+        Code::F23,
+        Code::F24,
+    ];
+    let key = key.to_uppercase();
+    if let [c @ b'A'..=b'Z'] = key.as_bytes() {
+        return Some(LETTERS[(c - b'A') as usize]);
+    }
+    if let [c @ b'0'..=b'9'] = key.as_bytes() {
+        return Some(DIGITS[(c - b'0') as usize]);
+    }
+    if let Some(n) = key.strip_prefix('F').and_then(|d| d.parse::<usize>().ok())
+        && (1..=24).contains(&n)
+    {
+        return Some(FUNCTION[n - 1]);
+    }
+    Some(match key.as_str() {
+        windup_core::shortcut::PRINT_SCREEN => Code::PrintScreen,
+        "SPACE" => Code::Space,
+        "ENTER" => Code::Enter,
+        "TAB" => Code::Tab,
+        "INSERT" => Code::Insert,
+        "DELETE" => Code::Delete,
+        "HOME" => Code::Home,
+        "END" => Code::End,
+        "PAGEUP" => Code::PageUp,
+        "PAGEDOWN" => Code::PageDown,
+        _ => return None,
+    })
+}
+
 #[cfg(target_os = "windows")]
 static EVENT_SENDER: std::sync::Mutex<Option<Sender<HotkeyEvent>>> = std::sync::Mutex::new(None);
+
+/// Read by the hook on every key press; written only when the config changes.
+#[cfg(target_os = "windows")]
+static BINDINGS: std::sync::RwLock<Vec<(u16, ShortcutModifiers, Action)>> =
+    std::sync::RwLock::new(Vec::new());
+
+#[cfg(target_os = "windows")]
+fn set_windows_table(list: &[(Shortcut, Action)]) {
+    if let Ok(mut table) = BINDINGS.write() {
+        *table = windows_table(list);
+    }
+}
 
 #[cfg(target_os = "windows")]
 fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
@@ -85,7 +265,8 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
         ) -> LRESULT {
             unsafe {
                 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-                    GetAsyncKeyState, VK_LSHIFT, VK_LWIN, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_V,
+                    GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+                    VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
                 };
                 use windows_sys::Win32::UI::WindowsAndMessaging::{
                     GetForegroundWindow, KBDLLHOOKSTRUCT,
@@ -101,17 +282,24 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                     let vk = p.vkCode as u16;
                     let is_down = wparam == WM_KEYDOWN as usize || wparam == WM_SYSKEYDOWN as usize;
 
-                    if vk == VK_V && is_down {
+                    if is_down {
                         // Query real hardware key states directly via GetAsyncKeyState to prevent desync
-                        let win_down = (GetAsyncKeyState(VK_LWIN as i32) as u16 & 0x8000 != 0)
-                            || (GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000 != 0);
+                        let down = |vk: u16| GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0;
+                        let win_down = down(VK_LWIN) || down(VK_RWIN);
+                        let held = ShortcutModifiers {
+                            super_key: win_down,
+                            ctrl: down(VK_CONTROL) || down(VK_LCONTROL) || down(VK_RCONTROL),
+                            alt: down(VK_MENU) || down(VK_LMENU) || down(VK_RMENU),
+                            shift: down(VK_SHIFT) || down(VK_LSHIFT) || down(VK_RSHIFT),
+                        };
 
-                        if win_down {
-                            let shift_down = (GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000
-                                != 0)
-                                || (GetAsyncKeyState(VK_LSHIFT as i32) as u16 & 0x8000 != 0)
-                                || (GetAsyncKeyState(VK_RSHIFT as i32) as u16 & 0x8000 != 0);
+                        // try_read: the hook must never wait on a lock.
+                        let action = BINDINGS
+                            .try_read()
+                            .ok()
+                            .and_then(|table| match_binding(&table, vk, held));
 
+                        if let Some(action) = action {
                             let target = Target::Hwnd(GetForegroundWindow() as isize);
 
                             // Explicitly permit this process to take foreground window
@@ -122,18 +310,16 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                             if let Ok(guard) = EVENT_SENDER.lock()
                                 && let Some(sender) = guard.as_ref()
                             {
-                                if shift_down {
-                                    let _ = sender.send(HotkeyEvent::PastePlainText { target });
-                                } else {
-                                    let _ = sender.send(HotkeyEvent::ClipboardPopup { target });
-                                }
+                                let _ = sender.send(HotkeyEvent::from_action(action, target));
                             }
 
-                            // Send benign key event to satisfy Windows Shell that Win was used with another key
-                            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-                                KEYEVENTF_KEYUP, keybd_event,
-                            };
-                            keybd_event(0xFF, 0, KEYEVENTF_KEYUP, 0);
+                            if win_down {
+                                // Send benign key event to satisfy Windows Shell that Win was used with another key
+                                use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                                    KEYEVENTF_KEYUP, keybd_event,
+                                };
+                                keybd_event(0xFF, 0, KEYEVENTF_KEYUP, 0);
+                            }
 
                             return 1; // Intercept key event, preventing OS Start Menu / native clipboard
                         }
@@ -170,8 +356,12 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn start_crossplatform_hotkeys(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
-    use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+fn start_crossplatform_hotkeys(
+    tx: Sender<HotkeyEvent>,
+    rebinds: Receiver<Vec<(Shortcut, Action)>>,
+    running: Arc<AtomicBool>,
+) {
+    use global_hotkey::hotkey::{HotKey, Modifiers};
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 
     thread::spawn(move || {
@@ -180,33 +370,50 @@ fn start_crossplatform_hotkeys(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>
             return;
         };
 
-        let hk_v = HotKey::new(Some(Modifiers::SUPER), Code::KeyV);
-        let hk_shift_v = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyV);
-
-        let id_v = hk_v.id();
-        let id_shift_v = hk_shift_v.id();
-
-        // Another program (often the desktop itself) may own Super+V; then
-        // the command-line route in docs/linux.md is the way in.
-        for hk in [hk_v, hk_shift_v] {
-            if let Err(e) = manager.register(hk) {
-                log::warn!("could not grab {hk:?}: {e}");
-            }
-        }
+        let mut registered: Vec<HotKey> = Vec::new();
+        let mut actions: Vec<(u32, Action)> = Vec::new();
 
         let receiver = GlobalHotKeyEvent::receiver();
 
         while running.load(Ordering::SeqCst) {
+            // Only the newest list matters.
+            if let Some(list) = rebinds.try_iter().last() {
+                for hk in registered.drain(..) {
+                    let _ = manager.unregister(hk);
+                }
+                actions.clear();
+                for (shortcut, action) in list {
+                    let Some(code) = code_for(&shortcut.key) else {
+                        log::warn!("no X key for {}", shortcut.key);
+                        continue;
+                    };
+                    let m = shortcut.modifiers;
+                    let mut mods = Modifiers::empty();
+                    mods.set(Modifiers::SUPER, m.super_key);
+                    mods.set(Modifiers::CONTROL, m.ctrl);
+                    mods.set(Modifiers::ALT, m.alt);
+                    mods.set(Modifiers::SHIFT, m.shift);
+                    let hk = HotKey::new((!mods.is_empty()).then_some(mods), code);
+                    // Another program (often the desktop itself) may own the
+                    // shortcut; then the command-line route in docs/linux.md
+                    // is the way in.
+                    match manager.register(hk) {
+                        Ok(()) => {
+                            actions.push((hk.id(), action));
+                            registered.push(hk);
+                        }
+                        Err(e) => log::warn!("could not grab {hk:?}: {e}"),
+                    }
+                }
+            }
+
             if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(100)) {
                 // Only key presses: global-hotkey reports the release too.
                 if event.state != global_hotkey::HotKeyState::Pressed {
                     continue;
                 }
-                let target = focused_window();
-                if event.id == id_v {
-                    let _ = tx.send(HotkeyEvent::ClipboardPopup { target });
-                } else if event.id == id_shift_v {
-                    let _ = tx.send(HotkeyEvent::PastePlainText { target });
+                if let Some((_, action)) = actions.iter().find(|(id, _)| *id == event.id) {
+                    let _ = tx.send(HotkeyEvent::from_action(*action, focused_window()));
                 }
             }
         }
@@ -221,4 +428,98 @@ fn focused_window() -> Target {
 #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 fn focused_window() -> Target {
     Target::None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windup_core::ToolId;
+    use windup_core::hotkeys::bindings;
+    use windup_core::shortcut::PRINT_SCREEN;
+    use windup_core::{Config, Shortcut, ShortcutModifiers};
+
+    const WIN: ShortcutModifiers = ShortcutModifiers {
+        super_key: true,
+        ..ShortcutModifiers::NONE
+    };
+    const WIN_SHIFT: ShortcutModifiers = ShortcutModifiers {
+        super_key: true,
+        shift: true,
+        ..ShortcutModifiers::NONE
+    };
+    const WIN_CTRL: ShortcutModifiers = ShortcutModifiers {
+        super_key: true,
+        ctrl: true,
+        ..ShortcutModifiers::NONE
+    };
+
+    fn default_table() -> Vec<(u16, ShortcutModifiers, Action)> {
+        windows_table(&bindings(&Config::default()))
+    }
+
+    #[test]
+    fn defaults_match_their_actions() {
+        let t = default_table();
+        assert_eq!(match_binding(&t, 0x56, WIN), Some(Action::ClipboardPopup));
+        assert_eq!(match_binding(&t, 0x56, WIN_SHIFT), Some(Action::PastePlain));
+        assert_eq!(
+            match_binding(&t, 0x53, WIN_SHIFT),
+            Some(Action::CaptureLauncher)
+        );
+        assert_eq!(
+            match_binding(&t, 0x2C, ShortcutModifiers::NONE),
+            Some(Action::Screenshot)
+        );
+    }
+
+    #[test]
+    fn modifiers_must_match_exactly() {
+        let t = default_table();
+        assert_eq!(match_binding(&t, 0x56, WIN_CTRL), None);
+        assert_eq!(match_binding(&t, 0x56, ShortcutModifiers::NONE), None);
+        assert_eq!(match_binding(&t, 0x2C, WIN), None);
+    }
+
+    #[test]
+    fn a_changed_shortcut_replaces_the_default() {
+        let mut config = Config::default();
+        config.set_tool_shortcut(
+            ToolId::ClipboardHistory,
+            Shortcut::new(
+                ShortcutModifiers {
+                    ctrl: true,
+                    alt: true,
+                    ..ShortcutModifiers::NONE
+                },
+                "H",
+            ),
+        );
+        let t = windows_table(&bindings(&config));
+        let ctrl_alt = ShortcutModifiers {
+            ctrl: true,
+            alt: true,
+            ..ShortcutModifiers::NONE
+        };
+        assert_eq!(
+            match_binding(&t, 0x48, ctrl_alt),
+            Some(Action::ClipboardPopup)
+        );
+        assert_eq!(match_binding(&t, 0x56, WIN), None);
+        assert_eq!(match_binding(&t, 0x56, WIN_SHIFT), Some(Action::PastePlain));
+    }
+
+    #[test]
+    fn unknown_keys_are_skipped() {
+        let b = vec![(Shortcut::new(WIN, "NOSUCHKEY"), Action::ClipboardPopup)];
+        assert!(windows_table(&b).is_empty());
+    }
+
+    #[test]
+    fn x11_key_names() {
+        assert!(code_for("V").is_some());
+        assert!(code_for("7").is_some());
+        assert!(code_for("F12").is_some());
+        assert!(code_for(PRINT_SCREEN).is_some());
+        assert!(code_for("NOSUCHKEY").is_none());
+    }
 }
