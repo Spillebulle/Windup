@@ -25,10 +25,10 @@ use egui::{
 use paint::{around, chip, chip_monitor, handles, result_size, size_chip};
 use std::collections::HashMap;
 use std::time::Duration;
-use windup_core::capture::DRect;
 use windup_core::capture::annotate::Tool;
 use windup_core::capture::selection::Handle;
 use windup_core::capture::session::{Action, HANDLE_TOLERANCE, Mods, Outcome, Session, Stage};
+use windup_core::capture::{DRect, TWEEN_SECS};
 use windup_core::config::{EditorKeys, TargetKind};
 use windup_core::shortcut::{Shortcut, ShortcutModifiers};
 
@@ -113,8 +113,9 @@ fn matches(s: &Shortcut, k: &KeyPress) -> bool {
 /// window.
 ///
 /// Esc is first and cannot be rebound (spec "Escape"): whatever else is bound
-/// to it, it cancels. Enter always copies as well as whatever `keys.copy` is.
-/// Redo has Ctrl+Y beside its configured key. Modifiers match exactly, so the
+/// to it, it cancels. Every other editor key comes from `keys` (Copy is bare
+/// Enter by default); the one fixed alias is Ctrl+Y for redo, which the spec
+/// names beside the configured redo key. Modifiers match exactly, so the
 /// loupe's bare Z and undo's Ctrl+Z do not overlap.
 pub fn action_for(k: &KeyPress, keys: &EditorKeys) -> Option<Action> {
     const NONE: ShortcutModifiers = ShortcutModifiers::NONE;
@@ -126,9 +127,6 @@ pub fn action_for(k: &KeyPress, keys: &EditorKeys) -> Option<Action> {
     };
     if k.key == "ESCAPE" {
         return Some(Action::Cancel);
-    }
-    if k.mods == NONE && k.key == "ENTER" {
-        return Some(Action::Copy);
     }
     for (s, a) in [
         (&keys.copy, Action::Copy),
@@ -176,6 +174,10 @@ struct PointerIn {
 }
 
 /// The overlay's view state across frames and monitors.
+///
+/// **One view per capture.** The frozen pictures are uploaded once and kept
+/// by monitor index, so a view reused for the next capture would show the
+/// previous one's screens. Make a new `CaptureView` with each `Session`.
 #[derive(Default)]
 pub struct CaptureView {
     /// The frozen image of each monitor, uploaded once.
@@ -510,9 +512,14 @@ impl CaptureView {
                 r.left_bottom(),
             ];
             ants::ants(&painter, &ring, true, p, now, ctx.pixels_per_point());
-            // A frame every ANT_FRAME_MS while ants are on screen, never every
-            // frame; it also carries the hover tween.
-            ctx.request_repaint_after(Duration::from_millis(metrics::ANT_FRAME_MS));
+            if gliding(session, now, self.reduced_motion) {
+                // The hover glide lasts TWEEN_SECS and is smooth only at the
+                // display's rate; ANT_FRAME_MS would make it three hops.
+                ctx.request_repaint();
+            } else {
+                // The ants alone: a frame every ANT_FRAME_MS, never every frame.
+                ctx.request_repaint_after(Duration::from_millis(metrics::ANT_FRAME_MS));
+            }
 
             if session.stage == Stage::Editing {
                 handles(&painter, p, r);
@@ -553,8 +560,8 @@ impl CaptureView {
             ctx.request_repaint_after(Duration::from_secs_f64(until - now));
         }
 
-        // The loupe, while it is on and the pointer is on this overlay.
-        if session.loupe
+        // The loupe, where it helps aim and the pointer is on this overlay.
+        if loupe_wanted(session)
             && on_overlay
             && let Some(d) = pointer_here
         {
@@ -609,6 +616,28 @@ impl CaptureView {
         let position = format!("{}, {}", d[0].floor() as i32, d[1].floor() as i32);
         loupe::paint(painter, p, theme, centre.to_pos2(), tex.id(), &position);
     }
+}
+
+/// Whether the loupe shows: when it is on, while choosing (any target: the
+/// press or click is what it aims), and while editing only for the pipette
+/// or while an edge or corner of the selection is being dragged.
+pub fn loupe_wanted(session: &Session) -> bool {
+    session.loupe
+        && match session.stage {
+            Stage::Choosing => true,
+            Stage::Editing => session.tool == Tool::Pipette || session.adjusting_edge(),
+        }
+}
+
+/// Whether the window or full-screen highlight is still gliding to its
+/// target. `Tween` keeps its timing private; once it has arrived, where it is
+/// now and where it will be a whole tween later are the same rect.
+pub fn gliding(session: &Session, now: f64, reduced_motion: bool) -> bool {
+    !reduced_motion
+        && session.stage == Stage::Choosing
+        && session
+            .hover
+            .is_some_and(|t| t.at(now, false) != t.at(now + TWEEN_SECS, false))
 }
 
 /// The pointer's shape over the overlay at desktop position `d`.
@@ -742,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn rebound_keys_are_honoured_and_enter_still_copies() {
+    fn rebound_keys_are_honoured_and_the_old_ones_do_nothing() {
         let k = EditorKeys {
             copy: Shortcut::new(CTRL, "C"),
             save: Shortcut::new(CTRL_SHIFT, "S"),
@@ -751,7 +780,8 @@ mod tests {
         };
         let a = |m, key| action_for(&press(m, key), &k);
         assert_eq!(a(CTRL, "C"), Some(Action::Copy));
-        assert_eq!(a(NONE, "Enter"), Some(Action::Copy));
+        // Enter is only the default copy key, not a second one.
+        assert_eq!(a(NONE, "Enter"), None);
         assert_eq!(a(CTRL_SHIFT, "S"), Some(Action::Save));
         assert_eq!(a(CTRL, "S"), None);
         assert_eq!(a(NONE, "L"), Some(Action::ToggleLoupe));

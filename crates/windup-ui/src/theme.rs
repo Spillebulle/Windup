@@ -66,6 +66,8 @@ pub mod metrics {
     // `launcher-c2.html` and `editor-placement.html`).
     /// A floating panel's fill opacity: `chrome` at 96 % (§5).
     pub const FLOAT_ALPHA: f32 = 0.96;
+    /// How far a hovered primary button's accent moves towards `text_strong`.
+    pub const PRIMARY_HOVER_MIX: f32 = 0.12;
     /// Opacity of a disabled control (§7.6).
     pub const DISABLED_ALPHA: f32 = 0.45;
     /// Padding and gap inside a segmented control (§7.9).

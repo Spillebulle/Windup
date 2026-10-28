@@ -15,10 +15,10 @@ use windup_core::capture::annotate::{Annotation, Shape};
 use windup_core::capture::raster::region_preview;
 use windup_core::capture::session::Session;
 
-/// How often the preview of a blur or mosaic being drawn is recomputed while
-/// its rectangle changes, in seconds. Between recomputations the last one is
+/// How often the preview of a blur or mosaic is recomputed while its
+/// rectangle changes (drawn, moved, resized or nudged), in seconds. Between recomputations the last one is
 /// stretched to fit; a large region blurred on every drag frame would stall.
-const DRAFT_PREVIEW_SECS: f64 = 0.1;
+const PREVIEW_SECS: f64 = 0.1;
 
 /// The id the annotation being drawn has in the preview cache. Real ids
 /// count up from one.
@@ -114,43 +114,13 @@ impl Previews {
             rect.h.to_bits(),
             a.size.to_bits(),
         ];
-        let held = self.held.get(&id);
-        let stale = held.is_none_or(|pv| pv.key != key);
-        let throttled = id == DRAFT_ID && held.is_some_and(|pv| now - pv.made < DRAFT_PREVIEW_SECS);
-        if stale && throttled {
-            ctx.request_repaint_after(Duration::from_secs_f64(DRAFT_PREVIEW_SECS));
-        } else if stale {
-            match region_preview(&session.shot, a) {
-                Some(img) => {
-                    let size = [img.width() as usize, img.height() as usize];
-                    let image = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-                    match self.held.get_mut(&id) {
-                        Some(pv) => {
-                            pv.tex.set(image, TextureOptions::LINEAR);
-                            pv.key = key;
-                            pv.made = now;
-                        }
-                        None => {
-                            let tex = ctx.load_texture(
-                                format!("windup-capture-region-{id}"),
-                                image,
-                                TextureOptions::LINEAR,
-                            );
-                            self.held.insert(
-                                id,
-                                Preview {
-                                    key,
-                                    tex,
-                                    made: now,
-                                },
-                            );
-                        }
-                    }
-                }
-                None => {
-                    self.held.remove(&id);
-                }
+        match remake(self.held.get(&id).map(|pv| (pv.key, pv.made)), key, now) {
+            Remake::Keep => {}
+            Remake::Wait(secs) => {
+                // The held texture is stretched to the new rect meanwhile.
+                ctx.request_repaint_after(Duration::from_secs_f64(secs));
             }
+            Remake::Now => self.make(ctx, session, a, id, key, now),
         }
         if let Some(pv) = self.held.get(&id) {
             painter.image(
@@ -160,6 +130,72 @@ impl Previews {
                 Color32::WHITE,
             );
         }
+    }
+
+    fn make(
+        &mut self,
+        ctx: &egui::Context,
+        session: &Session,
+        a: &Annotation,
+        id: u64,
+        key: [u32; 5],
+        now: f64,
+    ) {
+        match region_preview(&session.shot, a) {
+            Some(img) => {
+                let size = [img.width() as usize, img.height() as usize];
+                let image = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+                match self.held.get_mut(&id) {
+                    Some(pv) => {
+                        pv.tex.set(image, TextureOptions::LINEAR);
+                        pv.key = key;
+                        pv.made = now;
+                    }
+                    None => {
+                        let tex = ctx.load_texture(
+                            format!("windup-capture-region-{id}"),
+                            image,
+                            TextureOptions::LINEAR,
+                        );
+                        self.held.insert(
+                            id,
+                            Preview {
+                                key,
+                                tex,
+                                made: now,
+                            },
+                        );
+                    }
+                }
+            }
+            None => {
+                self.held.remove(&id);
+            }
+        }
+    }
+}
+
+/// Whether a region's preview is remade this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Remake {
+    /// Up to date.
+    Keep,
+    /// Changed, but the last one is younger than [`PREVIEW_SECS`]: stretch it
+    /// and look again after this many seconds.
+    Wait(f64),
+    Now,
+}
+
+/// The throttle for every region, drawn or placed: a blur being drawn,
+/// moved, resized or nudged with a held arrow key changes its rect each
+/// frame, and remaking it each time would blur on the UI thread at the
+/// display's rate. `held` is the key and time of the preview held.
+pub fn remake(held: Option<([u32; 5], f64)>, key: [u32; 5], now: f64) -> Remake {
+    match held {
+        None => Remake::Now,
+        Some((k, _)) if k == key => Remake::Keep,
+        Some((_, made)) if now - made >= PREVIEW_SECS => Remake::Now,
+        Some((_, made)) => Remake::Wait(PREVIEW_SECS - (now - made)),
     }
 }
 
@@ -284,4 +320,43 @@ pub fn size_chip(
     };
     let x = hole.left().max(surface.left() + metrics::S1);
     chip(painter, p, theme, pos2(x, y), figure);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: [u32; 5] = [1, 2, 3, 4, 5];
+    const B: [u32; 5] = [2, 2, 3, 4, 5];
+    const C: [u32; 5] = [3, 2, 3, 4, 5];
+
+    #[test]
+    fn a_new_region_is_made_at_once_and_an_unchanged_one_is_kept() {
+        assert_eq!(remake(None, A, 0.0), Remake::Now);
+        assert_eq!(remake(Some((A, 0.0)), A, 5.0), Remake::Keep);
+    }
+
+    #[test]
+    fn two_changes_inside_the_window_cost_one_remake() {
+        // A placed blur, long settled, then moved twice within 100 ms: the
+        // first change remakes it, the second waits, and the remake after the
+        // window catches up with where it ended.
+        let mut held = (A, 0.0);
+        let mut made = 0;
+        for (key, now) in [(B, 10.0), (C, 10.05)] {
+            match remake(Some(held), key, now) {
+                Remake::Now => {
+                    held = (key, now);
+                    made += 1;
+                }
+                Remake::Wait(secs) => assert!(secs > 0.0 && secs <= PREVIEW_SECS),
+                Remake::Keep => panic!("the key changed"),
+            }
+        }
+        assert_eq!(made, 1);
+        assert_eq!(
+            remake(Some(held), C, 10.0 + 2.0 * PREVIEW_SECS),
+            Remake::Now
+        );
+    }
 }

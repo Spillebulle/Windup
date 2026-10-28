@@ -253,6 +253,13 @@ impl Session {
         self.size_flash = Some((size, now + SIZE_FLASH_SECS));
     }
 
+    /// Whether an edge or corner of the selection is being dragged while
+    /// editing: the one editing gesture the loupe helps aim, besides the
+    /// pipette. Moving the whole selection is not one.
+    pub fn adjusting_edge(&self) -> bool {
+        self.stage == Stage::Editing && self.grab == Grab::Selection && self.edge.is_some()
+    }
+
     // --- actions -----------------------------------------------------------
 
     pub fn act(&mut self, a: Action) -> Option<Outcome> {
@@ -663,6 +670,32 @@ mod tests {
         drag_area(&mut s, [10.0, 20.0], [60.0, 70.0]);
         assert_eq!(s.stage, Stage::Editing);
         assert_eq!(s.selection.rect, Some(rect(10.0, 20.0, 50.0, 50.0)));
+    }
+
+    #[test]
+    fn adjusting_edge_is_only_an_edge_drag_while_editing() {
+        let mut s = session(TargetKind::Area);
+        s.press([10.0, 10.0], NONE);
+        s.drag([90.0, 90.0], NONE);
+        assert!(
+            !s.adjusting_edge(),
+            "the first drag is choosing, not editing"
+        );
+        s.release([90.0, 90.0], NONE);
+        assert_eq!(s.stage, Stage::Editing);
+
+        // The right edge of (10, 10)-(90, 90).
+        s.press([90.0, 50.0], NONE);
+        assert!(s.adjusting_edge());
+        s.drag([95.0, 50.0], NONE);
+        assert!(s.adjusting_edge());
+        s.release([95.0, 50.0], NONE);
+        assert!(!s.adjusting_edge(), "over once released");
+
+        // Moving the whole selection with the select tool is not an edge.
+        s.press([50.0, 50.0], NONE);
+        assert!(!s.adjusting_edge());
+        s.release([50.0, 50.0], NONE);
     }
 
     #[test]

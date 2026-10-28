@@ -185,3 +185,39 @@ fn a_press_on_the_bar_does_not_start_a_selection() {
     assert_eq!(rig.session.stage, Stage::Choosing);
     assert!(rig.session.selection.rect.is_none());
 }
+
+#[test]
+fn the_loupe_shows_while_choosing_and_editing_only_to_aim() {
+    let mut rig = Rig::new();
+    rig.session.loupe = true;
+    assert!(loupe_wanted(&rig.session), "choosing");
+    rig.drag(pos2(260.0, Y0), pos2(340.0, Y0 + 80.0));
+    assert!(!loupe_wanted(&rig.session), "editing with the select tool");
+    rig.session.act(Action::SetTool(Tool::Pen));
+    assert!(!loupe_wanted(&rig.session), "drawing");
+    rig.session.act(Action::SetTool(Tool::Pipette));
+    assert!(loupe_wanted(&rig.session), "the pipette");
+    rig.session.act(Action::SetTool(Tool::Select));
+    // The selection's right edge, at desktop x = 140.
+    rig.session.press([140.0, Y0 + 40.0], Mods::default());
+    assert!(loupe_wanted(&rig.session), "dragging an edge");
+    rig.session.release([140.0, Y0 + 40.0], Mods::default());
+    assert!(!loupe_wanted(&rig.session));
+    rig.session.loupe = false;
+    rig.session.act(Action::SetTool(Tool::Pipette));
+    assert!(!loupe_wanted(&rig.session), "off is off");
+}
+
+#[test]
+fn the_highlight_glides_for_one_tween_and_not_with_reduced_motion() {
+    let mut rig = Rig::new();
+    rig.session.act(Action::SetTarget(TargetKind::FullScreen));
+    rig.session.pointer_moved([-100.0, 100.0], 0.0);
+    rig.session.pointer_moved([100.0, 100.0], 1.0);
+    assert!(gliding(&rig.session, 1.05, false), "on its way");
+    assert!(!gliding(&rig.session, 1.05, true), "reduced motion");
+    assert!(
+        !gliding(&rig.session, 1.0 + TWEEN_SECS + 0.01, false),
+        "arrived"
+    );
+}

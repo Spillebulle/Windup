@@ -23,6 +23,7 @@ use std::time::Duration;
 use windup_core::capture::annotate::Tool;
 use windup_core::capture::session::{CaptureMode, Stage};
 use windup_core::config::{EditorKeys, TargetKind};
+use windup_core::shortcut::{Shortcut, ShortcutModifiers};
 
 /// What a click on the bar asks for. The view turns it into a session action.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -141,7 +142,8 @@ impl Bar {
         let close = IconButton {
             icon: Icon::X,
             tip: "Close",
-            key: Some("Esc".into()),
+            // Esc is fixed, never configured, but shown as every other key is.
+            key: Some(Shortcut::new(ShortcutModifiers::NONE, "ESCAPE").to_string()),
             command: BarCommand::Close,
         };
         match s.stage {
@@ -469,7 +471,17 @@ impl Bar {
                     // §7.6 primary: accent fill, accent-ink 600 text. The one
                     // primary on the overlay.
                     let resp = ui.interact(rect, item_id, Sense::click());
-                    painter.rect_filled(rect, metrics::RADIUS, p.accent);
+                    // Hover moves the fill a step towards text-strong: lighter
+                    // in the dark theme, darker in the light one, and the ink
+                    // keeps its contrast either way. widgets/button.rs has no
+                    // primary style to borrow.
+                    let fill = if resp.hovered() {
+                        p.accent
+                            .lerp_to_gamma(p.text_strong, metrics::PRIMARY_HOVER_MIX)
+                    } else {
+                        p.accent
+                    };
+                    painter.rect_filled(rect, metrics::RADIUS, fill);
                     let icon_r = Rect::from_min_size(
                         pos2(
                             rect.left() + metrics::S3,

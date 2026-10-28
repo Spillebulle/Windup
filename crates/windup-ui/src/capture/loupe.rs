@@ -1,5 +1,6 @@
-//! The zoom loupe: a magnified pixel grid beside the pointer while choosing an
-//! area or aiming the pipette.
+//! The zoom loupe: a magnified pixel grid beside the pointer, shown (when it
+//! is on) while choosing a target, and while editing only for the pipette or
+//! while an edge of the selection is dragged (`super::loupe_wanted`).
 //!
 //! Ported from Umber's `umber-app/src/loupe.rs` (GPL-3.0-or-later like
 //! Windup): [`place`] and [`Patch`] are its model, pure and tested, and
