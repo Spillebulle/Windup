@@ -12,6 +12,10 @@ pub fn render(ui: &mut Ui, config: &mut Config, p: &Palette) {
     ui.add_space(metrics::S2);
 
     for tool_id in ToolId::ALL {
+        // The capture tools get their rows with their settings panes.
+        if matches!(tool_id, ToolId::CaptureLauncher | ToolId::Screenshot) {
+            continue;
+        }
         let is_enabled = config.is_tool_enabled(tool_id);
 
         egui::Frame::NONE
@@ -29,7 +33,9 @@ pub fn render(ui: &mut Ui, config: &mut Config, p: &Palette) {
                     // Tool Icon on left
                     let icon = match tool_id {
                         ToolId::ClipboardHistory => Icon::Clipboard,
-                        ToolId::PastePlainText => Icon::FileText,
+                        ToolId::PastePlainText | ToolId::CaptureLauncher | ToolId::Screenshot => {
+                            Icon::FileText
+                        }
                     };
                     let (icon_rect, _) =
                         ui.allocate_exact_size(vec2(22.0, 22.0), egui::Sense::hover());
@@ -73,12 +79,7 @@ pub fn render(ui: &mut Ui, config: &mut Config, p: &Palette) {
 
                         ui.add_space(metrics::S3);
 
-                        let default_shortcut = match tool_id {
-                            ToolId::ClipboardHistory => windup_core::shortcut::Shortcut::super_v(),
-                            ToolId::PastePlainText => {
-                                windup_core::shortcut::Shortcut::super_shift_v()
-                            }
-                        };
+                        let default_shortcut = tool_id.default_shortcut();
 
                         let mut shortcut = config.tool_shortcut(tool_id).clone();
                         if shortcut_recorder(
@@ -86,7 +87,7 @@ pub fn render(ui: &mut Ui, config: &mut Config, p: &Palette) {
                             p,
                             ("overview_shortcut", tool_id),
                             &mut shortcut,
-                            Some(&default_shortcut),
+                            default_shortcut.as_ref(),
                         ) {
                             config.set_tool_shortcut(tool_id, shortcut);
                         }

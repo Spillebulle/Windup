@@ -31,6 +31,20 @@ impl ShortcutModifiers {
         shift: true,
     };
 
+    pub const CTRL: Self = Self {
+        super_key: false,
+        ctrl: true,
+        alt: false,
+        shift: false,
+    };
+
+    pub const CTRL_SHIFT: Self = Self {
+        super_key: false,
+        ctrl: true,
+        alt: false,
+        shift: true,
+    };
+
     pub fn is_empty(self) -> bool {
         !self.super_key && !self.ctrl && !self.alt && !self.shift
     }
@@ -57,6 +71,14 @@ impl Shortcut {
     pub fn super_shift_v() -> Self {
         Self::new(ShortcutModifiers::SUPER_SHIFT, "V")
     }
+
+    pub fn super_shift_s() -> Self {
+        Self::new(ShortcutModifiers::SUPER_SHIFT, "S")
+    }
+
+    pub fn print_screen() -> Self {
+        Self::new(ShortcutModifiers::NONE, "PRINTSCREEN")
+    }
 }
 
 impl fmt::Display for Shortcut {
@@ -80,8 +102,22 @@ impl fmt::Display for Shortcut {
             parts.push("Shift");
         }
         if !self.key.is_empty() {
-            parts.push(&self.key);
+            parts.push(if self.key == "PRINTSCREEN" {
+                "Print Screen"
+            } else {
+                &self.key
+            });
         }
         write!(f, "{}", parts.join("+"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_screen_displays_with_a_space() {
+        assert_eq!(Shortcut::print_screen().to_string(), "Print Screen");
     }
 }
