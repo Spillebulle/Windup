@@ -7,6 +7,7 @@
 
 mod clip;
 mod popup;
+pub(crate) mod screencopy;
 mod vkbd;
 
 pub use clip::Payload;

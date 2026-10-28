@@ -10,6 +10,7 @@ use windup_core::capture::backend::{Facts, Still, still_order};
 use windup_core::capture::geometry::DesktopShot;
 use windup_core::capture::pick::WindowRect;
 
+pub(crate) mod pixels;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "linux")]
@@ -85,13 +86,23 @@ fn grab_with(still: Still) -> Result<DesktopShot, CaptureError> {
         Still::Gdi => windows::grab(),
         #[cfg(target_os = "linux")]
         Still::X11 => x11::grab(),
-        // These land with the Wayland back ends.
-        Still::ExtImageCopy | Still::WlrScreencopy | Still::KWin | Still::Portal => {
-            Err(CaptureError::Unsupported)
+        #[cfg(target_os = "linux")]
+        Still::ExtImageCopy => {
+            use crate::linux::wayland::screencopy::{Method, grab_from_env};
+            grab_from_env(Method::ExtImageCopy)
         }
+        #[cfg(target_os = "linux")]
+        Still::WlrScreencopy => {
+            use crate::linux::wayland::screencopy::{Method, grab_from_env};
+            grab_from_env(Method::WlrScreencopy)
+        }
+        // These land with their back ends.
+        Still::KWin | Still::Portal => Err(CaptureError::Unsupported),
         // A back end for another OS, or nothing at all.
         #[allow(unreachable_patterns)]
-        Still::Gdi | Still::X11 | Still::None => Err(CaptureError::Unsupported),
+        Still::Gdi | Still::X11 | Still::ExtImageCopy | Still::WlrScreencopy | Still::None => {
+            Err(CaptureError::Unsupported)
+        }
     }
 }
 
