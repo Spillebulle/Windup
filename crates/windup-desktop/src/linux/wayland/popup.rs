@@ -12,14 +12,28 @@
 //! them) offer only opaque ones on Wayland: the whole screen went black. A
 //! shared-memory buffer is transparent on every compositor and every driver.
 //!
-//! egui runs here exactly as eframe runs it, through `egui-wgpu`, and draws
-//! the same `windup_ui::PopupView` the Windows popup draws.
+//! egui draws the same `windup_ui::PopupView` the Windows popup draws, through
+//! `gpu.rs`.
 
+use super::gpu::{Gpu, Painted, card_clear, paint};
+use super::{Card, LocalService, Payload, Request, ServiceEvent, State};
+use calloop::timer::{TimeoutAction, Timer};
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
+use raw_window_handle::{
+    RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
+};
+use smithay_client_toolkit::shell::WaylandSurface;
+use smithay_client_toolkit::shell::wlr_layer::{
+    Anchor, KeyboardInteractivity, Layer, LayerSurface,
+};
+use smithay_client_toolkit::shm::slot::SlotPool;
+use std::ptr::NonNull;
 use std::time::{Duration, Instant};
+use wayland_client::Proxy;
+use wayland_client::protocol::{wl_shm, wl_surface};
 use windup_core::clipboard::ClipboardHistory;
 use windup_core::placement::{self, Area};
-use windup_ui::{Mode, Palette, PopupAction, PopupView, apply_theme};
+use windup_ui::{Mode, Palette, PopupAction, apply_theme};
 
 /// What the popup needs from the app's configuration.
 #[derive(Clone)]
@@ -34,92 +48,6 @@ pub struct PopupSetup {
 /// compositor that only reports the pointer once it moves would otherwise
 /// leave the popup invisible until then.
 pub const ENTER_GRACE: Duration = Duration::from_millis(150);
-
-/// GPU objects and the egui context, kept for the life of the app so the
-/// second popup opens without the cost of the first. The renderer and the
-/// context belong together: the renderer holds the textures the context has
-/// already uploaded.
-pub struct Gpu {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub format: wgpu::TextureFormat,
-    /// Chosen once, with the adapter, for every popup after it: a surface
-    /// configured with `Auto` is opaque on most Wayland drivers.
-    pub alpha: wgpu::CompositeAlphaMode,
-    pub renderer: egui_wgpu::Renderer,
-    pub ctx: egui::Context,
-    pub view: PopupView,
-    pub epoch: Instant,
-}
-
-impl Gpu {
-    /// Creates everything for a first surface.
-    pub fn new(
-        instance: &wgpu::Instance,
-        surface: &wgpu::Surface<'static>,
-    ) -> Result<Self, String> {
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(surface),
-            force_fallback_adapter: false,
-        }))
-        .map_err(|e| format!("no graphics adapter for the popup: {e}"))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("windup popup"),
-            ..Default::default()
-        }))
-        .map_err(|e| format!("no graphics device for the popup: {e}"))?;
-
-        let caps = surface.get_capabilities(&adapter);
-        let info = adapter.get_info();
-        log::info!(
-            "popup: {} on {:?}, alpha modes {:?}",
-            info.name,
-            info.backend,
-            caps.alpha_modes
-        );
-        // egui blends in linear space and expects a non-sRGB target, as eframe
-        // chooses one.
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| !f.is_srgb())
-            .or_else(|| caps.formats.first().copied())
-            .ok_or("the surface supports no format")?;
-        let alpha = pick_alpha(&caps.alpha_modes);
-        let renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
-        let ctx = egui::Context::default();
-        windup_ui::install_fonts(&ctx);
-
-        Ok(Self {
-            device,
-            queue,
-            format,
-            alpha,
-            renderer,
-            ctx,
-            view: PopupView::new(),
-            epoch: Instant::now(),
-        })
-    }
-}
-
-fn pick_alpha(modes: &[wgpu::CompositeAlphaMode]) -> wgpu::CompositeAlphaMode {
-    use wgpu::CompositeAlphaMode::*;
-    // egui's output is premultiplied; with an opaque surface the card's
-    // rounded corners show square, in the card's own colour.
-    [PreMultiplied, PostMultiplied, Inherit]
-        .into_iter()
-        .find(|m| modes.contains(m))
-        .unwrap_or(Auto)
-}
-
-/// Whether a surface configured with `mode` shows what is behind it.
-fn transparent(mode: wgpu::CompositeAlphaMode) -> bool {
-    use wgpu::CompositeAlphaMode::*;
-    matches!(mode, PreMultiplied | PostMultiplied | Inherit)
-}
 
 /// One open popup.
 pub struct Popup {
@@ -234,23 +162,10 @@ impl Popup {
     }
 
     pub fn configure_surface(&self, gpu: &Gpu) {
-        let Some(surface) = &self.surface else {
-            return;
-        };
-        let (width, height) = self.physical_size();
-        surface.configure(
-            &gpu.device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: gpu.format,
-                width,
-                height,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: gpu.alpha,
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-            },
-        );
+        if let Some(surface) = &self.surface {
+            let (width, height) = self.physical_size();
+            gpu.configure(surface, width, height);
+        }
     }
 
     /// Runs one egui frame and presents it. Returns what the user did, and
@@ -283,7 +198,7 @@ impl Popup {
         let card = Rect::from_min_size(Pos2::ZERO, self.card_size);
         let setup = &self.setup;
         let view = &mut gpu.view;
-        let output = gpu.ctx.run(raw, |ctx| {
+        let mut output = gpu.ctx.run(raw, |ctx| {
             apply_theme(ctx, setup.palette, setup.mode);
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
@@ -295,80 +210,24 @@ impl Popup {
                 });
         });
 
-        let ppp = output.pixels_per_point;
-        let prims = gpu.ctx.tessellate(output.shapes, ppp);
-        let (width, height) = self.physical_size();
-        let screen = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [width, height],
-            pixels_per_point: ppp,
-        };
-
-        let frame = match surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+        let clear = card_clear(gpu.alpha, self.setup.palette.dock);
+        match paint(
+            &gpu.device,
+            &gpu.queue,
+            &mut gpu.renderer,
+            &gpu.ctx,
+            surface,
+            &mut output,
+            self.physical_size(),
+            clear,
+        ) {
+            Painted::Shown => {}
+            Painted::Reconfigure => {
                 self.configure_surface(gpu);
                 self.dirty = true;
                 return (action, Some(Duration::ZERO));
             }
-            Err(e) => {
-                log::warn!("popup frame skipped: {e}");
-                return (action, Some(Duration::from_millis(16)));
-            }
-        };
-        // Transparent around the rounded corners; where the surface cannot be
-        // transparent, the card's own colour, so the corners show square
-        // rather than black.
-        let clear = if !transparent(gpu.alpha) {
-            let [r, g, b, _] = self.setup.palette.dock.to_normalized_gamma_f32();
-            wgpu::Color {
-                r: r as f64,
-                g: g as f64,
-                b: b as f64,
-                a: 1.0,
-            }
-        } else {
-            wgpu::Color::TRANSPARENT
-        };
-        let target = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        for (id, delta) in &output.textures_delta.set {
-            gpu.renderer
-                .update_texture(&gpu.device, &gpu.queue, *id, delta);
-        }
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("windup popup"),
-            });
-        let extra =
-            gpu.renderer
-                .update_buffers(&gpu.device, &gpu.queue, &mut encoder, &prims, &screen);
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("windup popup"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &target,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                })
-                .forget_lifetime();
-            gpu.renderer.render(&mut pass, &prims, &screen);
-        }
-        gpu.queue
-            .submit(extra.into_iter().chain(std::iter::once(encoder.finish())));
-        frame.present();
-        for id in &output.textures_delta.free {
-            gpu.renderer.free_texture(id);
+            Painted::Skipped => return (action, Some(Duration::from_millis(16))),
         }
 
         let again = output
@@ -426,5 +285,313 @@ pub fn egui_button(code: u32) -> Option<egui::PointerButton> {
         0x113 => Some(egui::PointerButton::Extra1),
         0x114 => Some(egui::PointerButton::Extra2),
         _ => None,
+    }
+}
+
+// --- the popup on the Wayland thread -----------------------------------------
+
+impl State {
+    pub(super) fn open_popup(&mut self, setup: PopupSetup) {
+        if self.popup.is_some() {
+            self.close_popup();
+            return;
+        }
+        let Some(layer_shell) = &self.layer_shell else {
+            log::warn!("no layer-shell; the popup cannot open here");
+            return;
+        };
+        log::info!("popup: opening");
+        let surface = self.compositor.create_surface(&self.qh);
+        let layer = layer_shell.create_layer_surface(
+            &self.qh,
+            surface,
+            Layer::Overlay,
+            Some("windup-clipboard"),
+            None,
+        );
+        layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+        layer.set_exclusive_zone(-1);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        layer.set_size(0, 0);
+
+        if let Some(viewporter) = &self.viewporter {
+            self.layer_viewport = Some(viewporter.get_viewport(layer.wl_surface(), &self.qh, ()));
+            // The preferred scale is the layer's; it is applied to the card.
+            if let Some(fractional) = &self.fractional {
+                self.popup_scale =
+                    Some(fractional.get_fractional_scale(layer.wl_surface(), &self.qh, ()));
+            }
+        }
+        layer.commit();
+
+        let Some(subcompositor) = &self.subcompositor else {
+            log::warn!("no wl_subcompositor; the popup cannot open here");
+            self.layer = Some(layer);
+            self.close_popup();
+            return;
+        };
+        let (subsurface, surface) =
+            subcompositor.create_subsurface(layer.wl_surface().clone(), &self.qh);
+        // Shown when wgpu presents, not at the layer's next commit.
+        subsurface.set_desync();
+        let viewport = self
+            .viewporter
+            .as_ref()
+            .map(|v| v.get_viewport(&surface, &self.qh, ()));
+        let wgpu_surface = self.wgpu_surface(&surface);
+        self.card = Some(Card {
+            subsurface,
+            surface,
+            viewport,
+        });
+        self.layer = Some(layer);
+
+        let mut popup = Popup::new(setup);
+        match wgpu_surface {
+            Ok(surface) => popup.surface = Some(surface),
+            Err(e) => {
+                log::error!("{e}");
+                self.close_popup();
+                return;
+            }
+        }
+        // A fresh list each time, as on Windows: top entry selected, no search.
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.view.reset();
+        }
+        self.popup = Some(popup);
+        let _ = self.handle.insert_source(
+            Timer::from_duration(ENTER_GRACE),
+            |_, _, state: &mut State| {
+                if let Some(popup) = state.popup.as_mut() {
+                    popup.place_fallback();
+                }
+                state.queue_redraw();
+                TimeoutAction::Drop
+            },
+        );
+    }
+
+    pub(super) fn wgpu_surface(
+        &mut self,
+        surface: &wl_surface::WlSurface,
+    ) -> Result<wgpu::Surface<'static>, String> {
+        let display = NonNull::new(self.conn.backend().display_ptr() as *mut _)
+            .ok_or("no Wayland display pointer")?;
+        let window =
+            NonNull::new(surface.id().as_ptr() as *mut _).ok_or("no Wayland surface pointer")?;
+        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(display)),
+            raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(window)),
+        };
+        let instance = self.instance.get_or_insert_with(|| {
+            wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default())
+        });
+        // SAFETY: the display outlives the surface (it lives as long as this
+        // thread), and the card's wl_surface is destroyed only after the wgpu
+        // surface is dropped, in `close_popup`.
+        unsafe { instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())
+    }
+
+    pub(super) fn close_popup(&mut self) {
+        if let Some(mut popup) = self.popup.take() {
+            log::info!("popup: closed");
+            // The wgpu surface before the wl_surface it draws to.
+            popup.surface = None;
+        }
+        if let Some(card) = self.card.take() {
+            if let Some(v) = card.viewport {
+                v.destroy();
+            }
+            card.subsurface.destroy();
+            card.surface.destroy();
+        }
+        if let Some(f) = self.popup_scale.take() {
+            f.destroy();
+        }
+        if let Some(v) = self.layer_viewport.take() {
+            v.destroy();
+        }
+        self.layer = None;
+        self.backdrop = None;
+        let _ = self.conn.flush();
+    }
+
+    pub(super) fn queue_redraw(&mut self) {
+        if self.redraw_queued || self.popup.is_none() {
+            return;
+        }
+        self.redraw_queued = true;
+        self.handle.insert_idle(|state| {
+            state.redraw_queued = false;
+            state.redraw();
+        });
+    }
+
+    pub(super) fn redraw(&mut self) {
+        let Some(popup) = self.popup.as_mut() else {
+            return;
+        };
+        // Nothing to draw until the card has a place.
+        if !popup.configured || popup.surface.is_none() || popup.card.is_none() {
+            return;
+        }
+        if self.gpu.is_none() {
+            let (Some(instance), Some(surface)) = (&self.instance, &popup.surface) else {
+                return;
+            };
+            match Gpu::new(instance, surface) {
+                Ok(gpu) => self.gpu = Some(gpu),
+                Err(e) => {
+                    log::error!("{e}");
+                    self.close_popup();
+                    return;
+                }
+            }
+        }
+        self.sync_card();
+        let (Some(popup), Some(gpu)) = (self.popup.as_mut(), self.gpu.as_mut()) else {
+            return;
+        };
+        let (action, again) = {
+            let history = self.shared.history.lock().unwrap();
+            popup.draw(gpu, &history)
+        };
+        if !popup.shown {
+            popup.shown = true;
+            log::info!("popup: shown");
+        }
+        if let Some(delay) = again {
+            if delay.is_zero() {
+                self.queue_redraw();
+            } else {
+                let _ = self.handle.insert_source(
+                    Timer::from_duration(delay.max(Duration::from_millis(8))),
+                    |_, _, state: &mut State| {
+                        state.queue_redraw();
+                        TimeoutAction::Drop
+                    },
+                );
+            }
+        }
+        if let Some(action) = action {
+            self.popup_action(action);
+        }
+    }
+
+    /// Moves and sizes the card's subsurface to where the popup has it, when
+    /// that has changed since last time.
+    pub(super) fn sync_card(&mut self) {
+        let (Some(popup), Some(card), Some(layer), Some(gpu)) =
+            (self.popup.as_mut(), &self.card, &self.layer, &self.gpu)
+        else {
+            return;
+        };
+        let Some(at) = popup.card else {
+            return;
+        };
+        let now = (at, popup.card_size, popup.scale);
+        if popup.synced == Some(now) {
+            return;
+        }
+        popup.synced = Some(now);
+        let (w, h) = popup.logical_size();
+        card.subsurface
+            .set_position(at.x.round() as i32, at.y.round() as i32);
+        match &card.viewport {
+            Some(v) => v.set_destination(w as i32, h as i32),
+            // Without a viewport the scale is a whole number.
+            None => card
+                .surface
+                .set_buffer_scale(popup.scale.round().max(1.0) as i32),
+        }
+        popup.configure_surface(gpu);
+        // A subsurface's position belongs to its parent: it moves when the
+        // layer surface next commits.
+        layer.wl_surface().commit();
+    }
+
+    /// Gives the layer surface its transparent buffer: one pixel stretched
+    /// over the output where there is a viewport, the output's size where not.
+    pub(super) fn attach_backdrop(&mut self, layer: &LayerSurface, w: u32, h: u32) {
+        let (bw, bh) = match &self.layer_viewport {
+            Some(v) => {
+                v.set_destination(w as i32, h as i32);
+                (1, 1)
+            }
+            None => (w as i32, h as i32),
+        };
+        let mut pool = match SlotPool::new((bw * bh * 4) as usize, &self.shm) {
+            Ok(pool) => pool,
+            Err(e) => {
+                log::error!("popup: no shared memory for the backdrop: {e}");
+                return;
+            }
+        };
+        let buffer = match pool.create_buffer(bw, bh, bw * 4, wl_shm::Format::Argb8888) {
+            Ok((buffer, canvas)) => {
+                canvas.fill(0);
+                buffer
+            }
+            Err(e) => {
+                log::error!("popup: no backdrop buffer: {e}");
+                return;
+            }
+        };
+        let surface = layer.wl_surface();
+        if buffer.attach_to(surface).is_err() {
+            return;
+        }
+        surface.damage_buffer(0, 0, bw, bh);
+        surface.commit();
+        self.backdrop = Some((pool, buffer));
+    }
+
+    /// The popup's layer surface or its card.
+    pub(super) fn is_popup_surface(&self, surface: &wl_surface::WlSurface) -> bool {
+        self.layer
+            .as_ref()
+            .is_some_and(|l| l.wl_surface() == surface)
+            || self.card.as_ref().is_some_and(|c| &c.surface == surface)
+    }
+
+    pub(super) fn popup_action(&mut self, action: PopupAction) {
+        let auto_paste = self.popup.as_ref().is_some_and(|p| p.setup.auto_paste);
+        match action {
+            PopupAction::Paste(entry) => {
+                self.close_popup();
+                let service = LocalService(self.loop_tx.clone());
+                service.set_entry(&entry, auto_paste);
+            }
+            PopupAction::PastePlain(text) => {
+                self.close_popup();
+                let _ = self.loop_tx.send(Request::Set {
+                    payload: Payload::Text(text),
+                    paste: true,
+                });
+            }
+            PopupAction::Delete(id) => {
+                self.shared.history.lock().unwrap().remove_by_id(id);
+                self.queue_redraw();
+            }
+            PopupAction::Resize(w, h) => self.resize_popup(w, h, 0.0),
+            PopupAction::ResizeLeft(w, h, dx) => self.resize_popup(w, h, dx),
+            PopupAction::Dismiss => self.close_popup(),
+        }
+    }
+
+    pub(super) fn resize_popup(&mut self, w: f32, h: f32, dx: f32) {
+        if let Some(popup) = self.popup.as_mut() {
+            popup.resize(w, h, dx);
+        }
+        let _ = self.shared.events.send(ServiceEvent::PopupResized(w, h));
+        self.queue_redraw();
+    }
+
+    pub(super) fn popup_input(&mut self, event: egui::Event) {
+        if let Some(popup) = self.popup.as_mut() {
+            popup.events.push(event);
+            self.queue_redraw();
+        }
     }
 }

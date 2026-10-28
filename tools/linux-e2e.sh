@@ -13,8 +13,10 @@
 #
 # Each case copies something, drives Windup the way a person would (a
 # shortcut runs `windup --popup`, keys pick an entry), and checks what landed
-# in a real GTK text field or in the history file. Screenshots and logs go to
-# the artefact directory.
+# in a real GTK text field or in the history file. The capture cases check
+# `windup --capture-test` pictures (sizes, and a marker window on a rotated
+# output) and that `windup --screenshot` opens an overlay Escape closes.
+# Screenshots and logs go to the artefact directory.
 
 set -uo pipefail
 
@@ -60,6 +62,11 @@ popup_shown() {
 pixel() {
     convert "$1" -format '%[fx:int(255*r)],%[fx:int(255*g)],%[fx:int(255*b)]' \
         -crop "1x1+$2+$3" info: 2>/dev/null
+}
+
+# Whether the pixel at $2,$3 of the picture $1 is the marker's red.
+is_red() {
+    pixel "$1" "$2" "$3" | awk -F, 'NF == 3 && $1 > 200 && $2 < 80 && $3 < 80 { red = 1 } END { exit !red }'
 }
 
 # The width x height in the header of the PNG $1.
@@ -181,6 +188,65 @@ start_windup() {
 
 # --- Wayland ----------------------------------------------------------------
 
+# The Wayland capture back end on Sway (wlr-screencopy), on the output as it
+# is and turned a quarter: the picture must come out upright, the marker (a
+# red window Sway puts in the top-left corner) still top-left.
+sway_capture() {
+    local log=$art/wayland-capture.log size
+    if "$bin" --capture-test "$art/wayland-capture.png" >"$log" 2>&1; then
+        size=$(png_size "$art/wayland-capture.png")
+        if [ "$size" = 1600x1000 ]; then
+            ok "wayland: --capture-test wrote the whole output ($size)"
+        else
+            bad "wayland: --capture-test wrote $size, wanted 1600x1000"
+        fi
+    else
+        bad "wayland: --capture-test failed (see wayland-capture.log)"
+    fi
+
+    python3 "$(dirname "$0")/marker.py" 120 >"$art/wayland-marker.log" 2>&1 &
+    local marker=$!
+    wait_for 100 sh -c 'swaymsg -t get_tree | grep -q "\"name\": \"windup-marker\""' ||
+        echo "  (the marker window did not appear; see wayland-marker.log)"
+    swaymsg '[title="windup-marker"] floating enable, resize set 300 300, move position 0 0' >/dev/null
+    sleep 0.5
+    # Only a marker seen where it was put proves anything about rotation.
+    local marked=false
+    if "$bin" --capture-test "$art/wayland-marker.png" >>"$log" 2>&1 &&
+        is_red "$art/wayland-marker.png" 100 100 && ! is_red "$art/wayland-marker.png" 1500 900; then
+        marked=true
+    else
+        echo "  (no marker in the top-left corner of the upright capture; checking the rotated size only)"
+    fi
+
+    swaymsg output HEADLESS-1 transform 90 >/dev/null
+    sleep 0.5
+    swaymsg '[title="windup-marker"] move position 0 0' >/dev/null
+    sleep 0.5
+    if "$bin" --capture-test "$art/wayland-rotated.png" >>"$log" 2>&1; then
+        size=$(png_size "$art/wayland-rotated.png")
+        if [ "$size" = 1000x1600 ]; then
+            ok "wayland: a rotated output is captured upright ($size)"
+        else
+            bad "wayland: the rotated output came out $size, wanted 1000x1600"
+        fi
+        local f=$art/wayland-rotated.png
+        if ! $marked; then
+            :
+        elif is_red "$f" 100 100 && ! is_red "$f" 900 100 && ! is_red "$f" 100 1500 && ! is_red "$f" 900 1500; then
+            ok "wayland: on the rotated output the marker is still top-left"
+        else
+            bad "wayland: rotated corners are $(pixel "$f" 100 100) $(pixel "$f" 900 100) $(pixel "$f" 100 1500) $(pixel "$f" 900 1500); the marker belongs top-left only"
+        fi
+    else
+        bad "wayland: --capture-test failed on the rotated output (see wayland-capture.log)"
+    fi
+    swaymsg output HEADLESS-1 transform normal >/dev/null
+    kill $marker 2>/dev/null
+    wait $marker 2>/dev/null
+    sleep 0.5
+}
+
 wayland_session() {
     echo "== Wayland (headless sway)"
     fresh_home
@@ -213,6 +279,8 @@ EOF
         bad "wayland: did not choose the layer-shell host"
         grep -i backend "$art/wayland-windup.log"
     fi
+
+    sway_capture
 
     # A copy is recorded without Windup having focus or a window.
     wl-copy "alpha-$$"
@@ -318,6 +386,26 @@ EOF
         bad "wayland: paste-plain gave '$got', wanted 'plain-$$'"
     fi
 
+    # The screenshot overlay opens over the output, and Escape closes it
+    # without ending Windup. The GPU device exists by now (the popups made
+    # it), so the keys are timed as for the popup.
+    keys_later 4000 -k Escape
+    "$bin" --screenshot
+    if wait_for 150 grep -q "capture: output 0 shown" "$art/wayland-windup.log"; then
+        ok "wayland: --screenshot opened the overlay"
+        grim "$art/wayland-overlay.png" 2>/dev/null
+    else
+        bad "wayland: --screenshot did not open the overlay"
+        grep -E "capture|notice" "$art/wayland-windup.log"
+    fi
+    wait $keys_pid
+    if wait_for 50 grep -q "capture: closed (cancel)" "$art/wayland-windup.log" &&
+        kill -0 $windup_pid 2>/dev/null; then
+        ok "wayland: Escape closed the overlay and Windup kept running"
+    else
+        bad "wayland: the overlay did not close on Escape, or Windup stopped"
+    fi
+
     # A second `windup` does not start a second copy; it opens settings.
     "$bin"
     if [ $? -eq 0 ] && [ "$(pgrep -c -f "$bin --background")" -eq 1 ]; then
@@ -381,6 +469,19 @@ weston_session() {
     else
         bad "weston: did not choose the window host"
         grep -i backend "$log"
+    fi
+
+    # Weston offers no capture protocol a client may use, and with no D-Bus
+    # session there is no screenshot portal either (a desktop without one):
+    # nothing can read the screen, and the test says so.
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/no-bus" \
+        "$bin" --capture-test "$art/weston.png" >"$art/weston-capture.log" 2>&1
+    local code=$?
+    if [ $code -eq 1 ] &&
+        grep -qF "This desktop does not let applications read the screen." "$art/weston-capture.log"; then
+        ok "weston: --capture-test says the screen cannot be read"
+    else
+        bad "weston: --capture-test exited $code: $(cat "$art/weston-capture.log")"
     fi
 
     printf 'walpha-%s' "$$" | xclip -selection clipboard

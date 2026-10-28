@@ -2,11 +2,14 @@
 //! wlroots compositors that have it) or, failing that, `zwlr_screencopy_v1`
 //! (Sway, Hyprland).
 //!
-//! `grab` runs on an event queue of its own, so it works from the background
-//! loop and from `--capture-test` alike. Outputs go one at a time into a
-//! shared-memory buffer that is read back with `pread`, so nothing here is
-//! mapped or `unsafe`. The cursor is not painted (`options = 0`,
-//! `overlay_cursor = 0`).
+//! Every grab makes a Wayland connection of its own (`grab_from_env`) and
+//! closes it when done, so whatever a grab binds goes with it, even on an
+//! early error, and nothing is left on the long-lived service connection.
+//! The background process runs it on a worker thread, off the Wayland thread
+//! (the overlay is drawn there afterwards); `--capture-test` calls it
+//! directly. Outputs go one at a time into a shared-memory buffer that is
+//! read back with `pread`, so nothing here is mapped or `unsafe`. The cursor
+//! is not painted (`options = 0`, `overlay_cursor = 0`).
 
 use crate::capture::CaptureError;
 use crate::capture::pixels::{ShmFormat, Transform, to_rgba, untransform};
@@ -58,19 +61,6 @@ pub fn grab_from_env(method: Method) -> Result<DesktopShot, CaptureError> {
     grab_by(&conn, &globals, method)
 }
 
-/// Take the picture with the newer protocol, or the older one if the newer is
-/// missing or breaks.
-#[allow(dead_code)] // the background service (a later task) is the caller
-pub fn grab(conn: &Connection, globals: &GlobalList) -> Result<DesktopShot, CaptureError> {
-    match grab_by(conn, globals, Method::ExtImageCopy) {
-        Ok(shot) => Ok(shot),
-        Err(e) => {
-            log::debug!("ext-image-copy-capture: {e:?}");
-            grab_by(conn, globals, Method::WlrScreencopy)
-        }
-    }
-}
-
 /// One of the two protocols, on a queue of its own.
 pub fn grab_by(
     conn: &Connection,
@@ -82,7 +72,7 @@ pub fn grab_by(
     let shm: wl_shm::WlShm = globals
         .bind(&qh, 1..=1, ())
         .map_err(|_| CaptureError::Unsupported)?;
-    let outputs = outputs_of(&state);
+    let outputs = outputs_of(&state.output_state);
     if outputs.is_empty() {
         return Err(failed("the compositor reports no outputs"));
     }
@@ -147,7 +137,7 @@ pub fn output_layout_from_env() -> Result<Vec<(String, DRect)>, CaptureError> {
     let (globals, _queue) =
         registry_queue_init::<super::Probe>(&conn).map_err(|_| CaptureError::Unsupported)?;
     let (_queue, state) = learn_outputs(&conn, &globals)?;
-    let layout: Vec<_> = outputs_of(&state)
+    let layout: Vec<_> = outputs_of(&state.output_state)
         .into_iter()
         .map(|o| (o.name, o.layout))
         .collect();
@@ -157,11 +147,13 @@ pub fn output_layout_from_env() -> Result<Vec<(String, DRect)>, CaptureError> {
     Ok(layout)
 }
 
-/// An output as the picture needs it.
-struct OutputFacts {
-    output: wl_output::WlOutput,
-    name: String,
-    layout: DRect,
+/// An output as the picture needs it, and as the capture overlay finds the
+/// output to cover for each monitor of the picture.
+pub(super) struct OutputFacts {
+    pub(super) output: wl_output::WlOutput,
+    pub(super) name: String,
+    /// Logical: the desktop units of every Wayland back end.
+    pub(super) layout: DRect,
     transform: Transform,
 }
 
@@ -175,10 +167,10 @@ impl OutputFacts {
     }
 }
 
-fn outputs_of(state: &CopyState) -> Vec<OutputFacts> {
+pub(super) fn outputs_of(output_state: &OutputState) -> Vec<OutputFacts> {
     let mut found = Vec::new();
-    for output in state.output_state.outputs() {
-        let Some(info) = state.output_state.info(&output) else {
+    for output in output_state.outputs() {
+        let Some(info) = output_state.info(&output) else {
             continue;
         };
         let scale = info.scale_factor.max(1) as f32;

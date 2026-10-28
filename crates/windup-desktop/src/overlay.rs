@@ -4,7 +4,8 @@
 //! Also the notice card that says why a capture could not start or save.
 //!
 //! The Wayland hosts never come here: they have no eframe viewports to put
-//! an overlay in. Their capture is `linux::start_capture` (Task 19).
+//! an overlay in. Their capture is `linux::capture`, with the overlay on the
+//! Wayland thread. Both hand the outcome to `capture::finish`.
 //!
 //! Every overlay is an immediate viewport, drawn inside the root viewport's
 //! `update`. A repaint any overlay asks for is routed by eframe to the root
@@ -14,21 +15,15 @@
 
 use crate::platform::{Host, Target};
 use crate::{WindupApp, capture, cursor, paste};
+use capture::finish::{self, remember};
 use eframe::egui;
-use image::RgbaImage;
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
 use windup_core::ToolId;
 use windup_core::capture::DRect;
-use windup_core::capture::output;
 use windup_core::capture::session::{CaptureMode, Outcome, Session};
-use windup_core::config::ScreenshotConfig;
 use windup_core::placement::{self, Area};
 use windup_ui::capture::CaptureView;
 use windup_ui::{Palette, notice};
 
-/// How many taken names a save steps past before it gives up.
-const SAVE_TRIES: usize = 16;
 /// The frame by which the overlay under the pointer stops asking for the
 /// keyboard if it still does not have it.
 const FOCUS_FRAMES: u32 = 12;
@@ -111,82 +106,6 @@ pub(crate) fn points_rect(layout: DRect, ppp: f32) -> egui::Rect {
     )
 }
 
-/// What an outcome asks for: (copy, save).
-pub(crate) fn wants(outcome: &Outcome) -> (bool, bool) {
-    match outcome {
-        Outcome::Copy(_) => (true, false),
-        Outcome::Save(_) => (false, true),
-        Outcome::CopyAndSave(_) => (true, true),
-        Outcome::Cancel => (false, false),
-    }
-}
-
-/// What the next capture starts with: this one's target, colour and sizes.
-pub(crate) fn remember(cfg: &mut ScreenshotConfig, session: &Session) {
-    cfg.last_target = session.target;
-    cfg.colour = session.colour;
-    cfg.sizes = session.sizes.clone();
-}
-
-/// Writes `bytes` to a new file in `dir`, named by `pick(dir, name)`. The file
-/// is created with `create_new`, so an existing file is never overwritten:
-/// when the name was taken between picking and creating, `pick` is asked
-/// again, at most [`SAVE_TRIES`] times.
-pub(crate) fn write_new(
-    dir: &Path,
-    name: &str,
-    bytes: &[u8],
-    mut pick: impl FnMut(&Path, &str) -> PathBuf,
-) -> io::Result<PathBuf> {
-    for _ in 0..SAVE_TRIES {
-        let path = pick(dir, name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-                    drop(file);
-                    let _ = std::fs::remove_file(&path);
-                    return Err(e);
-                }
-                return Ok(path);
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "every free name was taken before it could be used",
-    ))
-}
-
-/// Encodes `img` and saves it where the config says, creating the folder.
-/// The error is the text for the notice.
-pub(crate) fn save_image(img: &RgbaImage, cfg: &ScreenshotConfig) -> Result<PathBuf, String> {
-    let dir =
-        cfg.save_dir.clone().or_else(output::default_dir).ok_or(
-            "The screenshot could not be saved: there is no Pictures folder to save it in.",
-        )?;
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        format!(
-            "The screenshot could not be saved: the folder {} could not be made ({e}).",
-            dir.display()
-        )
-    })?;
-    let bytes = output::encode(img, cfg.format)
-        .map_err(|e| format!("The screenshot could not be encoded ({e})."))?;
-    let name = output::file_name_now(&cfg.name_pattern, cfg.format);
-    write_new(&dir, &name, &bytes, output::unique_path).map_err(|e| {
-        format!(
-            "The screenshot could not be saved in {} ({e}).",
-            dir.display()
-        )
-    })
-}
-
 impl WindupApp {
     /// A capture hotkey. Takes the picture first, while nothing of Windup's
     /// is on the screen but what was already there, then opens the overlays.
@@ -207,7 +126,7 @@ impl WindupApp {
             return;
         }
         if self.host != Host::Viewport {
-            // Task 19: the Wayland hosts capture through `linux::start_capture`.
+            // The Wayland hosts capture in `linux::capture`.
             log::debug!("capture: no overlay on this host");
             return;
         }
@@ -384,24 +303,11 @@ impl WindupApp {
 
     /// Copies and saves the picture. A failure is shown in the notice.
     fn finish(&mut self, ctx: &egui::Context, outcome: Outcome) {
-        let (copy, save) = wants(&outcome);
-        let img = match outcome {
-            Outcome::Copy(img) | Outcome::Save(img) | Outcome::CopyAndSave(img) => img,
-            Outcome::Cancel => return,
-        };
-        let mut errors = Vec::new();
-        if save {
-            match save_image(&img, &self.config.screenshot) {
-                Ok(path) => log::debug!("capture: saved {}", path.display()),
-                Err(e) => errors.push(e),
-            }
-        }
-        // Windup's own clipboard monitor records it in the history.
-        if copy && !paste::set_clipboard_image(img) {
-            errors.push("The screenshot could not be copied to the clipboard.".to_owned());
-        }
-        if !errors.is_empty() {
-            self.open_notice(ctx, &errors.join("\n"));
+        // Windup's own clipboard monitor records the copy in the history.
+        if let Some(error) =
+            finish::deliver(outcome, &self.config.screenshot, paste::set_clipboard_image)
+        {
+            self.open_notice(ctx, &error);
         }
     }
 
@@ -698,20 +604,9 @@ fn give_focus_back(target: Target) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windup_core::capture::DesktopShot;
-    use windup_core::config::{ImageFormat, TargetKind, ToolSizes};
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> DRect {
         DRect { x, y, w, h }
-    }
-
-    /// A fresh, empty folder under the temp dir.
-    fn temp(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("windup-overlay-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     #[test]
@@ -764,103 +659,5 @@ mod tests {
         assert!(steps(FOCUS_FRAMES - 1).force_focus);
         assert!(!steps(FOCUS_FRAMES).force_focus);
         assert!(steps(FOCUS_FRAMES).visible);
-    }
-
-    #[test]
-    fn outcomes_map_to_copy_and_save() {
-        let img = || RgbaImage::new(1, 1);
-        assert_eq!(wants(&Outcome::Copy(img())), (true, false));
-        assert_eq!(wants(&Outcome::Save(img())), (false, true));
-        assert_eq!(wants(&Outcome::CopyAndSave(img())), (true, true));
-        assert_eq!(wants(&Outcome::Cancel), (false, false));
-    }
-
-    #[test]
-    fn the_session_choices_are_remembered() {
-        let mut cfg = ScreenshotConfig::default();
-        let mut s = Session::new(DesktopShot { monitors: vec![] }, vec![], &cfg);
-        s.target = TargetKind::Window;
-        s.colour = [1, 2, 3, 255];
-        s.sizes = ToolSizes {
-            pen: 9.0,
-            ..ToolSizes::default()
-        };
-        remember(&mut cfg, &s);
-        assert_eq!(cfg.last_target, TargetKind::Window);
-        assert_eq!(cfg.colour, [1, 2, 3, 255]);
-        assert_eq!(cfg.sizes.pen, 9.0);
-    }
-
-    #[test]
-    fn a_name_taken_after_it_was_picked_moves_on_to_the_next() {
-        let dir = temp("race");
-        // Another process got there between picking and creating.
-        std::fs::write(dir.join("a.png"), b"theirs").unwrap();
-        let mut calls = 0;
-        let path = write_new(&dir, "a.png", b"ours", |d, n| {
-            calls += 1;
-            if calls == 1 {
-                d.join(n)
-            } else {
-                output::unique_path(d, n)
-            }
-        })
-        .unwrap();
-        assert_eq!(path, dir.join("a (2).png"));
-        assert_eq!(std::fs::read(&path).unwrap(), b"ours");
-        assert_eq!(std::fs::read(dir.join("a.png")).unwrap(), b"theirs");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_name_that_stays_taken_gives_up_without_overwriting() {
-        let dir = temp("taken");
-        std::fs::write(dir.join("a.png"), b"theirs").unwrap();
-        let mut calls = 0;
-        let e = write_new(&dir, "a.png", b"ours", |d, n| {
-            calls += 1;
-            d.join(n)
-        })
-        .unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(calls, SAVE_TRIES);
-        assert_eq!(std::fs::read(dir.join("a.png")).unwrap(), b"theirs");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn saving_makes_the_folder_and_writes_a_picture_of_the_selection() {
-        let dir = temp("save");
-        let cfg = ScreenshotConfig {
-            save_dir: Some(dir.join("deeper").join("still")),
-            name_pattern: "shot".into(),
-            format: ImageFormat::Png,
-            ..ScreenshotConfig::default()
-        };
-        let img = RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]));
-        let first = save_image(&img, &cfg).unwrap();
-        let second = save_image(&img, &cfg).unwrap();
-        assert_eq!(first, dir.join("deeper").join("still").join("shot.png"));
-        assert_eq!(
-            second,
-            dir.join("deeper").join("still").join("shot (2).png")
-        );
-        let back = image::open(&first).unwrap().to_rgba8();
-        assert_eq!(back, img);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_folder_that_cannot_be_made_is_an_error_for_the_notice() {
-        let dir = temp("blocked");
-        // A file where the folder should be.
-        std::fs::write(dir.join("file"), b"x").unwrap();
-        let cfg = ScreenshotConfig {
-            save_dir: Some(dir.join("file").join("sub")),
-            ..ScreenshotConfig::default()
-        };
-        let e = save_image(&RgbaImage::new(1, 1), &cfg).unwrap_err();
-        assert!(e.starts_with("The screenshot could not be saved"), "{e}");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -8,8 +8,8 @@
 //! token in the config directory, so the question is not asked again at the
 //! next login on desktops that support persisting it.
 
-use crate::capture::CaptureError;
 use crate::capture::split::split_desktop;
+use crate::capture::{CaptureError, dbus_absent};
 use crate::linux::wayland::screencopy::output_layout_from_env;
 use crate::platform::{HotkeysVia, Plan};
 use ashpd::desktop::PersistMode;
@@ -17,7 +17,7 @@ use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use ashpd::desktop::remote_desktop::{DeviceType, KeyState, RemoteDesktop};
 use futures_util::StreamExt;
 use std::sync::Mutex;
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 use windup_core::Config;
 use windup_core::Shortcut;
@@ -185,7 +185,10 @@ pub fn screenshot() -> Result<DesktopShot, CaptureError> {
         Err(ashpd::Error::Portal(ashpd::PortalError::NotAllowed(_))) => {
             return Err(CaptureError::Denied);
         }
-        Err(ashpd::Error::PortalNotFound(_)) => return Err(CaptureError::Unsupported),
+        Err(e) if absent(&e) => {
+            log::debug!("no screenshot portal: {e}");
+            return Err(CaptureError::Unsupported);
+        }
         Err(e) => return Err(CaptureError::Failed(e.to_string())),
     };
     let path = shot
@@ -197,4 +200,64 @@ pub fn screenshot() -> Result<DesktopShot, CaptureError> {
     let _ = std::fs::remove_file(&path);
     let img = img.map_err(|e| CaptureError::Failed(e.to_string()))?;
     Ok(split_desktop(img.to_rgba8(), &layout))
+}
+
+/// Whether the error means there is no portal to ask: no session bus, no
+/// portal service, or a portal without the interface.
+fn absent(e: &ashpd::Error) -> bool {
+    match e {
+        ashpd::Error::PortalNotFound(_) => true,
+        ashpd::Error::Zbus(z) | ashpd::Error::Portal(ashpd::PortalError::ZBus(z)) => zbus_absent(z),
+        _ => false,
+    }
+}
+
+fn zbus_absent(e: &zbus::Error) -> bool {
+    use zbus::fdo::Error as Fdo;
+    match e {
+        zbus::Error::Address(_)
+        | zbus::Error::InputOutput(_)
+        | zbus::Error::Handshake(_)
+        | zbus::Error::Connection(..) => true,
+        zbus::Error::MethodError(name, ..) => dbus_absent(name.as_str()),
+        zbus::Error::FDO(f) => matches!(
+            **f,
+            Fdo::ServiceUnknown(_)
+                | Fdo::NameHasNoOwner(_)
+                | Fdo::UnknownMethod(_)
+                | Fdo::UnknownInterface(_)
+                | Fdo::UnknownObject(_)
+        ),
+        _ => false,
+    }
+}
+
+/// Starts reading whether the desktop asks for less motion: GNOME's
+/// `org.gnome.desktop.interface enable-animations`, through the Settings
+/// portal (KDE's and others' portals may not carry it). The answer arrives
+/// on the receiver; none arrives when there is no portal or no such key, and
+/// the caller then takes "no".
+pub fn ask_reduced_motion() -> Receiver<bool> {
+    let (tx, rx) = channel();
+    let spawned = std::thread::Builder::new()
+        .name("portal-motion".into())
+        .spawn(move || {
+            let read = pollster::block_on(async {
+                use ashpd::desktop::settings::Settings;
+                Settings::new()
+                    .await?
+                    .read::<bool>("org.gnome.desktop.interface", "enable-animations")
+                    .await
+            });
+            match read {
+                Ok(animations) => {
+                    let _ = tx.send(!animations);
+                }
+                Err(e) => log::debug!("no animation setting from the portal: {e}"),
+            }
+        });
+    if let Err(e) = spawned {
+        log::debug!("could not start the motion thread: {e}");
+    }
+    rx
 }

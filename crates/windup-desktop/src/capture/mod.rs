@@ -10,9 +10,12 @@ use windup_core::capture::backend::{Facts, Still, still_order};
 use windup_core::capture::geometry::DesktopShot;
 use windup_core::capture::pick::WindowRect;
 
+pub(crate) mod finish;
+pub(crate) mod gate;
 pub(crate) mod kwin_rects;
 pub(crate) mod pixels;
 pub(crate) mod split;
+pub(crate) mod surfaces;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "linux")]
@@ -60,6 +63,21 @@ fn most_specific(errors: Vec<CaptureError>) -> CaptureError {
         }
     }
     best.unwrap_or(CaptureError::Unsupported)
+}
+
+/// Whether a D-Bus error by this name means there is nothing to ask: no
+/// portal service, or a portal without the interface. The screenshot portal
+/// then reports `Unsupported` rather than a breakage.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn dbus_absent(error_name: &str) -> bool {
+    matches!(
+        error_name,
+        "org.freedesktop.DBus.Error.ServiceUnknown"
+            | "org.freedesktop.DBus.Error.NameHasNoOwner"
+            | "org.freedesktop.DBus.Error.UnknownMethod"
+            | "org.freedesktop.DBus.Error.UnknownInterface"
+            | "org.freedesktop.DBus.Error.UnknownObject"
+    )
 }
 
 fn facts() -> Facts {
@@ -310,6 +328,27 @@ mod tests {
             most_specific(vec![Failed("a".into()), Failed("b".into())]),
             Failed("a".into())
         );
+    }
+
+    #[test]
+    fn a_missing_portal_service_is_absent_and_a_refusal_is_not() {
+        for name in [
+            "org.freedesktop.DBus.Error.ServiceUnknown",
+            "org.freedesktop.DBus.Error.NameHasNoOwner",
+            "org.freedesktop.DBus.Error.UnknownMethod",
+            "org.freedesktop.DBus.Error.UnknownInterface",
+            "org.freedesktop.DBus.Error.UnknownObject",
+        ] {
+            assert!(dbus_absent(name), "{name}");
+        }
+        for name in [
+            "org.freedesktop.portal.Error.NotAllowed",
+            "org.freedesktop.DBus.Error.Failed",
+            "org.freedesktop.DBus.Error.NoReply",
+            "",
+        ] {
+            assert!(!dbus_absent(name), "{name}");
+        }
     }
 
     #[test]

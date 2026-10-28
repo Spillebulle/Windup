@@ -3,6 +3,7 @@
 //! on Wayland, where Windup keeps no window open. See docs/linux.md.
 
 pub mod autostart;
+mod capture;
 pub mod cosmic;
 pub mod ipc;
 pub mod kde;
@@ -19,6 +20,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use wayland::{PopupSetup, Service, ServiceEvent, Shared};
+use windup_core::capture::session::CaptureMode;
 use windup_core::clipboard::{ClipboardEntry, ClipboardHistory, ClipboardMonitor};
 use windup_core::ipc::Command;
 use windup_core::{Config, ToolId};
@@ -109,6 +111,18 @@ pub fn paste_plain_current() -> bool {
     }
 }
 
+/// Puts a picture on the clipboard: through the Wayland service where it
+/// owns the clipboard, else through `clipboard-rs` (XWayland on GNOME).
+pub fn copy_image(img: image::RgbaImage) -> bool {
+    if runtime().is_some_and(|r| r.service.is_some()) && r_has_data_control() {
+        let (width, height) = img.dimensions();
+        // The thumbnail is made when the copy comes back as history.
+        let entry = ClipboardEntry::new_image(0, img.into_raw(), width, height, Vec::new(), 0, 0);
+        return set_entry(&entry, false);
+    }
+    crate::paste::set_clipboard_image(img)
+}
+
 fn r_has_data_control() -> bool {
     runtime().is_some_and(|r| matches!(r.plan.watch, platform::Watch::DataControl(_)))
 }
@@ -141,7 +155,7 @@ pub fn system_prefers_dark() -> bool {
 /// clipboard are watched here, the settings window is a separate
 /// `windup --settings` process started on demand, and the popup is either a
 /// layer surface on the Wayland thread or, without layer-shell, a window of
-/// its own for as long as it is open. Returns only if the plan turns out to
+/// its own for as long as it is open. Capture is in `capture.rs`. Returns only if the plan turns out to
 /// need the eframe app after all.
 pub fn run_background(
     plan: Plan,
@@ -182,6 +196,7 @@ pub fn run_background(
         settings: None,
         config_stamp: config_stamp(),
         saved: history_state(&history),
+        capture: capture::Capturing::default(),
     };
     if show_settings {
         host.show_settings();
@@ -201,6 +216,7 @@ struct Background {
     settings: Option<Child>,
     config_stamp: Option<SystemTime>,
     saved: (usize, u64),
+    capture: capture::Capturing,
 }
 
 impl Background {
@@ -211,15 +227,24 @@ impl Background {
         commands: &Receiver<Command>,
         events: &Receiver<ServiceEvent>,
     ) {
-        if let Ok(command) = commands.recv_timeout(Duration::from_millis(200)) {
+        // Sooner while a picture is being taken, so the overlay follows it
+        // at once.
+        let wait = if self.capture.gate.grabbing() {
+            Duration::from_millis(20)
+        } else {
+            Duration::from_millis(200)
+        };
+        if let Ok(command) = commands.recv_timeout(wait) {
             self.command(command, config, shared, commands);
         }
         while let Ok(event) = events.try_recv() {
             match event {
                 ServiceEvent::PopupResized(w, h) => self.save_popup_size(config, w, h),
                 ServiceEvent::PasteElsewhere => portal::paste_ctrl_v(),
+                ServiceEvent::CaptureDone(end) => self.capture_done(*end, config, shared, commands),
             }
         }
+        self.poll_capture(config, shared, commands);
 
         // The settings window saves config.json as it changes; pick it up.
         let stamp = config_stamp();
@@ -282,11 +307,13 @@ impl Background {
             Command::PastePlain if config.is_tool_enabled(ToolId::PastePlainText) => {
                 crate::paste::paste_current_clipboard_as_plain(Target::None);
             }
-            // The capture tools arrive with start_capture.
-            // Task 19: `start_capture` for the layer and window hosts. The
+            // Phase 1 has one mode, so both open the same overlay. The
             // viewport host (X11) captures in `overlay.rs` instead.
-            Command::Capture | Command::Screenshot => {
-                log::debug!("{} requested", command.as_str());
+            Command::Capture => {
+                self.start_capture(ToolId::CaptureLauncher, CaptureMode::Screenshot, config);
+            }
+            Command::Screenshot => {
+                self.start_capture(ToolId::Screenshot, CaptureMode::Screenshot, config);
             }
             Command::Show => self.show_settings(),
             Command::Reload => {
