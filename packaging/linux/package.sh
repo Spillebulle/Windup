@@ -94,6 +94,12 @@ stage_tree() {
     install -Dm755 "$binary" "$prefix/bin/windup"
     install -Dm644 "$root/packaging/$APP_ID.desktop" \
         "$prefix/share/applications/$APP_ID.desktop"
+    # KWin matches the entry to the caller by the absolute path in Exec (it
+    # resolves a bare name against its own working directory), which is what
+    # lets Windup read the screen on KDE. The AppImage keeps the bare name.
+    if [ "${2:-}" = system ]; then
+        sed -i 's|^Exec=windup|Exec=/usr/bin/windup|'             "$prefix/share/applications/$APP_ID.desktop"
+    fi
     install -Dm644 "$root/packaging/$APP_ID.metainfo.xml" \
         "$prefix/share/metainfo/$APP_ID.metainfo.xml"
     for size in 16 32 48 64 128 256; do
@@ -111,7 +117,7 @@ stage_tree() {
 deb_name="windup_${version}_${arch}.deb"
 echo "==> $deb_name"
 deb=$work/deb
-stage_tree "$deb/usr"
+stage_tree "$deb/usr" system
 if [ -n "$archive_key" ]; then
     install -Dm644 "$work/$ARCHIVE_KEYRING.gpg" "$deb/usr/share/windup/$ARCHIVE_KEYRING.gpg"
 fi
@@ -183,7 +189,7 @@ echo "==> windup-${version}-1.${rpm_arch}.rpm"
 rpmroot=$work/rpm
 mkdir -p "$rpmroot"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 tree=$work/rpmtree
-stage_tree "$tree/usr"
+stage_tree "$tree/usr" system
 rpm_key=/etc/pki/rpm-gpg/RPM-GPG-KEY-spillebulle
 [ -n "$archive_key" ] && install -Dm644 "$archive_key" "$tree$rpm_key"
 {
@@ -249,7 +255,7 @@ pkg_name="windup-bin-${version}-1-${pacman_arch}.pkg.tar.zst"
 echo "==> $pkg_name"
 arch_dir=$work/arch
 mkdir -p "$arch_dir"
-stage_tree "$arch_dir/tree/usr"
+stage_tree "$arch_dir/tree/usr" system
 arch_install=
 if [ -n "$archive_key" ]; then
     install -Dm644 "$archive_key" "$arch_dir/tree/usr/share/windup/$ARCHIVE_KEYRING.asc"

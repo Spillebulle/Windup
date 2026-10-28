@@ -12,7 +12,12 @@ use windup_core::capture::pick::WindowRect;
 const SCRIPT: &str = r#"
 const out = [];
 for (const w of workspace.stackingOrder) {
-    if (!w.normalWindow || w.minimized || w.desktopWindow || w.dock) continue;
+    if (!(w.normalWindow || w.dialog) || w.minimized || w.hidden === true) continue;
+    if (w.desktopWindow || w.dock) continue;
+    // Only what is on screen now: this virtual desktop and this activity.
+    const here = workspace.currentDesktop;
+    if (!w.onAllDesktops && !w.desktops.some(d => d.id === here.id)) continue;
+    if (w.activities.length > 0 && w.activities.indexOf(workspace.currentActivity) < 0) continue;
     const g = w.frameGeometry;
     out.push({ x: g.x, y: g.y, w: g.width, h: g.height, title: String(w.caption) });
 }
@@ -114,5 +119,22 @@ mod tests {
         let s = script(":1.42", "/p", "org.x.I", "Windows");
         assert!(s.contains(r#"callDBus(":1.42", "/p", "org.x.I", "Windows""#));
         assert!(!s.contains('@'));
+    }
+
+    #[test]
+    fn the_script_keeps_dialogs_and_skips_other_desktops_and_activities() {
+        let s = script("a", "/p", "i", "m");
+        for needle in [
+            "w.dialog",
+            "w.minimized",
+            "w.hidden",
+            "w.desktopWindow",
+            "w.dock",
+            "w.onAllDesktops",
+            "workspace.currentDesktop",
+            "workspace.currentActivity",
+        ] {
+            assert!(s.contains(needle), "{needle}");
+        }
     }
 }

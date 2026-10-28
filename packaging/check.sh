@@ -39,7 +39,9 @@ wmclass=$(sed -n 's/^StartupWMClass=\(.*\)$/\1/p' "$desktop" | head -1)
 ok "desktop entry Icon and StartupWMClass"
 grep -q '^X-KDE-DBUS-Restricted-Interfaces=.*org\.kde\.KWin\.ScreenShot2' "$desktop" ||
     fail "the desktop entry does not list org.kde.KWin.ScreenShot2 as a restricted interface KDE may grant"
-ok "desktop entry asks KWin for ScreenShot2"
+grep -q "sed -i 's|^Exec=windup|Exec=/usr/bin/windup|'" packaging/linux/package.sh ||
+    fail "package.sh does not give the system packages an absolute Exec (KWin needs it)"
+ok "desktop entry asks KWin for ScreenShot2, with an absolute Exec in system packages"
 
 grep -q "const APP_ID: &str = \"$APP_ID\";" crates/windup-desktop/src/main.rs ||
     fail "main.rs does not set the window's app id to $APP_ID"

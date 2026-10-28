@@ -3,11 +3,13 @@
 //!
 //! KWin only answers `ScreenShot2` to programs whose desktop entry lists the
 //! interface under `X-KDE-DBUS-Restricted-Interfaces`, and it finds that entry
-//! from the caller's executable path. A deb/rpm/Arch install (`/usr/bin/windup`
-//! beside `/usr/share/applications/...desktop`) matches; the AppImage runs
-//! from a mount like `/tmp/.mount_windupXXXX/usr/bin/windup`, which does not,
-//! so there KWin refuses and `grab_all` falls through to the portal (which
-//! comes after KWin in `still_order`).
+//! by comparing the canonical path of the entry's `Exec` program with the
+//! caller's `/proc/<pid>/exe`. The deb, rpm and Arch packages install
+//! `/usr/bin/windup` and ship `Exec=/usr/bin/windup` (rewritten by
+//! `packaging/linux/package.sh`), so they match. The AppImage runs from a mount
+//! like `/tmp/.mount_windupXXXX/usr/bin/windup`, which never does, so there
+//! KWin refuses and `grab_all` falls through to the portal (which comes after
+//! KWin in `still_order`).
 
 use crate::capture::CaptureError;
 use crate::capture::kwin_rects::{parse_kwin_rects, script};
@@ -17,6 +19,8 @@ use ashpd::zbus::zvariant::{Fd, OwnedValue, Value};
 use ashpd::zbus::{self, Connection};
 use std::collections::HashMap;
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
@@ -30,6 +34,11 @@ const SHOT_IFACE: &str = "org.kde.KWin.ScreenShot2";
 /// How long to wait for the script to report. A script that never calls back
 /// (an old KWin, a script error) must not hold the overlay up.
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long any one D-Bus call may take; a compositor that never answers must
+/// not hang the capture.
+const METHOD_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long to wait for a screen's pixels after KWin has replied.
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// The name the script is loaded under, so it can be unloaded again.
 const PLUGIN_NAME: &str = "io.github.spillebulle.windup.rects";
 const RECTS_PATH: &str = "/io/github/spillebulle/windup/Rects";
@@ -51,12 +60,21 @@ fn is_denied(e: &zbus::Error) -> bool {
     }
 }
 
+/// A session-bus connection whose calls give up.
+async fn session() -> zbus::Result<Connection> {
+    zbus::connection::Builder::session()?
+        .method_timeout(METHOD_TIMEOUT)
+        .build()
+        .await
+}
+
 /// Every screen, by `CaptureScreen`, placed by the compositor's layout.
 pub fn grab() -> Result<DesktopShot, CaptureError> {
     let layout = output_layout_from_env()?;
+    let conn = pollster::block_on(session()).map_err(|_| CaptureError::Unsupported)?;
     let mut monitors = Vec::new();
     for (name, rect) in layout {
-        let image = pollster::block_on(capture_screen(&name))?;
+        let image = pollster::block_on(capture_screen(&conn, &name))?;
         monitors.push(MonitorShot {
             layout: rect,
             image,
@@ -66,20 +84,22 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
     Ok(DesktopShot { monitors })
 }
 
-async fn capture_screen(name: &str) -> Result<image::RgbaImage, CaptureError> {
-    let conn = Connection::session()
-        .await
-        .map_err(|_| CaptureError::Unsupported)?;
-    let (read, write) = rustix::pipe::pipe().map_err(failed)?;
+async fn capture_screen(conn: &Connection, name: &str) -> Result<image::RgbaImage, CaptureError> {
+    // Close-on-exec, so a child started meanwhile does not keep the write end
+    // open and the reader waiting.
+    let (read, write) =
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).map_err(failed)?;
     // KWin writes the pixels as it replies, and a pipe holds 64 KiB of a
     // picture of megabytes: somebody must already be reading.
-    let reader = std::thread::Builder::new()
+    let (tx, pixels) = channel();
+    std::thread::Builder::new()
         .name("kwin-shot".into())
         .spawn(move || {
             let mut bytes = Vec::new();
-            std::fs::File::from(read)
+            let done = std::fs::File::from(read)
                 .read_to_end(&mut bytes)
-                .map(|_| bytes)
+                .map(|_| bytes);
+            let _ = tx.send(done);
         })
         .map_err(failed)?;
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
@@ -120,11 +140,15 @@ async fn capture_screen(name: &str) -> Result<image::RgbaImage, CaptureError> {
         num("stride")?,
         num("format")?,
     );
-    let format = qimage_format(format)
-        .ok_or_else(|| failed(format!("unsupported QImage format {format}")))?;
-    let bytes = reader
-        .join()
-        .map_err(|_| failed("the pipe reader panicked"))?
+    let Some(format) = qimage_format(format) else {
+        log::debug!("KWin sent QImage format {format}");
+        return Err(failed(format!("unsupported QImage format {format}")));
+    };
+    // Not a join: a KWin that never closes the pipe must not hang us (the
+    // reader then ends whenever it does).
+    let bytes = pixels
+        .recv_timeout(READ_TIMEOUT)
+        .map_err(|_| failed("KWin did not finish sending the picture"))?
         .map_err(failed)?;
     to_rgba(format, width, height, stride as usize, &bytes)
 }
@@ -154,31 +178,68 @@ pub fn window_rects() -> Vec<WindowRect> {
     }
 }
 
+/// A script file only we can have written, under the 0700 runtime directory.
+/// `create_new` refuses a file or symlink somebody planted there, since KWin
+/// runs whatever it finds in it.
+fn write_script(text: &str) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|d| !d.is_empty())
+        .ok_or("no XDG_RUNTIME_DIR")?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let path = PathBuf::from(dir).join(format!("windup-rects-{}-{nanos}.js", std::process::id()));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// Unloads the script and deletes its file however the wait ends. KWin reads
+/// the file when the script runs, on another thread, so it must outlive `run`.
+struct Loaded {
+    conn: Connection,
+    file: PathBuf,
+}
+
+impl Drop for Loaded {
+    fn drop(&mut self) {
+        let _ = pollster::block_on(unload(&self.conn));
+        let _ = std::fs::remove_file(&self.file);
+    }
+}
+
 fn try_window_rects() -> Result<String, String> {
     let (tx, rx) = channel();
-    let (conn, script_id) = pollster::block_on(async {
-        let conn = Connection::session().await.map_err(|e| e.to_string())?;
+    let conn = pollster::block_on(session()).map_err(|e| e.to_string())?;
+    pollster::block_on(async {
         conn.object_server()
             .at(RECTS_PATH, Rects(Mutex::new(tx)))
             .await
-            .map_err(|e| e.to_string())?;
-        let me = conn.unique_name().ok_or("no bus name")?.to_string();
-        let file = std::env::temp_dir().join(format!("windup-rects-{}.js", std::process::id()));
-        std::fs::write(&file, script(&me, RECTS_PATH, RECTS_IFACE, RECTS_METHOD))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())
+    })?;
+    let me = conn.unique_name().ok_or("no bus name")?.to_string();
+    let file = write_script(&script(&me, RECTS_PATH, RECTS_IFACE, RECTS_METHOD))?;
+    // From here on every exit unloads and cleans up.
+    let guard = Loaded { conn, file };
+    let id = pollster::block_on(async {
         // A script of that name left by a crashed run would refuse the load.
-        let _ = unload(&conn).await;
-        let loaded = conn
+        let _ = unload(&guard.conn).await;
+        let id: i32 = guard
+            .conn
             .call_method(
                 Some(KWIN),
                 "/Scripting",
                 Some("org.kde.kwin.Scripting"),
                 "loadScript",
-                &(file.to_string_lossy().as_ref(), PLUGIN_NAME),
+                &(guard.file.to_string_lossy().as_ref(), PLUGIN_NAME),
             )
-            .await;
-        let _ = std::fs::remove_file(&file);
-        let id: i32 = loaded
+            .await
             .map_err(|e| e.to_string())?
             .body()
             .deserialize()
@@ -187,22 +248,23 @@ fn try_window_rects() -> Result<String, String> {
             return Err("KWin would not load the script".to_owned());
         }
         // KWin 6 puts script N at /Scripting/ScriptN.
-        conn.call_method(
-            Some(KWIN),
-            format!("/Scripting/Script{id}").as_str(),
-            Some("org.kde.kwin.Script"),
-            "run",
-            &(),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        Ok::<_, String>((conn, id))
+        guard
+            .conn
+            .call_method(
+                Some(KWIN),
+                format!("/Scripting/Script{id}").as_str(),
+                Some("org.kde.kwin.Script"),
+                "run",
+                &(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(id)
     })?;
     // Not inside the async block: the call arrives on the connection's own
     // executor thread, and this thread only has to wait for it.
-    let got = rx.recv_timeout(SCRIPT_TIMEOUT);
-    let _ = pollster::block_on(unload(&conn));
-    got.map_err(|e| format!("script {script_id} did not report: {e}"))
+    rx.recv_timeout(SCRIPT_TIMEOUT)
+        .map_err(|e| format!("script {id} did not report: {e}"))
 }
 
 async fn unload(conn: &Connection) -> zbus::Result<()> {

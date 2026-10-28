@@ -162,6 +162,10 @@ fn token_path() -> Option<std::path::PathBuf> {
 /// desktop asks the user whether Windup may take screenshots and remembers the
 /// answer; a refusal comes back as `Denied`. The portal returns one image of
 /// the whole desktop, which is cut up by the compositor's output layout.
+///
+/// Blocks until the portal answers, which includes the user answering that
+/// first-time dialog: call it from a thread of its own, never the hotkey or
+/// event thread.
 pub fn screenshot() -> Result<DesktopShot, CaptureError> {
     use ashpd::desktop::screenshot::Screenshot;
     let layout = output_layout_from_env()?;
@@ -175,7 +179,9 @@ pub fn screenshot() -> Result<DesktopShot, CaptureError> {
     });
     let shot = match response {
         Ok(shot) => shot,
-        Err(ashpd::Error::Response(_)) => return Err(CaptureError::Denied),
+        Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => {
+            return Err(CaptureError::Denied);
+        }
         Err(ashpd::Error::Portal(ashpd::PortalError::NotAllowed(_))) => {
             return Err(CaptureError::Denied);
         }
