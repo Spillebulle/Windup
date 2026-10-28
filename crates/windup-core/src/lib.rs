@@ -1,6 +1,7 @@
 pub mod clipboard;
 pub mod config;
 pub mod cosmic_shortcuts;
+pub mod hotkeys;
 pub mod install;
 pub mod ipc;
 pub mod placement;

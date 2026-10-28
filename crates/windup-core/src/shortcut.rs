@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// The canonical name of the Print Screen key in `Shortcut::key`.
+pub const PRINT_SCREEN: &str = "PRINTSCREEN";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct ShortcutModifiers {
     pub super_key: bool,
@@ -77,7 +80,7 @@ impl Shortcut {
     }
 
     pub fn print_screen() -> Self {
-        Self::new(ShortcutModifiers::NONE, "PRINTSCREEN")
+        Self::new(ShortcutModifiers::NONE, PRINT_SCREEN)
     }
 }
 
@@ -102,7 +105,7 @@ impl fmt::Display for Shortcut {
             parts.push("Shift");
         }
         if !self.key.is_empty() {
-            parts.push(if self.key == "PRINTSCREEN" {
+            parts.push(if self.key == PRINT_SCREEN {
                 "Print Screen"
             } else {
                 &self.key

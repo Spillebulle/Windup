@@ -199,62 +199,15 @@ pub fn shortcut_recorder(
                                         break;
                                     }
 
-                                    let key_str = match key {
-                                        Key::A => "A",
-                                        Key::B => "B",
-                                        Key::C => "C",
-                                        Key::D => "D",
-                                        Key::E => "E",
-                                        Key::F => "F",
-                                        Key::G => "G",
-                                        Key::H => "H",
-                                        Key::I => "I",
-                                        Key::J => "J",
-                                        Key::K => "K",
-                                        Key::L => "L",
-                                        Key::M => "M",
-                                        Key::N => "N",
-                                        Key::O => "O",
-                                        Key::P => "P",
-                                        Key::Q => "Q",
-                                        Key::R => "R",
-                                        Key::S => "S",
-                                        Key::T => "T",
-                                        Key::U => "U",
-                                        Key::V => "V",
-                                        Key::W => "W",
-                                        Key::X => "X",
-                                        Key::Y => "Y",
-                                        Key::Z => "Z",
-                                        Key::Num0 => "0",
-                                        Key::Num1 => "1",
-                                        Key::Num2 => "2",
-                                        Key::Num3 => "3",
-                                        Key::Num4 => "4",
-                                        Key::Num5 => "5",
-                                        Key::Num6 => "6",
-                                        Key::Num7 => "7",
-                                        Key::Num8 => "8",
-                                        Key::Num9 => "9",
-                                        Key::F1 => "F1",
-                                        Key::F2 => "F2",
-                                        Key::F3 => "F3",
-                                        Key::F4 => "F4",
-                                        Key::F5 => "F5",
-                                        Key::F6 => "F6",
-                                        Key::F7 => "F7",
-                                        Key::F8 => "F8",
-                                        Key::F9 => "F9",
-                                        Key::F10 => "F10",
-                                        Key::F11 => "F11",
-                                        Key::F12 => "F12",
-                                        Key::Space => "Space",
-                                        Key::Insert => "Insert",
-                                        Key::Delete => "Delete",
-                                        _ => continue,
-                                    };
+                                    // Egui's key names match the canonical ones for
+                                    // everything `windows_vk` knows. Egui has no Key
+                                    // for Print Screen, so that is only ever a default.
+                                    let key_str = key.name().to_uppercase();
+                                    if windup_core::hotkeys::windows_vk(&key_str).is_none() {
+                                        continue;
+                                    }
 
-                                    shortcut.key = key_str.to_string();
+                                    shortcut.key = key_str;
                                     if modifiers.ctrl {
                                         shortcut.modifiers.ctrl = true;
                                     }
