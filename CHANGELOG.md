@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Screenshots. Win+Shift+S (Super+Shift+S on Linux) opens the capture bar over a frozen copy of the screen: drag an area, click a window or take the whole screen, then draw on it, blur or mosaic parts of it, and copy or save it. Print Screen takes a screenshot at once and opens it in the editor.
+- Two new settings panes, Capture launcher and Screenshot: the shortcuts, the save folder, the file name and format, and the editor's keys.
+- The shortcuts you set in the settings window are used now: on Windows the keyboard hook follows them, and on X11 they are grabbed again when you change them. A shortcut that two tools share is marked in the settings.
+- On Linux, `windup --capture` and `windup --screenshot` open the capture bar and take a screenshot, for desktops where the keys are bound in their own settings. The Linux page of the docs says which route each desktop uses.
+
 ## 0.1.2
 
 - On COSMIC, the clipboard history opens at the pointer instead of in the middle of the screen, even when the mouse is not moving.

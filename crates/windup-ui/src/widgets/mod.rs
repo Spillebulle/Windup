@@ -5,7 +5,7 @@ pub mod segmented;
 pub mod slider;
 pub mod toggle;
 
-pub use badge::{shortcut_badge, shortcut_recorder};
+pub use badge::{caution_keycap, shortcut_badge, shortcut_recorder};
 pub use button::button;
 pub use row::{eyebrow, row};
 pub use segmented::segmented;

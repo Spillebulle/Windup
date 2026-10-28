@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Windup is a desktop utility for Windows and Linux (Rust + egui/eframe/wgpu) that runs a settings window plus a set of global-hotkey "tools". Two tools exist today: **Clipboard history** (Win+V → floating popup at the cursor) and **Paste plain text** (Win+Shift+V → strips formatting and pastes).
+Windup is a desktop utility for Windows and Linux (Rust + egui/eframe/wgpu) that runs a settings window plus a set of global-hotkey "tools". Four tools exist today: **Clipboard history** (Win+V → floating popup at the cursor), **Paste plain text** (Win+Shift+V → strips formatting and pastes), **Capture launcher** (Win+Shift+S → capture bar over a frozen screen) and **Screenshot** (Print Screen → straight to the editor).
 
 ## Commands
 
@@ -21,6 +21,8 @@ sh packaging/windows/package.sh 0.1.0 x64 target/release dist   # MSI + setup ex
 sh packaging/linux/package.sh 0.1.0 amd64 target/release dist   # deb, rpm, Arch, AppImage (Linux)
 sh packaging/check.sh                              # Linux app id consistency
 bash tools/linux-e2e.sh target/debug/windup all    # real end-to-end on headless Sway + Xvfb (Linux)
+windup --capture-test out.png                      # hidden: grab the whole desktop to one PNG, exit code says why it failed
+windup --window-rects-test                         # hidden: print the window rectangles the capture overlay would offer
 pwsh tools/release.ps1 X.Y.Z                       # cut a release (see docs/packaging.md)
 ```
 
@@ -80,7 +82,15 @@ The UI is **painted, not composed from egui widgets** — nearly everything in `
 
 A tool is a `ToolId` variant + a config struct + a settings pane + a hotkey branch. Touch points: `core/tool.rs` (`ALL`, `as_str`, `display_name`, `description`, `default_shortcut`), `core/config.rs` (config struct, `Config` field, `is_tool_enabled`/`set_tool_enabled`/`tool_shortcut`/`set_tool_shortcut`), `ui/settings/mod.rs` (`SettingsPane` variant + `ALL`/`label`/`icon`/`blurb` + `render_content` arm) plus a new pane module, and `desktop/hotkey.rs` + the `HotkeyEvent` match in `main.rs`.
 
-Note the current gap: `Config` stores per-tool shortcuts, but the Windows hook hardcodes Win+V / Win+Shift+V and X11 grabs the same two. Configured shortcuts are not yet honored. On Wayland a tool also needs an `ipc::Command` and a `windup --flag`.
+Configured shortcuts are honoured: `core/hotkeys.rs` is the one table (`bindings(config)` -> `(Shortcut, Action)`, first enabled tool wins; `clashes` lists the losers, which the settings show as a caution keycap; plus the per-backend key names `windows_vk`, `xkb_keysym_name`, `portal_trigger`). The Windows hook reads its bindings from it, X11 rebinds when they change, and the settings window sets `hotkey_hint` so a Wayland desktop's shortcut rows say how to bind the keys. So a tool also needs an `Action` there. On Wayland it needs an `ipc::Command` and a `windup --flag`. Two caveats: portal shortcuts (KDE/GNOME) are registered once at start, and COSMIC gets Windup's defaults written once into its custom shortcuts, never moved, so a changed key must be changed in COSMIC Settings too.
+
+## Capture (screenshots)
+
+Capture launcher (Win+Shift+S, bar over a frozen desktop) and Screenshot (Print Screen, straight to the editor) share one session. Windup photographs the desktop first and the overlay draws over the photo.
+
+- **core `capture/`**: `geometry` (desktop units, monitors), `selection` (drag/resize/nudge), `annotate` (tools, shapes), `raster` (draws them, blur, mosaic), `pick` (window choice, `edge_rect` fallback), `output` (file names, PNG/JPEG, default folder), `backend` (pure `detect` of which mechanism takes the still and finds windows, like `platform::detect`), `session` (pure state machine from freeze to copy/save/cancel).
+- **ui `capture/`**: `CaptureView`, the overlay drawn per monitor: bar, loupe, marching ants, annotations. Painted, no platform knowledge.
+- **desktop**: `capture/` picks and runs the stills (`grab_all` tries `still_order` in turn; `windows` GDI, `x11`, `ipcrects` Sway/Hyprland, `kwin_rects`, `pixels`/`surfaces`/`split` for Wayland geometry, `gate` ignores a hotkey while one capture is open, `finish` copies/saves). `overlay.rs` is the overlay and notice on Windows and X11. On Wayland: `linux/capture.rs` drives it and `linux/wayland/{overlay,pane,gpu,notice}.rs` draw it with egui-wgpu on layer surfaces (or toplevels on the window host); `linux/kde.rs` is KWin ScreenShot2 (needs the installed package, the AppImage falls back to the portal) plus a KWin script for window rects; `linux/portal.rs` has the GNOME screenshot portal.
 
 ## Packaging and releases
 

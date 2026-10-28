@@ -67,6 +67,25 @@ fn paste_plain_vk(list: &[(windup_core::Shortcut, windup_core::hotkeys::Action)]
         .and_then(|(s, _)| windows_vk(&s.key))
 }
 
+/// What the settings window tells about binding keys in the desktop: only
+/// where the plan's hotkeys are commands. The settings-only process has no
+/// plan of its own, so it asks the desktop again.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn hotkey_hint(plan: Plan, settings_only: bool) -> windup_ui::HotkeyHint {
+    #[cfg(target_os = "linux")]
+    {
+        let plan = if settings_only { linux::detect() } else { plan };
+        if plan.hotkeys == platform::HotkeysVia::Command {
+            return if linux::cosmic::is_cosmic() {
+                windup_ui::HotkeyHint::Cosmic
+            } else {
+                windup_ui::HotkeyHint::Command
+            };
+        }
+    }
+    windup_ui::HotkeyHint::None
+}
+
 impl WindupApp {
     fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
         install_fonts(&cc.egui_ctx);
@@ -149,7 +168,10 @@ impl WindupApp {
         paste::set_trigger_vk(paste_plain_vk(&applied_bindings));
         Self {
             config,
-            settings_view: SettingsView::default(),
+            settings_view: SettingsView {
+                hotkey_hint: hotkey_hint(plan, startup.settings_only),
+                ..SettingsView::default()
+            },
             history,
             _monitor: monitor,
             hotkey_listener,

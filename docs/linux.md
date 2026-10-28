@@ -99,6 +99,38 @@ riverctl map normal Super+Shift V spawn 'windup --paste-plain'
 Any key binding that runs a command will do: run `windup --popup` and
 `windup --paste-plain`.
 
+## Screenshots
+
+Bind **Super+Shift+S** to `windup --capture`, which opens the capture bar, and
+**Print** to `windup --screenshot`, which takes a screenshot at once. Where
+Windup binds the other two shortcuts for you (COSMIC, KDE, GNOME 48 and newer,
+Hyprland, X11), it binds these two the same way.
+
+Windup photographs the screen first and draws the capture bar over the photo,
+so which route it takes depends on the desktop:
+
+| | Takes the picture with | Finds windows to pick with |
+|---|---|---|
+| **COSMIC, Sway, Hyprland, river, Wayfire, labwc, niri** | the compositor's screencopy protocol | Sway and Hyprland: their IPC; the others: edge detection |
+| **KDE Plasma 6** | KWin's ScreenShot2 interface | a KWin script Windup loads for the moment |
+| **GNOME** | the screenshot portal, which asks once | edge detection |
+| **X11** | the X server directly | the window manager's window list |
+
+- **KDE and the AppImage.** KWin only lets a program it recognises use
+  ScreenShot2, and it recognises the installed package. From the AppImage,
+  Windup falls back to the portal, whose dialog appears every time.
+- **Edge detection** means Windup looks for the edges of windows in the
+  picture itself. It is a good guess, not the compositor's own list, so
+  drag an area when the edges matter.
+
+Shortcuts you change in Windup's settings: on X11 they take effect at once. On
+the desktops that bind them for you the key is registered once, when Windup
+starts. Through the GlobalShortcuts portal (KDE, GNOME 48 and newer) a key
+changed later is not registered again until you restart Windup, and the
+desktop may need the old one removed in its own settings. On COSMIC, Windup
+writes its defaults into Custom shortcuts once and never moves them again, so
+change the key in COSMIC Settings, Keyboard, Custom shortcuts as well.
+
 ## Starting at login
 
 Turn on **Launch at login** in Windup's General settings. It writes

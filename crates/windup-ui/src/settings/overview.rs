@@ -12,10 +12,6 @@ pub fn render(ui: &mut Ui, config: &mut Config, p: &Palette) {
     ui.add_space(metrics::S2);
 
     for tool_id in ToolId::ALL {
-        // The capture tools get their rows with their settings panes.
-        if matches!(tool_id, ToolId::CaptureLauncher | ToolId::Screenshot) {
-            continue;
-        }
         let is_enabled = config.is_tool_enabled(tool_id);
 
         egui::Frame::NONE
@@ -33,9 +29,9 @@ pub fn render(ui: &mut Ui, config: &mut Config, p: &Palette) {
                     // Tool Icon on left
                     let icon = match tool_id {
                         ToolId::ClipboardHistory => Icon::Clipboard,
-                        ToolId::PastePlainText | ToolId::CaptureLauncher | ToolId::Screenshot => {
-                            Icon::FileText
-                        }
+                        ToolId::PastePlainText => Icon::FileText,
+                        ToolId::CaptureLauncher => Icon::Camera,
+                        ToolId::Screenshot => Icon::SquareDashed,
                     };
                     let (icon_rect, _) =
                         ui.allocate_exact_size(vec2(22.0, 22.0), egui::Sense::hover());

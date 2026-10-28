@@ -41,7 +41,7 @@ pub fn bind_once(config: &Config) {
     }
 }
 
-fn is_cosmic() -> bool {
+pub fn is_cosmic() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP")
         .is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("cosmic")))
 }

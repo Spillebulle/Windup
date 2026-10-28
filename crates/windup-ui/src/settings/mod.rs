@@ -1,10 +1,12 @@
 //! The settings window adhering to §9 of STYLE-GUIDE.md.
 //! Left navigation rail (240px), pane switching, live-saving, "Restore all" footer.
 
+pub mod capture_cfg;
 pub mod clipboard_cfg;
 pub mod general;
 pub mod overview;
 pub mod paste_plain_cfg;
+pub mod screenshot_cfg;
 
 use crate::icons::Icon;
 use crate::theme::{Mode, Palette, metrics, strong, text};
@@ -18,14 +20,18 @@ pub enum SettingsPane {
     General,
     ClipboardHistory,
     PastePlainText,
+    Capture,
+    Screenshot,
 }
 
 impl SettingsPane {
-    pub const ALL: [SettingsPane; 4] = [
+    pub const ALL: [SettingsPane; 6] = [
         SettingsPane::Overview,
         SettingsPane::General,
         SettingsPane::ClipboardHistory,
         SettingsPane::PastePlainText,
+        SettingsPane::Capture,
+        SettingsPane::Screenshot,
     ];
 
     pub fn label(self) -> &'static str {
@@ -34,6 +40,8 @@ impl SettingsPane {
             SettingsPane::General => "General & appearance",
             SettingsPane::ClipboardHistory => "Clipboard history",
             SettingsPane::PastePlainText => "Paste plain text",
+            SettingsPane::Capture => "Capture launcher",
+            SettingsPane::Screenshot => "Screenshot",
         }
     }
 
@@ -43,6 +51,8 @@ impl SettingsPane {
             SettingsPane::General => Icon::Sliders,
             SettingsPane::ClipboardHistory => Icon::Clipboard,
             SettingsPane::PastePlainText => Icon::FileText,
+            SettingsPane::Capture => Icon::Camera,
+            SettingsPane::Screenshot => Icon::SquareDashed,
         }
     }
 
@@ -54,18 +64,35 @@ impl SettingsPane {
                 "History storage, instant paste, and popup shortcuts."
             }
             SettingsPane::PastePlainText => "Instant plain text paste shortcut and strip settings.",
+            SettingsPane::Capture => "The capture bar, its shortcut and where screenshots go.",
+            SettingsPane::Screenshot => "The instant screenshot, file names and the editor's keys.",
         }
     }
 }
 
+/// What the shortcut rows should say about binding keys in the desktop
+/// itself. The UI knows no platform, so the desktop crate sets this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HotkeyHint {
+    /// Windup takes the keys itself.
+    #[default]
+    None,
+    /// The desktop only runs commands: the keys are bound in its settings.
+    Command,
+    /// As `Command`, on COSMIC, where Windup writes its defaults once.
+    Cosmic,
+}
+
 pub struct SettingsView {
     pub active_pane: SettingsPane,
+    pub hotkey_hint: HotkeyHint,
 }
 
 impl Default for SettingsView {
     fn default() -> Self {
         Self {
             active_pane: SettingsPane::Overview,
+            hotkey_hint: HotkeyHint::None,
         }
     }
 }
@@ -265,6 +292,12 @@ impl SettingsView {
                             SettingsPane::PastePlainText => {
                                 paste_plain_cfg::render(ui, config, p);
                             }
+                            SettingsPane::Capture => {
+                                capture_cfg::render(ui, config, p, self.hotkey_hint);
+                            }
+                            SettingsPane::Screenshot => {
+                                screenshot_cfg::render(ui, config, p, self.hotkey_hint);
+                            }
                         }
                     });
             });
@@ -313,5 +346,26 @@ fn version_line(ui: &mut Ui, p: &Palette) {
             [pos2(link_rect.min.x, y), pos2(link_rect.max.x, y)],
             Stroke::new(metrics::HAIRLINE, link_color),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_capture_panes_are_listed_with_a_label_and_a_blurb() {
+        for pane in [SettingsPane::Capture, SettingsPane::Screenshot] {
+            assert!(SettingsPane::ALL.contains(&pane), "{pane:?}");
+            assert!(!pane.label().is_empty());
+            assert!(pane.blurb().ends_with('.'), "{pane:?}");
+        }
+    }
+
+    #[test]
+    fn every_pane_has_a_blurb_ending_in_a_full_stop() {
+        for pane in SettingsPane::ALL {
+            assert!(pane.blurb().ends_with('.'), "{pane:?}");
+        }
     }
 }

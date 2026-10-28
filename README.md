@@ -11,12 +11,12 @@
 </p>
 
 <p align="center">
-  Clipboard history at your cursor · plain-text paste · one settings window ·
-  runs in the background
+  Clipboard history at your cursor · plain-text paste · screenshots with an
+  editor · one settings window · runs in the background
 </p>
 
-> **Early days.** Two tools work, on Windows and on Linux: clipboard history
-> and plain-text paste. [What is not there yet](#what-is-not-there-yet) is honest about the
+> **Early days.** Four tools work, on Windows and on Linux: clipboard history,
+> plain-text paste and two ways to take a screenshot. [What is not there yet](#what-is-not-there-yet) is honest about the
 > rest.
 
 ## Install
@@ -70,6 +70,14 @@ Press Win+Shift+V (Super+Shift+V) to paste what is on the clipboard with its fon
 and links stripped. Useful when copying out of a web page or a document into
 anything that would otherwise keep the formatting.
 
+## Screenshots
+
+Press Win+Shift+S (Super+Shift+S) and the screen freezes under a capture bar:
+drag an area, click a window or take the whole screen. Then draw on it with a
+pen, boxes and ellipses, blur or mosaic what should not be seen, and copy or
+save it. Print Screen skips the bar and opens a screenshot in the editor at
+once.
+
 ## What is not there yet
 
 - **No tray icon, and no start at sign-in on Windows.** Both settings are
@@ -83,8 +91,8 @@ anything that would otherwise keep the formatting.
   overlay layer other desktops offer to itself. Pasting asks for permission
   once.
 - **No ARM64 Linux packages yet**, and no macOS.
-- **Two tools.** The settings window is built for more; none of the others
-  exist yet.
+- **No screen recording.** The capture bar is for stills; recording is not
+  built yet.
 
 ## Controls
 
@@ -92,14 +100,17 @@ anything that would otherwise keep the formatting.
 |---|---|
 | Win+V, Super+V | Open clipboard history at the cursor |
 | Win+Shift+V, Super+Shift+V | Paste the clipboard as plain text |
+| Win+Shift+S, Super+Shift+S | Open the capture bar |
+| Print Screen | Take a screenshot at once |
 | Type | Search the history |
 | Up, Down | Move through the history |
 | Enter | Paste the selected entry |
 | Delete | Remove the selected entry |
 | Esc | Close the popup |
 
-Both tools can be switched off in the settings window. On Linux the
-shortcuts themselves live in your desktop's keyboard settings.
+Every tool can be switched off in the settings window, and every shortcut
+changed there. Where a Linux desktop keeps the keys to itself, they live in
+its keyboard settings.
 
 ## Building from source
 

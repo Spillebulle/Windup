@@ -56,7 +56,9 @@ fn this_version_is_the_newest_entry() {
     let text = read("CHANGELOG.md");
     let first = text
         .lines()
-        .find_map(|line| line.strip_prefix("## "))
+        .filter_map(|line| line.strip_prefix("## "))
+        // Notes for the next release, not yet under its version.
+        .find(|name| !name.eq_ignore_ascii_case("unreleased"))
         .expect("CHANGELOG.md has no version sections");
     let named = first.split_whitespace().next().unwrap_or(first);
     assert_eq!(

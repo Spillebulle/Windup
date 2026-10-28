@@ -12,6 +12,31 @@ pub fn shortcut_badge(ui: &mut Ui, p: &Palette, text: &str) {
     }
 }
 
+/// A keycap in the caution colours, for a note that sits beside a shortcut
+/// (§7.8: caution is for what the person may want to know, not an error).
+pub fn caution_keycap(ui: &mut Ui, p: &Palette, text: &str) -> egui::Response {
+    let size = keycap_size(ui.painter(), p, text);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        painter.rect_filled(rect, metrics::RADIUS_TIGHT, p.caution_bg);
+        painter.rect_stroke(
+            rect,
+            metrics::RADIUS_TIGHT,
+            Stroke::new(metrics::HAIRLINE, p.caution_line),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            pos2(rect.min.x + KEYCAP_PAD_X, rect.min.y + KEYCAP_PAD_Y),
+            Align2::LEFT_TOP,
+            text,
+            egui::FontId::monospace(text::TINY),
+            p.caution,
+        );
+    }
+    response
+}
+
 const KEYCAP_PAD_X: f32 = metrics::S2;
 const KEYCAP_PAD_Y: f32 = 3.0;
 
