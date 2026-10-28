@@ -12,13 +12,13 @@ use x11rb::protocol::xproto::{
     AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, InputFocus, Window,
 };
 
-fn connect() -> Option<(x11rb::rust_connection::RustConnection, Window)> {
+pub(crate) fn connect() -> Option<(x11rb::rust_connection::RustConnection, Window)> {
     let (conn, screen) = x11rb::connect(None).ok()?;
     let root = conn.setup().roots.get(screen)?.root;
     Some((conn, root))
 }
 
-fn atom(conn: &impl Connection, name: &str) -> Option<u32> {
+pub(crate) fn atom(conn: &impl Connection, name: &str) -> Option<u32> {
     Some(
         conn.intern_atom(false, name.as_bytes())
             .ok()?
@@ -28,7 +28,12 @@ fn atom(conn: &impl Connection, name: &str) -> Option<u32> {
     )
 }
 
-fn cardinals(conn: &impl Connection, win: Window, prop: &str, ty: AtomEnum) -> Option<Vec<u32>> {
+pub(crate) fn cardinals(
+    conn: &impl Connection,
+    win: Window,
+    prop: &str,
+    ty: AtomEnum,
+) -> Option<Vec<u32>> {
     let prop = atom(conn, prop)?;
     let reply = conn
         .get_property(false, win, prop, ty, 0, 1024)

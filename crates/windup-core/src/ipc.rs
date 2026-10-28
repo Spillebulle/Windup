@@ -80,6 +80,9 @@ pub enum Launch {
     Settings,
     /// Deliver a command to the running app, starting it if there is none.
     Send(Command),
+    /// `--capture-test <file.png>`: grab every monitor, write the picture,
+    /// exit. A development aid, so it is not in `USAGE`.
+    CaptureTest(PathBuf),
     /// `--help`.
     Help,
     /// Something we do not understand; the text says what.
@@ -117,9 +120,11 @@ where
             "--show" => Launch::Send(Command::Show),
             "--background" => Launch::Background,
             "--settings" => Launch::Settings,
+            "--capture-test" => Launch::Unknown("--capture-test needs a file name".into()),
             "--help" | "-h" => Launch::Help,
             other => Launch::Unknown(format!("unknown option '{other}'")),
         },
+        [flag, path] if flag == "--capture-test" => Launch::CaptureTest(PathBuf::from(path)),
         _ => Launch::Unknown("expected at most one option".into()),
     }
 }
@@ -194,6 +199,16 @@ mod tests {
             Launch::Send(Command::Screenshot)
         );
         assert!(USAGE.contains("--capture") && USAGE.contains("--screenshot"));
+    }
+
+    #[test]
+    fn capture_test_takes_a_path_and_is_hidden() {
+        assert_eq!(
+            parse_args(["--capture-test", "out.png"]),
+            Launch::CaptureTest(PathBuf::from("out.png"))
+        );
+        assert!(matches!(parse_args(["--capture-test"]), Launch::Unknown(_)));
+        assert!(!USAGE.contains("capture-test"));
     }
 
     #[test]

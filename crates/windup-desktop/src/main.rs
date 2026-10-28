@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod capture;
 mod cursor;
 mod hotkey;
 #[cfg(target_os = "linux")]
@@ -628,6 +629,13 @@ fn main() -> eframe::Result<()> {
         return setup::run();
     }
 
+    // A development aid: grab the screen, write it out, leave. No window.
+    if let windup_core::ipc::Launch::CaptureTest(path) =
+        windup_core::ipc::parse_args(std::env::args().skip(1))
+    {
+        std::process::exit(capture_test(&path));
+    }
+
     #[cfg(target_os = "linux")]
     let Some(startup) = linux_startup() else {
         return Ok(());
@@ -670,6 +678,37 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// `windup --capture-test out.png`: the whole desktop as one PNG. The exit
+/// code is the process's.
+fn capture_test(path: &std::path::Path) -> i32 {
+    let shot = match capture::grab_all() {
+        Ok(shot) => shot,
+        Err(e) => {
+            eprintln!("windup: {}", e.message());
+            if let capture::CaptureError::Failed(why) = &e {
+                eprintln!("windup: {why}");
+            }
+            return 1;
+        }
+    };
+    let Some(image) = shot.compose(shot.bounds()) else {
+        eprintln!("windup: the screen could not be captured (nothing to save)");
+        return 1;
+    };
+    if let Err(e) = image.save_with_format(path, image::ImageFormat::Png) {
+        eprintln!("windup: could not write {}: {e}", path.display());
+        return 1;
+    }
+    println!(
+        "{} monitor(s), {}x{} -> {}",
+        shot.monitors.len(),
+        image.width(),
+        image.height(),
+        path.display()
+    );
+    0
+}
+
 /// The desktop entry, icon and Wayland app id all carry this name.
 pub(crate) const APP_ID: &str = "io.github.spillebulle.windup";
 
@@ -689,6 +728,8 @@ fn linux_startup() -> Option<Startup> {
             println!("{}", ipc::USAGE);
             return None;
         }
+        // Handled in `main` before this runs.
+        Launch::CaptureTest(_) => return None,
         Launch::Unknown(why) => {
             eprintln!("windup: {why}\n\n{}", ipc::USAGE);
             std::process::exit(2);
