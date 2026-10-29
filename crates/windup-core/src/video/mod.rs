@@ -3,10 +3,12 @@
 
 pub mod command;
 pub mod format;
+pub mod pacing;
 pub mod probe;
 pub mod recorder;
 
 pub use command::{AudioIn, SegmentJob, Source, join_args, segment_args, segment_ext};
+pub use pacing::Pacer;
 pub use recorder::{Finish, RecState, Recorder};
 
 pub use format::{
