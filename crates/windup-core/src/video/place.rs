@@ -53,11 +53,12 @@ pub fn place_bar(rect: DRect, monitors: &[DRect], bar: (f32, f32), gap: f32) -> 
         .iter()
         .filter(|m| m.intersect(&rect).is_none())
         .find_map(|m| {
-            let c = centred(m, m.y + gap);
-            // The centre is the monitor's own, not the area's.
+            // The monitor's own centre, not the area's.
             let c = DRect {
                 x: m.x + (m.w - w) / 2.0,
-                ..c
+                y: m.y + gap,
+                w,
+                h,
             };
             fits(m, c).then_some(c)
         })
@@ -109,10 +110,9 @@ mod tests {
         let rt = r(1920.0, 0.0, 1920.0, 1080.0);
         let a = r(1700.0, 400.0, 500.0, 300.0);
         let b = place_bar(a, &[l, rt], BAR, GAP).unwrap();
-        assert!([l, rt].iter().any(|m| {
-            b.x >= m.x && b.right() <= m.right() && b.y >= m.y && b.bottom() <= m.bottom()
-        }));
-        assert!(b.intersect(&a).is_none());
+        // The area's centre (1950) is on the right monitor, so the bar is
+        // clamped to its left edge there.
+        assert_eq!(b, r(1920.0, 352.0, 300.0, 40.0));
     }
 
     #[test]
@@ -121,5 +121,52 @@ mod tests {
         let a = r(0.0, 400.0, 100.0, 100.0);
         let b = place_bar(a, &[m], BAR, GAP).unwrap();
         assert_eq!(b.x, 0.0);
+    }
+
+    #[test]
+    fn monitors_at_negative_coordinates_place_exactly() {
+        let l = r(-1920.0, 0.0, 1920.0, 1080.0);
+        let m = r(0.0, 0.0, 1920.0, 1080.0);
+        let a = r(-1000.0, 400.0, 400.0, 300.0);
+        assert_eq!(
+            place_bar(a, &[l, m], BAR, GAP),
+            Some(r(-950.0, 352.0, 300.0, 40.0))
+        );
+        let up = r(0.0, -1080.0, 1920.0, 1080.0);
+        assert_eq!(
+            place_bar(m, &[m, up], BAR, GAP),
+            Some(r(810.0, -1072.0, 300.0, 40.0))
+        );
+    }
+
+    #[test]
+    fn no_room_above_or_below_goes_to_the_second_monitor() {
+        let l = r(0.0, 0.0, 1920.0, 1080.0);
+        let rt = r(1920.0, 0.0, 1920.0, 1080.0);
+        let a = r(100.0, 0.0, 500.0, 1080.0);
+        assert_eq!(
+            place_bar(a, &[l, rt], BAR, GAP),
+            Some(r(2730.0, 8.0, 300.0, 40.0))
+        );
+    }
+
+    #[test]
+    fn a_bar_wider_than_every_monitor_has_no_slot() {
+        let m = r(0.0, 0.0, 1920.0, 1080.0);
+        let a = r(600.0, 400.0, 400.0, 300.0);
+        assert_eq!(place_bar(a, &[m], (2000.0, 40.0), GAP), None);
+    }
+
+    #[test]
+    fn an_area_over_a_gap_uses_the_monitor_it_overlaps_most() {
+        let l = r(0.0, 0.0, 1000.0, 1080.0);
+        let rt = r(1100.0, 0.0, 1000.0, 1080.0);
+        // Its top centre (x = 1000) is on neither monitor; 150 wide of it
+        // is on the left one and 50 on the right.
+        let a = r(850.0, 400.0, 300.0, 300.0);
+        assert_eq!(
+            place_bar(a, &[l, rt], BAR, GAP),
+            Some(r(700.0, 352.0, 300.0, 40.0))
+        );
     }
 }
