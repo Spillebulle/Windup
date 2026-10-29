@@ -151,6 +151,16 @@ pub fn socket_path(runtime_dir: Option<&str>, uid: u32, display: Option<&str>) -
     }
 }
 
+/// Where the new executable is when the one this process runs from has been
+/// replaced, from the target of `/proc/self/exe`. The kernel adds
+/// " (deleted)" once that file is gone, which is what a package update does:
+/// it puts a new file in its place and unlinks the old one.
+pub fn replaced_exe(link: &str) -> Option<PathBuf> {
+    link.strip_suffix(" (deleted)")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+}
+
 fn sanitise(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -166,6 +176,16 @@ mod tests {
         for c in Command::ALL {
             assert_eq!(Command::parse(&c.encode()), Some(c));
         }
+    }
+
+    #[test]
+    fn a_replaced_executable_is_recognised_by_its_link() {
+        assert_eq!(
+            replaced_exe("/usr/bin/windup (deleted)"),
+            Some(PathBuf::from("/usr/bin/windup"))
+        );
+        assert_eq!(replaced_exe("/usr/bin/windup"), None);
+        assert_eq!(replaced_exe(" (deleted)"), None);
     }
 
     #[test]

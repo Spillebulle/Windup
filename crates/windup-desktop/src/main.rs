@@ -260,6 +260,17 @@ impl eframe::App for WindupApp {
         #[cfg(target_os = "linux")]
         self.keep_running_when_closed(ctx);
 
+        // A package update replaced the program (X11; the Wayland hosts do
+        // this in `linux`): the new one takes over while nothing is open.
+        #[cfg(target_os = "linux")]
+        if !self.settings_only
+            && !self.popup_open
+            && !self.overlay.busy()
+            && let Some(exe) = linux::ipc::upgraded_exe()
+        {
+            linux::ipc::hand_over(&exe);
+        }
+
         let wanted = windup_core::hotkeys::bindings(&self.config);
         if wanted != self.applied_bindings {
             if let Some(l) = &self.hotkey_listener {

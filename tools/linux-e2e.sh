@@ -186,6 +186,42 @@ start_windup() {
     fi
 }
 
+# A package update replaces the program file while Windup runs. The old
+# process must notice and hand its socket to the new one, or every shortcut
+# after the update keeps reaching the old code.
+update_case() {
+    local dir=$home/update old_pid new_pid
+    mkdir -p "$dir"
+    cp "$bin" "$dir/windup"
+    RUST_LOG=info "$dir/windup" --background >"$art/$1-update.log" 2>&1 &
+    old_pid=$!
+    if ! wait_for 100 sh -c 'for s in "$XDG_RUNTIME_DIR"/windup*.sock; do [ -S "$s" ] && exit 0; done; exit 1'; then
+        bad "$1: the copy to update never opened its socket"
+        return
+    fi
+    # As pacman and dpkg do: the new file is written beside, then renamed over.
+    cp "$bin" "$dir/windup.new" && mv -f "$dir/windup.new" "$dir/windup"
+    if wait_for 150 sh -c '! kill -0 "$1" 2>/dev/null' _ "$old_pid"; then
+        ok "$1: the old Windup stepped aside after an update"
+    else
+        bad "$1: the old Windup kept running after an update"
+        kill "$old_pid" 2>/dev/null
+        return
+    fi
+    if wait_for 100 pgrep -f "$dir/windup --background"; then
+        new_pid=$(pgrep -f "$dir/windup --background" | head -1)
+        wl-copy "updated-$$"
+        if wait_for 30 history_has "updated-$$"; then
+            ok "$1: the new Windup took over"
+        else
+            bad "$1: the new Windup started but does not record copies"
+        fi
+        kill "$new_pid" 2>/dev/null
+    else
+        bad "$1: no new Windup started after an update"
+    fi
+}
+
 # --- Wayland ----------------------------------------------------------------
 
 # The Wayland capture back end on Sway (wlr-screencopy), on the output as it
@@ -439,7 +475,11 @@ EOF
         bad "wayland: stopped with the settings window"
     fi
 
-    kill $windup_pid $sway_pid 2>/dev/null
+    kill $windup_pid 2>/dev/null
+    wait $windup_pid 2>/dev/null
+    update_case wayland
+
+    kill $sway_pid 2>/dev/null
     wait 2>/dev/null
 }
 

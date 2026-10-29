@@ -58,6 +58,33 @@ pub fn send_or_start(command: Command) -> std::io::Result<()> {
     }
 }
 
+/// The new executable, when a package update has replaced the one this
+/// process runs from and put a new one at the same path.
+pub fn upgraded_exe() -> Option<PathBuf> {
+    let link = std::fs::read_link("/proc/self/exe").ok()?;
+    let exe = ipc::replaced_exe(link.to_str()?)?;
+    exe.is_file().then_some(exe)
+}
+
+/// Hands the socket to the new Windup and exits: without this, every
+/// `windup --popup` after an update reaches the old process, which is still
+/// running and may not know the new commands.
+pub fn hand_over(exe: &std::path::Path) -> ! {
+    log::info!("{} was updated; starting the new one", exe.display());
+    let _ = std::fs::remove_file(socket_path());
+    {
+        use std::os::unix::process::CommandExt;
+        let _ = Process::new(exe)
+            .arg("--background")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn();
+    }
+    std::process::exit(0)
+}
+
 pub enum Bound {
     /// We own the socket and are the running Windup.
     Listening(UnixListener),

@@ -40,6 +40,14 @@ pub(crate) struct Overlay {
     notice: Option<Notice>,
 }
 
+impl Overlay {
+    /// Whether a capture or its notice is on the screen.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn busy(&self) -> bool {
+        self.capture.is_some() || self.finishing.is_some() || self.notice.is_some()
+    }
+}
+
 struct Capture {
     session: Session,
     view: CaptureView,

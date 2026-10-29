@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use wayland::{PopupSetup, Service, ServiceEvent, Shared};
 use windup_core::capture::session::CaptureMode;
 use windup_core::clipboard::{ClipboardEntry, ClipboardHistory, ClipboardMonitor};
@@ -197,6 +197,7 @@ pub fn run_background(
         config_stamp: config_stamp(),
         saved: history_state(&history),
         capture: capture::Capturing::default(),
+        last_command: Instant::now(),
     };
     if show_settings {
         host.show_settings();
@@ -217,7 +218,13 @@ struct Background {
     config_stamp: Option<SystemTime>,
     saved: (usize, u64),
     capture: capture::Capturing,
+    /// When the socket last brought a command; an update is only taken over
+    /// once nothing has been asked for a while, so an open popup is left be.
+    last_command: Instant,
 }
+
+/// How long without a command before an updated Windup restarts itself.
+const QUIET_BEFORE_HANDOVER: Duration = Duration::from_secs(3);
 
 impl Background {
     fn tick(
@@ -235,6 +242,7 @@ impl Background {
             Duration::from_millis(200)
         };
         if let Ok(command) = commands.recv_timeout(wait) {
+            self.last_command = Instant::now();
             self.command(command, config, shared, commands);
         }
         while let Ok(event) = events.try_recv() {
@@ -281,6 +289,15 @@ impl Background {
             if let Some(p) = Config::history_path() {
                 let _ = shared.history.lock().unwrap().save_to_disk(&p);
             }
+        }
+
+        // A package update replaced the program: the new one takes over,
+        // once no capture is under way and nothing was asked for lately.
+        if self.capture.gate == crate::capture::gate::Gate::Idle
+            && self.last_command.elapsed() > QUIET_BEFORE_HANDOVER
+            && let Some(exe) = ipc::upgraded_exe()
+        {
+            ipc::hand_over(&exe);
         }
     }
 
