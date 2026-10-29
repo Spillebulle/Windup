@@ -290,6 +290,11 @@ impl Config {
             .map(|proj| proj.config_dir().to_path_buf())
     }
 
+    /// Where scratch files go, such as a recording's segments before the join.
+    pub fn cache_dir() -> Option<PathBuf> {
+        ProjectDirs::from("com", "spillebulle", "windup").map(|proj| proj.cache_dir().to_path_buf())
+    }
+
     pub fn config_file_path() -> Option<PathBuf> {
         Self::config_dir().map(|dir| dir.join("config.json"))
     }

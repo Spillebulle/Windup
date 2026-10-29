@@ -21,8 +21,6 @@ use windup_core::video::{
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PARALLEL: usize = 4;
 
-// The recorder that reads these comes in a later step.
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) enum ProbeState {
     Running,
@@ -32,7 +30,6 @@ pub(crate) enum ProbeState {
 
 /// `Running` until there is any answer: the cache for this ffmpeg, then the
 /// fresh probe, which replaces it.
-#[allow(dead_code)]
 pub(crate) static PROBE: RwLock<ProbeState> = RwLock::new(ProbeState::Running);
 
 fn publish(state: ProbeState) {
@@ -89,7 +86,7 @@ fn on_path() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn command(ffmpeg: &Path) -> Command {
+pub(crate) fn command(ffmpeg: &Path) -> Command {
     let mut c = Command::new(ffmpeg);
     c.stdin(Stdio::null()).stdout(Stdio::null());
     #[cfg(windows)]

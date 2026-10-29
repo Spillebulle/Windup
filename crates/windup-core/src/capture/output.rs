@@ -14,11 +14,12 @@ pub fn file_name(pattern: &str, when: Zoned, format: ImageFormat) -> String {
         ImageFormat::Png => "png",
         ImageFormat::Jpeg => "jpg",
     };
-    file_name_ext(pattern, when, ext)
+    file_name_ext(pattern, when, ext, "Screenshot")
 }
 
 /// [`file_name`] with the extension given, for files that are not pictures.
-pub fn file_name_ext(pattern: &str, when: Zoned, ext: &str) -> String {
+/// `fallback` is the name used when the pattern leaves nothing.
+pub fn file_name_ext(pattern: &str, when: Zoned, ext: &str, fallback: &str) -> String {
     let date = when.strftime("%Y-%m-%d").to_string();
     let time = when.strftime("%H%M%S").to_string();
     let expanded = pattern.replace("{date}", &date).replace("{time}", &time);
@@ -33,7 +34,7 @@ pub fn file_name_ext(pattern: &str, when: Zoned, ext: &str) -> String {
         })
         .collect();
     let stem = cleaned.trim_end_matches(['.', ' ']);
-    let stem = if stem.is_empty() { "Screenshot" } else { stem };
+    let stem = if stem.is_empty() { fallback } else { stem };
     let head_len = stem.find('.').unwrap_or(stem.len());
     let stem = if is_reserved(&stem[..head_len]) {
         format!("{}_{}", &stem[..head_len], &stem[head_len..])
@@ -46,6 +47,11 @@ pub fn file_name_ext(pattern: &str, when: Zoned, ext: &str) -> String {
 /// [`file_name`] for the current local time.
 pub fn file_name_now(pattern: &str, format: ImageFormat) -> String {
     file_name(pattern, Zoned::now(), format)
+}
+
+/// A recording's file name for the current local time.
+pub fn recording_name_now(pattern: &str, ext: &str) -> String {
+    file_name_ext(pattern, Zoned::now(), ext, "Recording")
 }
 
 /// Windows device names, which cannot be file names (with or without extension).
@@ -152,6 +158,15 @@ mod tests {
         assert_eq!(file_name("shot. . ", at(), ImageFormat::Png), "shot.png");
         assert_eq!(file_name("", at(), ImageFormat::Png), "Screenshot.png");
         assert_eq!(file_name("...", at(), ImageFormat::Jpeg), "Screenshot.jpg");
+    }
+
+    #[test]
+    fn an_empty_recording_pattern_falls_back_to_recording() {
+        assert_eq!(file_name_ext("", at(), "mp4", "Recording"), "Recording.mp4");
+        assert_eq!(
+            file_name_ext("Recording {date} {time}", at(), "webm", "Recording"),
+            "Recording 2026-10-28 174712.webm"
+        );
     }
 
     #[test]

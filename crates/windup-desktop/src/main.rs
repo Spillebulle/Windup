@@ -703,6 +703,21 @@ fn main() -> eframe::Result<()> {
         std::process::exit(video::ffmpeg::encoders_test());
     }
 
+    // Records a generated pattern through the real pipeline. No window, and
+    // a malformed request exits rather than falling through to the app.
+    if std::env::args().nth(1).as_deref() == Some("--record-test") {
+        match windup_core::ipc::parse_args(std::env::args().skip(1)) {
+            windup_core::ipc::Launch::RecordTest(test) => {
+                std::process::exit(video::run::record_test(&test))
+            }
+            windup_core::ipc::Launch::Unknown(why) => {
+                eprintln!("windup: {why}");
+                std::process::exit(2);
+            }
+            _ => {}
+        }
+    }
+
     #[cfg(target_os = "linux")]
     let Some(startup) = linux_startup() else {
         return Ok(());
@@ -816,7 +831,10 @@ fn linux_startup() -> Option<Startup> {
             return None;
         }
         // Handled in `main` before this runs.
-        Launch::CaptureTest(_) | Launch::WindowRectsTest | Launch::EncodersTest => return None,
+        Launch::CaptureTest(_)
+        | Launch::WindowRectsTest
+        | Launch::EncodersTest
+        | Launch::RecordTest(_) => return None,
         Launch::Unknown(why) => {
             eprintln!("windup: {why}\n\n{}", ipc::USAGE);
             std::process::exit(2);

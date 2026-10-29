@@ -7,6 +7,7 @@
 //! socket itself is in `windup-desktop`.
 
 use crate::hotkeys::Action;
+use crate::video::Container;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +99,10 @@ pub enum Launch {
     /// `--encoders-test`: probe the bundled ffmpeg's encoders, print one line
     /// each, exit. A test aid, so not in `USAGE`.
     EncodersTest,
+    /// `--record-test <file> --seconds N [--area x,y,w,h] [--container ext]`:
+    /// record for N seconds, write the file, exit. A test aid, so not in
+    /// `USAGE`.
+    RecordTest(RecordTest),
     /// `--help`.
     Help,
     /// Something we do not understand; the text says what.
@@ -119,6 +124,71 @@ Usage: windup [OPTION]
 Bind --popup, --paste-plain, --capture, --screenshot and --record to keys in your desktop's keyboard settings
 where Windup cannot grab them itself (most Wayland desktops).";
 
+/// What `--record-test` was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordTest {
+    pub out: PathBuf,
+    pub seconds: u32,
+    /// Desktop units: x, y, width, height.
+    pub area: Option<(i32, i32, u32, u32)>,
+    pub container: Option<Container>,
+}
+
+fn parse_record_test(rest: &[String]) -> Launch {
+    let Some((out, mut opts)) = rest.split_first() else {
+        return Launch::Unknown("--record-test needs a file name".into());
+    };
+    let mut test = RecordTest {
+        out: PathBuf::from(out),
+        seconds: 0,
+        area: None,
+        container: None,
+    };
+    let mut seconds = None;
+    while let [flag, value, more @ ..] = opts {
+        match flag.as_str() {
+            "--seconds" => match value.parse::<u32>() {
+                Ok(n) if n > 0 => seconds = Some(n),
+                _ => return Launch::Unknown(format!("bad --seconds '{value}'")),
+            },
+            "--area" => {
+                let parts: Vec<&str> = value.split(',').collect();
+                let area = match parts.as_slice() {
+                    [x, y, w, h] => (|| {
+                        Some((
+                            x.parse().ok()?,
+                            y.parse().ok()?,
+                            w.parse().ok()?,
+                            h.parse().ok()?,
+                        ))
+                    })(),
+                    _ => None,
+                };
+                match area {
+                    Some(a) => test.area = Some(a),
+                    None => return Launch::Unknown(format!("bad --area '{value}'")),
+                }
+            }
+            "--container" => match Container::ALL.into_iter().find(|c| c.ext() == value) {
+                Some(c) => test.container = Some(c),
+                None => return Launch::Unknown(format!("unknown container '{value}'")),
+            },
+            other => return Launch::Unknown(format!("unknown option '{other}'")),
+        }
+        opts = more;
+    }
+    if let [extra, ..] = opts {
+        return Launch::Unknown(format!("'{extra}' needs a value"));
+    }
+    match seconds {
+        Some(n) => {
+            test.seconds = n;
+            Launch::RecordTest(test)
+        }
+        None => Launch::Unknown("--record-test needs --seconds".into()),
+    }
+}
+
 /// Parses the arguments after the program name.
 pub fn parse_args<I, S>(args: I) -> Launch
 where
@@ -126,6 +196,11 @@ where
     S: AsRef<str>,
 {
     let args: Vec<String> = args.into_iter().map(|s| s.as_ref().to_owned()).collect();
+    if let [flag, rest @ ..] = args.as_slice()
+        && flag == "--record-test"
+    {
+        return parse_record_test(rest);
+    }
     match args.as_slice() {
         [] => Launch::App,
         [one] => match one.as_str() {
@@ -246,6 +321,63 @@ mod tests {
     fn encoders_test_is_a_hidden_flag() {
         assert_eq!(parse_args(["--encoders-test"]), Launch::EncodersTest);
         assert!(!USAGE.contains("encoders-test"));
+    }
+
+    #[test]
+    fn record_test_is_a_hidden_flag_with_options() {
+        assert_eq!(
+            parse_args(["--record-test", "o.mp4", "--seconds", "3"]),
+            Launch::RecordTest(RecordTest {
+                out: PathBuf::from("o.mp4"),
+                seconds: 3,
+                area: None,
+                container: None,
+            })
+        );
+        assert_eq!(
+            parse_args([
+                "--record-test",
+                "o.webm",
+                "--area",
+                "-10,20,320,240",
+                "--seconds",
+                "2",
+                "--container",
+                "webm",
+            ]),
+            Launch::RecordTest(RecordTest {
+                out: PathBuf::from("o.webm"),
+                seconds: 2,
+                area: Some((-10, 20, 320, 240)),
+                container: Some(Container::WebM),
+            })
+        );
+        for bad in [
+            &["--record-test"][..],
+            &["--record-test", "o.mp4"],
+            &["--record-test", "o.mp4", "--seconds"],
+            &["--record-test", "o.mp4", "--seconds", "0"],
+            &[
+                "--record-test",
+                "o.mp4",
+                "--seconds",
+                "2",
+                "--area",
+                "1,2,3",
+            ],
+            &[
+                "--record-test",
+                "o.mp4",
+                "--seconds",
+                "2",
+                "--container",
+                "avi",
+            ],
+            &["--record-test", "o.mp4", "--seconds", "2", "--fps", "30"],
+        ] {
+            assert!(matches!(parse_args(bad), Launch::Unknown(_)), "{bad:?}");
+        }
+        assert!(!USAGE.contains("record-test"));
     }
 
     #[test]
