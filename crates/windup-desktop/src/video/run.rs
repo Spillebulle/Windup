@@ -1134,6 +1134,14 @@ mod tests {
         }
     }
 
+    /// The tests that record run one at a time: each one is real time, and a
+    /// dozen encoders at once (more on a small CI runner) starve each other
+    /// until the timings they check say more about the machine than the code.
+    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        static TURN: Mutex<()> = Mutex::new(());
+        TURN.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn ffmpeg_or_skip(test: &str) -> Option<PathBuf> {
         let f = ffmpeg::locate();
         if f.is_none() {
@@ -1283,15 +1291,30 @@ mod tests {
 
     #[test]
     fn a_piped_recording_with_a_pause_is_one_file() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("a_piped_recording_with_a_pause_is_one_file") else {
             return;
         };
         let dir = TempDir::new("pause");
         let mut rec = start(&dir, job(&dir, vec![]), ("libx264", false));
+        // The clock may already have run while `start` waited for the first
+        // segment, so measure the second from here.
+        let before = rec.elapsed();
         sleep(1.0);
         rec.pause();
         sleep(0.4);
-        assert!((rec.elapsed() - 1.0).abs() < 0.2, "{}", rec.elapsed());
+        // The pause is stamped when it is asked for but applied by the
+        // supervisor, which a loaded machine (CI, or tests beside a build)
+        // can keep busy opening the first segment for longer than the sleep.
+        // What matters is the stamp, so wait for it to land.
+        for _ in 0..50 {
+            if rec.clock().paused() {
+                break;
+            }
+            sleep(0.1);
+        }
+        let paused_at = rec.elapsed() - before;
+        assert!((paused_at - 1.0).abs() < 0.2, "{paused_at}");
         rec.resume();
         sleep(1.0);
         let out = rec.stop().join().unwrap().unwrap();
@@ -1307,6 +1330,7 @@ mod tests {
 
     #[test]
     fn cancel_leaves_no_file_and_no_temp_folder() {
+        let _turn = one_at_a_time();
         if ffmpeg_or_skip("cancel_leaves_no_file_and_no_temp_folder").is_none() {
             return;
         }
@@ -1324,6 +1348,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_dying_keeps_what_was_recorded() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("ffmpeg_dying_keeps_what_was_recorded") else {
             return;
         };
@@ -1347,6 +1372,7 @@ mod tests {
 
     #[test]
     fn a_hardware_encoder_that_fails_at_once_falls_back_to_software() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("a_hardware_encoder_that_fails_at_once_falls_back") else {
             return;
         };
@@ -1388,6 +1414,7 @@ mod tests {
 
     #[test]
     fn a_source_that_fails_at_once_falls_back_to_its_fallback() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("a_source_that_fails_at_once_falls_back") else {
             return;
         };
@@ -1434,6 +1461,7 @@ mod tests {
 
     #[test]
     fn a_failing_hardware_encoder_keeps_a_working_source() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("a_failing_hardware_encoder_keeps_a_working_source") else {
             return;
         };
@@ -1456,6 +1484,7 @@ mod tests {
 
     #[test]
     fn a_recording_that_never_worked_saves_nothing() {
+        let _turn = one_at_a_time();
         if ffmpeg_or_skip("a_recording_that_never_worked_saves_nothing").is_none() {
             return;
         }
@@ -1474,6 +1503,7 @@ mod tests {
 
     #[test]
     fn a_silent_audio_source_is_muxed() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("a_silent_audio_source_is_muxed") else {
             return;
         };
@@ -1511,6 +1541,7 @@ mod tests {
 
     #[test]
     fn each_segment_restarts_its_sound() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("each_segment_restarts_its_sound") else {
             return;
         };
@@ -1700,6 +1731,7 @@ mod tests {
 
     #[test]
     fn sound_and_picture_stay_in_step_through_quiet() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("sound_and_picture_stay_in_step_through_quiet") else {
             return;
         };
@@ -1734,6 +1766,7 @@ clicks  {clicks:?}"
 
     #[test]
     fn a_gif_is_joined_with_a_palette() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("a_gif_is_joined_with_a_palette") else {
             return;
         };
@@ -1758,6 +1791,7 @@ clicks  {clicks:?}"
 
     #[test]
     fn h265_in_mp4_is_tagged_hvc1() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("h265_in_mp4_is_tagged_hvc1") else {
             return;
         };
@@ -1793,6 +1827,7 @@ clicks  {clicks:?}"
 
     #[test]
     fn a_segment_of_another_size_ends_the_recording_and_keeps_the_rest() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("a_segment_of_another_size_ends_the_recording") else {
             return;
         };
@@ -1821,6 +1856,7 @@ clicks  {clicks:?}"
 
     #[test]
     fn an_abort_kills_a_join_under_way() {
+        let _turn = one_at_a_time();
         let Some(ff) = ffmpeg_or_skip("an_abort_kills_a_join_under_way") else {
             return;
         };
