@@ -1,5 +1,6 @@
 use crate::shortcut::{Shortcut, ShortcutModifiers};
 use crate::tool::ToolId;
+use crate::video::{Bitrate, Codec, Container};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -200,6 +201,54 @@ impl Default for ScreenshotConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VideoConfig {
+    pub enabled: bool,
+    pub shortcut: Shortcut,
+    pub pause_shortcut: Shortcut,
+    pub save_dir: Option<PathBuf>,
+    pub name_pattern: String,
+    pub container: Container,
+    pub codec: Codec,
+    /// `None` picks the encoder automatically.
+    pub encoder: Option<String>,
+    pub fps: u32,
+    pub bitrate: Bitrate,
+    pub gif_colours: u16,
+    pub system_audio: bool,
+    pub mic: bool,
+    pub system_device: Option<String>,
+    pub mic_device: Option<String>,
+    pub last_target: TargetKind,
+    /// The ScreenCast portal's restore token, so Wayland asks once.
+    pub screencast_token: Option<String>,
+}
+
+impl Default for VideoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            shortcut: Shortcut::super_shift_r(),
+            pause_shortcut: Shortcut::super_shift_p(),
+            save_dir: None,
+            name_pattern: "Recording {date} {time}".to_string(),
+            container: Container::Mp4,
+            codec: Codec::H264,
+            encoder: None,
+            fps: 30,
+            bitrate: Bitrate::Auto,
+            gif_colours: 256,
+            system_audio: false,
+            mic: false,
+            system_device: None,
+            mic_device: None,
+            last_target: TargetKind::default(),
+            screencast_token: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub theme_mode: ThemeMode,
@@ -214,6 +263,8 @@ pub struct Config {
     pub capture: CaptureLauncherConfig,
     #[serde(default)]
     pub screenshot: ScreenshotConfig,
+    #[serde(default)]
+    pub video: VideoConfig,
 }
 
 impl Default for Config {
@@ -228,6 +279,7 @@ impl Default for Config {
             paste_plain: PastePlainToolConfig::default(),
             capture: CaptureLauncherConfig::default(),
             screenshot: ScreenshotConfig::default(),
+            video: VideoConfig::default(),
         }
     }
 }
@@ -303,6 +355,7 @@ impl Config {
             ToolId::PastePlainText => self.paste_plain.enabled,
             ToolId::CaptureLauncher => self.capture.enabled,
             ToolId::Screenshot => self.screenshot.enabled,
+            ToolId::Video => self.video.enabled,
         }
     }
 
@@ -312,6 +365,7 @@ impl Config {
             ToolId::PastePlainText => self.paste_plain.enabled = enabled,
             ToolId::CaptureLauncher => self.capture.enabled = enabled,
             ToolId::Screenshot => self.screenshot.enabled = enabled,
+            ToolId::Video => self.video.enabled = enabled,
         }
         self.save();
     }
@@ -322,6 +376,7 @@ impl Config {
             ToolId::PastePlainText => &self.paste_plain.shortcut,
             ToolId::CaptureLauncher => &self.capture.shortcut,
             ToolId::Screenshot => &self.screenshot.shortcut,
+            ToolId::Video => &self.video.shortcut,
         }
     }
 
@@ -331,6 +386,7 @@ impl Config {
             ToolId::PastePlainText => self.paste_plain.shortcut = shortcut,
             ToolId::CaptureLauncher => self.capture.shortcut = shortcut,
             ToolId::Screenshot => self.screenshot.shortcut = shortcut,
+            ToolId::Video => self.video.shortcut = shortcut,
         }
         self.save();
     }
@@ -391,6 +447,34 @@ mod tests {
         assert_eq!(c.capture.shortcut, Shortcut::print_screen());
         assert_eq!(c.screenshot.shortcut, Shortcut::ctrl_shift_s());
         assert!(!c.screenshot.loupe_on);
+    }
+
+    #[test]
+    fn a_config_from_0_2_without_video_keeps_everything_else() {
+        let mut v = serde_json::to_value(Config::default()).unwrap();
+        v.as_object_mut().unwrap().remove("video");
+        v["clipboard"]["max_items"] = serde_json::json!(37);
+        let c: Config = serde_json::from_value(v).unwrap();
+        assert_eq!(c.clipboard.max_items, 37);
+        assert_eq!(c.video, VideoConfig::default());
+    }
+
+    #[test]
+    fn video_defaults_and_tool_accessors_cover_video() {
+        let mut c = Config::default();
+        assert_eq!(c.video.shortcut, Shortcut::super_shift_r());
+        assert_eq!(c.video.pause_shortcut, Shortcut::super_shift_p());
+        assert_eq!(c.video.name_pattern, "Recording {date} {time}");
+        assert_eq!(
+            (c.video.container, c.video.codec),
+            (Container::Mp4, Codec::H264)
+        );
+        assert_eq!((c.video.fps, c.video.gif_colours), (30, 256));
+        assert!(!c.video.system_audio && !c.video.mic);
+        assert!(c.is_tool_enabled(ToolId::Video));
+        c.video.enabled = false;
+        assert!(!c.is_tool_enabled(ToolId::Video));
+        assert_eq!(c.tool_shortcut(ToolId::Video), &Shortcut::super_shift_r());
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod ipc;
 pub mod placement;
 pub mod shortcut;
 pub mod tool;
+pub mod video;
 
 pub use clipboard::{ClipboardContent, ClipboardEntry, ClipboardHistory, ClipboardMonitor};
 pub use config::{ClipboardToolConfig, Config, PastePlainToolConfig, ThemeMode};

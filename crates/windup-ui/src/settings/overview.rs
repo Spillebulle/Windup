@@ -32,6 +32,7 @@ pub fn render(ui: &mut Ui, config: &mut Config, p: &Palette) {
                         ToolId::PastePlainText => Icon::FileText,
                         ToolId::CaptureLauncher => Icon::Camera,
                         ToolId::Screenshot => Icon::SquareDashed,
+                        ToolId::Video => Icon::Video,
                     };
                     let (icon_rect, _) =
                         ui.allocate_exact_size(vec2(22.0, 22.0), egui::Sense::hover());

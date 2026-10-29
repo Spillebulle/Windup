@@ -2,7 +2,7 @@
 //! name translations each backend needs.
 
 use crate::config::Config;
-use crate::shortcut::{PAUSE, PRINT_SCREEN, SCROLL_LOCK, Shortcut};
+use crate::shortcut::{ESCAPE, PAUSE, PRINT_SCREEN, SCROLL_LOCK, Shortcut, ShortcutModifiers};
 use crate::tool::ToolId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -11,6 +11,11 @@ pub enum Action {
     PastePlain,
     CaptureLauncher,
     Screenshot,
+    Video,
+    /// The three below are live only while a recording runs.
+    RecordPause,
+    RecordStop,
+    RecordCancel,
 }
 
 impl Action {
@@ -20,6 +25,7 @@ impl Action {
             ToolId::PastePlainText => Action::PastePlain,
             ToolId::CaptureLauncher => Action::CaptureLauncher,
             ToolId::Screenshot => Action::Screenshot,
+            ToolId::Video => Action::Video,
         }
     }
 }
@@ -32,6 +38,9 @@ impl Action {
             Action::PastePlain => ToolId::PastePlainText,
             Action::CaptureLauncher => ToolId::CaptureLauncher,
             Action::Screenshot => ToolId::Screenshot,
+            Action::Video | Action::RecordPause | Action::RecordStop | Action::RecordCancel => {
+                ToolId::Video
+            }
         }
     }
 }
@@ -50,6 +59,19 @@ pub fn bindings(config: &Config) -> Vec<(Shortcut, Action)> {
         }
     }
     out
+}
+
+/// The keys that are live only while a recording runs: pause, stop (the
+/// Video shortcut again) and Esc, which always cancels and is not rebindable.
+pub fn recording_bindings(config: &Config) -> Vec<(Shortcut, Action)> {
+    vec![
+        (config.video.pause_shortcut.clone(), Action::RecordPause),
+        (config.video.shortcut.clone(), Action::RecordStop),
+        (
+            Shortcut::new(ShortcutModifiers::NONE, ESCAPE),
+            Action::RecordCancel,
+        ),
+    ]
 }
 
 /// Enabled tools whose shortcut an earlier enabled tool already has.
@@ -95,6 +117,7 @@ pub fn windows_vk(key: &str) -> Option<u16> {
         PAUSE => 0x13,
         "SPACE" => 0x20,
         "ENTER" => 0x0D,
+        ESCAPE => 0x1B,
         "TAB" => 0x09,
         "INSERT" => 0x2D,
         "DELETE" => 0x2E,
@@ -133,6 +156,7 @@ pub fn xkb_keysym_name(key: &str) -> Option<&'static str> {
         PAUSE => "Pause",
         "SPACE" => "space",
         "ENTER" => "Return",
+        ESCAPE => "Escape",
         "TAB" => "Tab",
         "INSERT" => "Insert",
         "DELETE" => "Delete",
@@ -173,11 +197,12 @@ mod tests {
         assert_eq!(t(ToolId::ClipboardHistory), "LOGO+v");
         assert_eq!(t(ToolId::CaptureLauncher), "Print");
         assert_eq!(t(ToolId::Screenshot), "CTRL+SHIFT+s");
+        assert_eq!(t(ToolId::Video), "LOGO+SHIFT+r");
     }
 
     #[test]
-    fn defaults_bind_all_four() {
-        assert_eq!(bindings(&Config::default()).len(), 4);
+    fn defaults_bind_all_five() {
+        assert_eq!(bindings(&Config::default()).len(), 5);
         assert!(clashes(&Config::default()).is_empty());
     }
 
@@ -186,7 +211,7 @@ mod tests {
         let mut c = Config::default();
         c.screenshot.enabled = false;
         let b = bindings(&c);
-        assert_eq!(b.len(), 3);
+        assert_eq!(b.len(), 4);
         assert!(!b.contains(&(Shortcut::ctrl_shift_s(), Action::Screenshot)));
     }
 
@@ -203,6 +228,17 @@ mod tests {
         );
         assert!(b.contains(&(Shortcut::print_screen(), Action::CaptureLauncher)));
         assert_eq!(clashes(&c), vec![ToolId::Screenshot]);
+    }
+
+    #[test]
+    fn recording_keys_are_pause_stop_and_esc() {
+        let b = recording_bindings(&Config::default());
+        let s = Shortcut::new;
+        assert!(b.contains(&(s(ShortcutModifiers::SUPER_SHIFT, "P"), Action::RecordPause)));
+        assert!(b.contains(&(s(ShortcutModifiers::SUPER_SHIFT, "R"), Action::RecordStop)));
+        assert!(b.contains(&(s(ShortcutModifiers::NONE, "ESCAPE"), Action::RecordCancel)));
+        assert_eq!(windows_vk("ESCAPE"), Some(0x1B));
+        assert_eq!(xkb_keysym_name("ESCAPE"), Some("Escape"));
     }
 
     #[test]
@@ -234,7 +270,7 @@ mod tests {
         let json = r#"{"modifiers":{"super_key":true,"ctrl":false,"alt":false,"shift":false},"key":"Space"}"#;
         c.paste_plain.shortcut = serde_json::from_str(json).unwrap();
         assert_eq!(clashes(&c), vec![ToolId::PastePlainText]);
-        assert_eq!(bindings(&c).len(), 3);
+        assert_eq!(bindings(&c).len(), 4);
     }
 
     #[test]

@@ -27,6 +27,9 @@ pub enum HotkeyEvent {
     Screenshot {
         target: Target,
     },
+    Record {
+        target: Target,
+    },
     /// Bring the settings window up (`windup` run a second time).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Show,
@@ -42,6 +45,11 @@ impl HotkeyEvent {
             Action::PastePlain => Self::PastePlainText { target },
             Action::CaptureLauncher => Self::Capture { target },
             Action::Screenshot => Self::Screenshot { target },
+            // Only Video starts a recording; the rest are keys for the
+            // recording itself, which has no home until it exists.
+            Action::Video | Action::RecordPause | Action::RecordStop | Action::RecordCancel => {
+                Self::Record { target }
+            }
         }
     }
 }
@@ -524,6 +532,7 @@ mod tests {
             match_binding(&t, 0x53, ShortcutModifiers::CTRL_SHIFT),
             Some(Action::Screenshot)
         );
+        assert_eq!(match_binding(&t, 0x52, WIN_SHIFT), Some(Action::Video));
         // Windows keeps Win+Shift+S for its own Snipping Tool.
         assert_eq!(match_binding(&t, 0x53, WIN_SHIFT), None);
     }

@@ -153,6 +153,7 @@ impl WindupApp {
                         Command::PastePlain => HotkeyEvent::PastePlainText { target },
                         Command::Capture => HotkeyEvent::Capture { target },
                         Command::Screenshot => HotkeyEvent::Screenshot { target },
+                        Command::Record => HotkeyEvent::Record { target },
                         Command::Show => HotkeyEvent::Show,
                         Command::Reload => HotkeyEvent::Reload,
                     };
@@ -326,6 +327,7 @@ impl eframe::App for WindupApp {
                 HotkeyEvent::Screenshot { target } => {
                     self.start_capture(ctx, CaptureMode::Screenshot, ToolId::Screenshot, target)
                 }
+                HotkeyEvent::Record { .. } => log::info!("Video arrives in a later task"),
                 HotkeyEvent::Show => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));

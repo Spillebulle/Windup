@@ -456,6 +456,10 @@ mod tests {
                 && w.key == "s"
                 && w.modifiers == ["Ctrl", "Shift"])
         );
+        assert!(w.iter().any(|w| w.args == "--record"
+            && w.key == "r"
+            && w.modifiers == ["Super", "Shift"]
+            && w.description == "Video"));
         let mut c = Config::default();
         c.screenshot.enabled = false;
         assert!(wanted(&c).iter().all(|w| w.args != "--screenshot"));
@@ -464,7 +468,7 @@ mod tests {
     #[test]
     fn no_marker_offers_everything() {
         assert!(offered(None).is_empty());
-        assert_eq!(pending(wanted(&Config::default()), &offered(None)).len(), 4);
+        assert_eq!(pending(wanted(&Config::default()), &offered(None)).len(), 5);
     }
 
     #[test]
@@ -474,7 +478,7 @@ mod tests {
 ";
         let left = pending(wanted(&Config::default()), &offered(Some(old)));
         let args: Vec<&str> = left.iter().map(|w| w.args.as_str()).collect();
-        assert_eq!(args, ["--capture", "--screenshot"]);
+        assert_eq!(args, ["--capture", "--screenshot", "--record"]);
     }
 
     #[test]

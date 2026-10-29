@@ -8,6 +8,9 @@ pub const SCROLL_LOCK: &str = "SCROLLLOCK";
 /// The canonical name of the Pause key.
 pub const PAUSE: &str = "PAUSE";
 
+/// The canonical name of the Escape key.
+pub const ESCAPE: &str = "ESCAPE";
+
 /// Keys the settings window cannot hear when pressed (egui has no name for
 /// them), so the shortcut editor offers them as choices instead.
 pub const UNHEARD_KEYS: [&str; 3] = [PRINT_SCREEN, SCROLL_LOCK, PAUSE];
@@ -110,6 +113,14 @@ impl Shortcut {
 
     pub fn ctrl_shift_s() -> Self {
         Self::new(ShortcutModifiers::CTRL_SHIFT, "S")
+    }
+
+    pub fn super_shift_r() -> Self {
+        Self::new(ShortcutModifiers::SUPER_SHIFT, "R")
+    }
+
+    pub fn super_shift_p() -> Self {
+        Self::new(ShortcutModifiers::SUPER_SHIFT, "P")
     }
 
     pub fn print_screen() -> Self {

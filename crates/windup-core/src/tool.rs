@@ -7,14 +7,16 @@ pub enum ToolId {
     PastePlainText,
     CaptureLauncher,
     Screenshot,
+    Video,
 }
 
 impl ToolId {
-    pub const ALL: [ToolId; 4] = [
+    pub const ALL: [ToolId; 5] = [
         ToolId::ClipboardHistory,
         ToolId::PastePlainText,
         ToolId::CaptureLauncher,
         ToolId::Screenshot,
+        ToolId::Video,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -23,6 +25,7 @@ impl ToolId {
             ToolId::PastePlainText => "paste_plain_text",
             ToolId::CaptureLauncher => "capture_launcher",
             ToolId::Screenshot => "screenshot",
+            ToolId::Video => "video",
         }
     }
 
@@ -32,6 +35,7 @@ impl ToolId {
             ToolId::PastePlainText => "Paste plain text",
             ToolId::CaptureLauncher => "Capture",
             ToolId::Screenshot => "Screenshot",
+            ToolId::Video => "Video",
         }
     }
 
@@ -47,6 +51,9 @@ impl ToolId {
                 "Opens the capture bar to take a screenshot or record the screen."
             }
             ToolId::Screenshot => "Takes a screenshot straight away and opens it in the editor.",
+            ToolId::Video => {
+                "Records the screen to a video file or a GIF, with sound if you want it."
+            }
         }
     }
 
@@ -56,6 +63,7 @@ impl ToolId {
             ToolId::PastePlainText => Some(Shortcut::super_shift_v()),
             ToolId::CaptureLauncher => Some(Shortcut::print_screen()),
             ToolId::Screenshot => Some(Shortcut::ctrl_shift_s()),
+            ToolId::Video => Some(Shortcut::super_shift_r()),
         }
     }
 }
@@ -70,6 +78,6 @@ mod tests {
         for t in ToolId::ALL {
             assert!(seen.insert(t.default_shortcut().unwrap()), "{t:?}");
         }
-        assert_eq!(ToolId::ALL.len(), 4);
+        assert_eq!(ToolId::ALL.len(), 5);
     }
 }

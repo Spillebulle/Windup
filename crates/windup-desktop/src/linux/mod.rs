@@ -328,6 +328,9 @@ impl Background {
             Command::Screenshot => {
                 self.start_capture(ToolId::Screenshot, CaptureMode::Screenshot, config);
             }
+            Command::Record if config.is_tool_enabled(ToolId::Video) => {
+                log::info!("Video arrives in a later task");
+            }
             Command::Show => self.show_settings(),
             Command::Reload => {
                 *config = Config::load();

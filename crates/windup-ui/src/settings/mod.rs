@@ -7,6 +7,7 @@ pub mod general;
 pub mod overview;
 pub mod paste_plain_cfg;
 pub mod screenshot_cfg;
+pub mod video_cfg;
 
 use crate::icons::Icon;
 use crate::theme::{Mode, Palette, metrics, strong, text};
@@ -22,16 +23,18 @@ pub enum SettingsPane {
     PastePlainText,
     Capture,
     Screenshot,
+    Video,
 }
 
 impl SettingsPane {
-    pub const ALL: [SettingsPane; 6] = [
+    pub const ALL: [SettingsPane; 7] = [
         SettingsPane::Overview,
         SettingsPane::General,
         SettingsPane::ClipboardHistory,
         SettingsPane::PastePlainText,
         SettingsPane::Capture,
         SettingsPane::Screenshot,
+        SettingsPane::Video,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,6 +45,7 @@ impl SettingsPane {
             SettingsPane::PastePlainText => "Paste plain text",
             SettingsPane::Capture => "Capture launcher",
             SettingsPane::Screenshot => "Screenshot",
+            SettingsPane::Video => "Video",
         }
     }
 
@@ -53,6 +57,7 @@ impl SettingsPane {
             SettingsPane::PastePlainText => Icon::FileText,
             SettingsPane::Capture => Icon::Camera,
             SettingsPane::Screenshot => Icon::SquareDashed,
+            SettingsPane::Video => Icon::Video,
         }
     }
 
@@ -66,6 +71,7 @@ impl SettingsPane {
             SettingsPane::PastePlainText => "Instant plain text paste shortcut and strip settings.",
             SettingsPane::Capture => "The capture bar, its shortcut and where screenshots go.",
             SettingsPane::Screenshot => "The instant screenshot, file names and the editor's keys.",
+            SettingsPane::Video => "Screen recording, its formats and shortcuts.",
         }
     }
 }
@@ -298,6 +304,9 @@ impl SettingsView {
                             SettingsPane::Screenshot => {
                                 screenshot_cfg::render(ui, config, p, self.hotkey_hint);
                             }
+                            SettingsPane::Video => {
+                                video_cfg::render(ui, config, p);
+                            }
                         }
                     });
             });
@@ -355,7 +364,11 @@ mod tests {
 
     #[test]
     fn the_capture_panes_are_listed_with_a_label_and_a_blurb() {
-        for pane in [SettingsPane::Capture, SettingsPane::Screenshot] {
+        for pane in [
+            SettingsPane::Capture,
+            SettingsPane::Screenshot,
+            SettingsPane::Video,
+        ] {
             assert!(SettingsPane::ALL.contains(&pane), "{pane:?}");
             assert!(!pane.label().is_empty());
             assert!(pane.blurb().ends_with('.'), "{pane:?}");

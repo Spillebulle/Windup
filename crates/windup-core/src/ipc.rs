@@ -19,6 +19,8 @@ pub enum Command {
     Capture,
     /// Take a screenshot.
     Screenshot,
+    /// Start or stop a screen recording.
+    Record,
     /// Bring up the settings window.
     Show,
     /// Re-read `config.json`; sent by the settings window after it saves.
@@ -26,11 +28,12 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 6] = [
+    pub const ALL: [Command; 7] = [
         Command::Popup,
         Command::PastePlain,
         Command::Capture,
         Command::Screenshot,
+        Command::Record,
         Command::Show,
         Command::Reload,
     ];
@@ -42,6 +45,7 @@ impl Command {
             Command::PastePlain => "paste-plain",
             Command::Capture => "capture",
             Command::Screenshot => "screenshot",
+            Command::Record => "record",
             Command::Show => "show",
             Command::Reload => "reload",
         }
@@ -54,6 +58,11 @@ impl Command {
             Action::PastePlain => Command::PastePlain,
             Action::CaptureLauncher => Command::Capture,
             Action::Screenshot => Command::Screenshot,
+            // The recording keys are only grabbed while recording, and only
+            // where Windup can grab keys at all; a command stands in for them.
+            Action::Video | Action::RecordPause | Action::RecordStop | Action::RecordCancel => {
+                Command::Record
+            }
         }
     }
 
@@ -100,10 +109,11 @@ Usage: windup [OPTION]
   --paste-plain   Paste the clipboard as plain text
   --capture       Open the capture launcher
   --screenshot    Take a screenshot
+  --record        Start or stop a screen recording
   --background    Start without opening the window
   --help          Show this text
 
-Bind --popup, --paste-plain, --capture and --screenshot to keys in your desktop's keyboard settings
+Bind --popup, --paste-plain, --capture, --screenshot and --record to keys in your desktop's keyboard settings
 where Windup cannot grab them itself (most Wayland desktops).";
 
 /// Parses the arguments after the program name.
@@ -120,6 +130,7 @@ where
             "--paste-plain" => Launch::Send(Command::PastePlain),
             "--capture" => Launch::Send(Command::Capture),
             "--screenshot" => Launch::Send(Command::Screenshot),
+            "--record" => Launch::Send(Command::Record),
             "--show" => Launch::Send(Command::Show),
             "--background" => Launch::Background,
             "--settings" => Launch::Settings,
@@ -223,6 +234,8 @@ mod tests {
             Launch::Send(Command::Screenshot)
         );
         assert!(USAGE.contains("--capture") && USAGE.contains("--screenshot"));
+        assert_eq!(parse_args(["--record"]), Launch::Send(Command::Record));
+        assert!(USAGE.contains("--record"));
     }
 
     #[test]

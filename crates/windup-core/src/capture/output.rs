@@ -10,6 +10,15 @@ use crate::config::ImageFormat;
 /// Expands `{date}` / `{time}`, makes the result a legal Windows file name and
 /// appends the extension.
 pub fn file_name(pattern: &str, when: Zoned, format: ImageFormat) -> String {
+    let ext = match format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+    };
+    file_name_ext(pattern, when, ext)
+}
+
+/// [`file_name`] with the extension given, for files that are not pictures.
+pub fn file_name_ext(pattern: &str, when: Zoned, ext: &str) -> String {
     let date = when.strftime("%Y-%m-%d").to_string();
     let time = when.strftime("%H%M%S").to_string();
     let expanded = pattern.replace("{date}", &date).replace("{time}", &time);
@@ -30,10 +39,6 @@ pub fn file_name(pattern: &str, when: Zoned, format: ImageFormat) -> String {
         format!("{}_{}", &stem[..head_len], &stem[head_len..])
     } else {
         stem.to_string()
-    };
-    let ext = match format {
-        ImageFormat::Png => "png",
-        ImageFormat::Jpeg => "jpg",
     };
     format!("{stem}.{ext}")
 }
@@ -81,6 +86,13 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
 pub fn default_dir() -> Option<PathBuf> {
     directories::UserDirs::new()?
         .picture_dir()
+        .map(|p| p.join("Windup"))
+}
+
+/// `<Videos>/Windup`, where recordings are saved by default.
+pub fn default_video_dir() -> Option<PathBuf> {
+    directories::UserDirs::new()?
+        .video_dir()
         .map(|p| p.join("Windup"))
 }
 
