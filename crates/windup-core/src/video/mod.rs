@@ -5,6 +5,7 @@ pub mod command;
 pub mod compose;
 pub mod format;
 pub mod pacing;
+pub mod pcm;
 pub mod probe;
 pub mod recorder;
 pub mod screencast;

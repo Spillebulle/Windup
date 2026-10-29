@@ -100,8 +100,9 @@ pub enum Launch {
     /// each, exit. A test aid, so not in `USAGE`.
     EncodersTest,
     /// `--record-test <file> --seconds N [--area x,y,w,h] [--container ext]
-    /// [--pattern]`: record the screen (or a test pattern) for N seconds, write the file, exit. A test aid, so not in
-    /// `USAGE`.
+    /// [--pattern] [--system-audio] [--mic]`: record the screen (or a test
+    /// pattern), with sound if asked, for N seconds, write the file, exit. A
+    /// test aid, so not in `USAGE`.
     RecordTest(RecordTest),
     /// `--help`.
     Help,
@@ -134,6 +135,10 @@ pub struct RecordTest {
     pub container: Option<Container>,
     /// Record a generated pattern instead of the screen.
     pub pattern: bool,
+    /// Record the computer's sound (the default output device).
+    pub system_audio: bool,
+    /// Record the microphone (the default input device).
+    pub mic: bool,
 }
 
 fn parse_record_test(rest: &[String]) -> Launch {
@@ -146,15 +151,24 @@ fn parse_record_test(rest: &[String]) -> Launch {
         area: None,
         container: None,
         pattern: false,
+        system_audio: false,
+        mic: false,
     };
     let mut seconds = None;
     loop {
-        if let [flag, more @ ..] = opts
-            && flag == "--pattern"
-        {
-            test.pattern = true;
-            opts = more;
-            continue;
+        // The flags that take no value.
+        if let [flag, more @ ..] = opts {
+            let set = match flag.as_str() {
+                "--pattern" => Some(&mut test.pattern),
+                "--system-audio" => Some(&mut test.system_audio),
+                "--mic" => Some(&mut test.mic),
+                _ => None,
+            };
+            if let Some(set) = set {
+                *set = true;
+                opts = more;
+                continue;
+            }
         }
         let [flag, value, more @ ..] = opts else {
             break;
@@ -346,6 +360,8 @@ mod tests {
                 area: None,
                 container: None,
                 pattern: false,
+                system_audio: false,
+                mic: false,
             })
         );
         assert_eq!(
@@ -365,6 +381,8 @@ mod tests {
                 area: Some((-10, 20, 320, 240)),
                 container: Some(Container::WebM),
                 pattern: false,
+                system_audio: false,
+                mic: false,
             })
         );
         // `--pattern` takes no value, and may come anywhere among the options.
@@ -376,12 +394,47 @@ mod tests {
                 area: None,
                 container: None,
                 pattern: true,
+                system_audio: false,
+                mic: false,
             })
         );
         assert!(matches!(
             parse_args(["--record-test", "o.mp4", "--seconds", "2", "--pattern", "x"]),
             Launch::Unknown(_)
         ));
+        // The sound flags take no value either.
+        assert_eq!(
+            parse_args([
+                "--record-test",
+                "o.mp4",
+                "--system-audio",
+                "--seconds",
+                "2",
+                "--mic",
+            ]),
+            Launch::RecordTest(RecordTest {
+                out: PathBuf::from("o.mp4"),
+                seconds: 2,
+                area: None,
+                container: None,
+                pattern: false,
+                system_audio: true,
+                mic: true,
+            })
+        );
+        for bad in [
+            &["--record-test", "o.mp4", "--seconds", "2", "--mic", "x"][..],
+            &[
+                "--record-test",
+                "o.mp4",
+                "--seconds",
+                "2",
+                "--system-audio=1",
+            ],
+            &["--record-test", "o.mp4", "--seconds", "2", "--audio"],
+        ] {
+            assert!(matches!(parse_args(bad), Launch::Unknown(_)), "{bad:?}");
+        }
         for bad in [
             &["--record-test"][..],
             &["--record-test", "o.mp4"],

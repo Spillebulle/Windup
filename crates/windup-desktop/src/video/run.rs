@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use windup_core::capture::output::{recording_name_now, unique_path};
 use windup_core::config::{Config, VideoConfig};
+use windup_core::video::pcm::put_f32le;
 use windup_core::video::{
     AudioIn, Bitrate, Codec, Container, Finish, Pacer, RecState, Recorder, SegmentJob, Source,
     auto_bitrate, candidates, codecs_for, even_size, join_args, pick_encoder, segment_args,
@@ -52,7 +53,14 @@ pub(crate) trait AudioSource: Send {
     fn rate(&self) -> u32;
     fn channels(&self) -> u16;
     /// Appends the samples that arrived since the last call; none is fine.
+    /// A source that keeps time pads silence itself, so the sound lasts as
+    /// long as the picture.
     fn read(&mut self, buf: &mut Vec<f32>) -> Result<(), String>;
+    /// A segment starts: ffmpeg has opened the pipe, and its clock starts
+    /// now. Whatever arrived before (while paused, or while ffmpeg started)
+    /// is dropped rather than put at the start of the segment, and a source
+    /// that pads silence starts counting again.
+    fn restart(&mut self) {}
 }
 
 pub(crate) struct RecordJob {
@@ -822,6 +830,7 @@ fn write_audio(
             return src;
         }
     };
+    src.restart();
     let mut samples = Vec::new();
     let mut bytes = Vec::new();
     let result = loop {
@@ -837,7 +846,7 @@ fn write_audio(
             continue;
         }
         bytes.clear();
-        bytes.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+        put_f32le(&samples, &mut bytes);
         if let Err(e) = file.write_all(&bytes) {
             break Err(format!("The sound pipe failed: {e}"));
         }
@@ -893,6 +902,10 @@ mod tests {
         }
         fn channels(&self) -> u16 {
             2
+        }
+        fn restart(&mut self) {
+            self.t0 = None;
+            self.sent = 0;
         }
         fn read(&mut self, buf: &mut Vec<f32>) -> Result<(), String> {
             let t0 = *self.t0.get_or_insert_with(Instant::now);
@@ -1221,6 +1234,55 @@ mod tests {
         let info = info(&ff, &out);
         assert!(info.contains("64x64"), "{info}");
         assert!(info.contains("Audio: aac"), "{info}");
+    }
+
+    /// Silence that counts how often a segment restarted it.
+    struct Restarts {
+        inner: Silence,
+        count: Arc<AtomicU32>,
+    }
+
+    impl AudioSource for Restarts {
+        fn rate(&self) -> u32 {
+            self.inner.rate()
+        }
+        fn channels(&self) -> u16 {
+            self.inner.channels()
+        }
+        fn read(&mut self, buf: &mut Vec<f32>) -> Result<(), String> {
+            self.inner.read(buf)
+        }
+        fn restart(&mut self) {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            self.inner.restart();
+        }
+    }
+
+    #[test]
+    fn each_segment_restarts_its_sound() {
+        let Some(ff) = ffmpeg_or_skip("each_segment_restarts_its_sound") else {
+            return;
+        };
+        let dir = TempDir::new("audio-pause");
+        let count = Arc::new(AtomicU32::new(0));
+        let src: Box<dyn AudioSource> = Box::new(Restarts {
+            inner: Silence { t0: None, sent: 0 },
+            count: Arc::clone(&count),
+        });
+        let mut rec = start(&dir, job(&dir, vec![src]), ("libx264", false));
+        sleep(1.0);
+        rec.pause();
+        sleep(1.0);
+        rec.resume();
+        sleep(1.0);
+        let out = rec.stop().join().unwrap().unwrap();
+        assert_eq!(count.load(Ordering::Relaxed), 2, "once per segment");
+        let info = info(&ff, &out);
+        assert!(info.contains("Audio: aac"), "{info}");
+        // The pause is not in the sound: had the source kept its clock, the
+        // second segment would start with a second of catching up.
+        let d = duration(&info);
+        assert!((1.6..2.6).contains(&d), "{d} s");
     }
 
     #[test]

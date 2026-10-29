@@ -75,6 +75,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
 ] }
 
+# Computer sound (WASAPI loopback) and the microphone on Windows.
+[target.'cfg(windows)'.dependencies.cpal]
+version = "0.16"
+
 # Compiles the icon and version information into windup.exe; see build.rs.
 # Selected on the host triple, which is what a resource compiler is.
 [target.'cfg(windows)'.build-dependencies]

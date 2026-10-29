@@ -11,7 +11,7 @@ use windup_core::ipc::RecordTest;
 use windup_core::video::{Source, even_size};
 
 use super::ffmpeg;
-use super::run::{FrameSource, RecordJob, Recording, SourceFactory};
+use super::run::{AudioSource, FrameSource, RecordJob, Recording, SourceFactory};
 
 /// A moving colour gradient: what `--record-test` records, so a test run
 /// never reads the screen.
@@ -138,11 +138,14 @@ fn screen_factory(area: Option<(i32, i32, u32, u32)>) -> Result<Box<dyn SourceFa
     }
 }
 
-/// `windup --record-test <out> --seconds N [--area x,y,w,h] [--pattern]`:
-/// records the screen area (a pattern of its size with `--pattern`) through
-/// the real pipeline and writes it to `<out>`. Exit 0 when the file is there
-/// and not empty, 1 when the recording failed, 2 without ffmpeg, with a bad
-/// size, or with no screen source.
+type Opener = fn(Option<&str>) -> Result<Box<dyn AudioSource>, String>;
+
+/// `windup --record-test <out> --seconds N [--area x,y,w,h] [--pattern]
+/// [--system-audio] [--mic]`: records the screen area (a pattern of its size
+/// with `--pattern`), with the default devices' sound if asked, through the
+/// real pipeline and writes it to `<out>`. Exit 0 when the file is there and
+/// not empty, 1 when the recording failed, 2 without ffmpeg, with a bad size,
+/// or with no screen or sound source.
 pub(crate) fn record_test(test: &RecordTest) -> i32 {
     if ffmpeg::locate().is_none() {
         eprintln!("windup: no ffmpeg found (set WINDUP_FFMPEG)");
@@ -164,6 +167,26 @@ pub(crate) fn record_test(test: &RecordTest) -> i32 {
             }
         }
     };
+    let mut audio = Vec::new();
+    for (wanted, what, open) in [
+        (
+            test.system_audio,
+            "computer sound",
+            super::audio::open_system as Opener,
+        ),
+        (test.mic, "the microphone", super::audio::open_mic),
+    ] {
+        if !wanted {
+            continue;
+        }
+        match open(None) {
+            Ok(src) => audio.push(src),
+            Err(e) => {
+                eprintln!("windup: {what}: {e}");
+                return 2;
+            }
+        }
+    }
     let mut cfg = VideoConfig::default();
     if let Some(c) = test.container {
         cfg.container = c;
@@ -176,7 +199,7 @@ pub(crate) fn record_test(test: &RecordTest) -> i32 {
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let job = RecordJob {
         factory,
-        audio: Vec::new(),
+        audio,
         cfg,
         size: (w, h),
         out_dir,
