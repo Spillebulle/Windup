@@ -15,7 +15,7 @@
 //! Nothing about its clipboard changes.
 
 use super::wayland::{CaptureEnd, CaptureSetup, NoticeSetup, Service, Shared};
-use super::{Background, config_stamp, copy_image, popup_setup, portal, window};
+use super::{Background, copy_image, popup_setup, portal, window};
 use crate::capture::gate::{Gate, Reply};
 use crate::capture::{CaptureError, finish, grab_all, window_rects};
 use crate::platform::{Host, PasteVia, Plan, Watch};
@@ -168,9 +168,9 @@ impl Background {
         commands: &Receiver<Command>,
     ) {
         self.capture.gate.end();
-        finish::remember(&mut config.screenshot, &end.session);
-        config.save();
-        self.config_stamp = config_stamp();
+        self.change_config(config, |c| {
+            finish::remember(&mut c.screenshot, &end.session)
+        });
         if end.open_settings {
             self.show_settings();
         }

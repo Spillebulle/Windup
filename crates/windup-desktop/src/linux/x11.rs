@@ -9,8 +9,8 @@ use windup_core::placement::Area;
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, InputFocus, MapState, PropMode,
-    Window,
+    AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, InputFocus, KeyButMask, MapState,
+    PropMode, Window,
 };
 use x11rb::wrapper::ConnectionExt as _;
 
@@ -132,6 +132,46 @@ pub fn activate(window: u32) {
     }
     let _ = conn.set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME);
     let _ = conn.flush();
+}
+
+/// Modifiers still held after [`wait_keys_released`] gave up waiting.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Held {
+    pub shift: bool,
+    pub alt: bool,
+    pub super_: bool,
+}
+
+/// Waits, at most `cap`, for every key to be physically up, so the shortcut
+/// that asked for a paste does not mix into the simulated Ctrl+V. The same
+/// wait the Windows paste makes; says which modifiers are still down.
+pub fn wait_keys_released(cap: std::time::Duration) -> Held {
+    let Some((conn, root)) = connect() else {
+        return Held::default();
+    };
+    let start = std::time::Instant::now();
+    while start.elapsed() < cap {
+        let Some(keys) = conn.query_keymap().ok().and_then(|c| c.reply().ok()) else {
+            return Held::default();
+        };
+        if keys.keys.iter().all(|&b| b == 0) {
+            return Held::default();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    let Some(mask) = conn
+        .query_pointer(root)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .map(|r| r.mask)
+    else {
+        return Held::default();
+    };
+    Held {
+        shift: mask.contains(KeyButMask::SHIFT),
+        alt: mask.contains(KeyButMask::MOD1),
+        super_: mask.contains(KeyButMask::MOD4),
+    }
 }
 
 /// Asks for our window titled `title` to be fullscreen and above others

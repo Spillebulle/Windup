@@ -9,7 +9,8 @@
 //! every desktop and monitor: the handle tolerance, `MIN_DRAG`, the nudge
 //! step and the tool sizes. Each is turned into desktop units by the scale of
 //! the monitor under the pointer (`units_per_point`), or under the start of
-//! an annotation being drawn. An annotation keeps its width in desktop units
+//! an annotation being drawn (or the one a selected annotation is on, when
+//! the wheel resizes it). An annotation keeps its width in desktop units
 //! from then on, so moving it never changes its size.
 
 use image::RgbaImage;
@@ -245,11 +246,13 @@ impl Session {
         }
         let delta = steps * SIZE_STEP;
         let size = if let Some(id) = self.doc.selected
-            && let Some(current) = self.doc.get(id).map(|a| a.size)
+            && let Some(a) = self.doc.get(id)
         {
             // The annotation's size is in desktop units; the step, the
-            // limits and the figure shown are in points.
-            let k = self.units_per_point(self.here());
+            // limits and the figure shown are in points, by the scale of
+            // the monitor the annotation is on, wherever the pointer is.
+            let (current, b) = (a.size, a.shape.bounds());
+            let k = self.units_per_point((b.x + b.w / 2.0, b.y + b.h / 2.0));
             let size = (current / k + delta).clamp(MIN_TOOL_SIZE, MAX_TOOL_SIZE);
             self.settle();
             self.doc.set_size(id, size * k);
@@ -811,6 +814,19 @@ mod tests {
         s.scroll(1.0, 0.0);
         assert_eq!(s.doc.items[0].size, 7.5, "5 points");
         assert_eq!(s.size_flash.map(|f| f.0), Some(5.0), "shown in points");
+    }
+
+    #[test]
+    fn scrolling_an_annotation_uses_its_own_monitor_scale() {
+        let mut s = editing_at_150();
+        s.sizes.rect = 4.0;
+        draw(&mut s, Tool::Rect, [20.0, 20.0], [60.0, 50.0], NONE);
+        s.press([40.0, 20.0], NONE);
+        s.release([40.0, 20.0], NONE);
+        // The pointer leaves for the scale-1 monitor before the wheel turns.
+        s.pointer_moved([150.0, 50.0], 0.0);
+        s.scroll(1.0, 0.0);
+        assert_eq!(s.doc.items[0].size, 7.5, "5 points at 1.5");
     }
 
     #[test]

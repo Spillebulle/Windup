@@ -311,6 +311,8 @@ pub fn dispatch_paste_to_target(target: Target) {
                 crate::linux::x11::activate(window);
             }
         }
+        #[cfg(target_os = "linux")]
+        let held = crate::linux::x11::wait_keys_released(Duration::from_millis(300));
 
         #[cfg(not(target_os = "windows"))]
         {
@@ -324,6 +326,18 @@ pub fn dispatch_paste_to_target(target: Target) {
                 #[cfg(not(target_os = "macos"))]
                 let modifier = Key::Control;
 
+                // Still held at the cap: release them for the target, or it
+                // would see Ctrl+Alt+V, Ctrl+Shift+V and so on.
+                #[cfg(target_os = "linux")]
+                for (down, key) in [
+                    (held.shift, Key::Shift),
+                    (held.alt, Key::Alt),
+                    (held.super_, Key::Meta),
+                ] {
+                    if down {
+                        let _ = enigo.key(key, Direction::Release);
+                    }
+                }
                 let _ = enigo.key(modifier, Direction::Press);
                 let _ = enigo.key(Key::Unicode('v'), Direction::Click);
                 let _ = enigo.key(modifier, Direction::Release);

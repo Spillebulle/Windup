@@ -48,6 +48,9 @@ const EDGE_STEP: i32 = 24;
 const COVERAGE: f32 = 0.8;
 /// Smallest side of a window, in image pixels.
 const MIN_SIDE: usize = 40;
+/// A strip from one monitor border to the opposite one, no thicker than
+/// this (in screen points), is a panel or taskbar, not a window.
+const PANEL_MAX: f32 = 72.0;
 /// Candidate edges kept per direction.
 const MAX_CANDIDATES: usize = 96;
 
@@ -198,6 +201,10 @@ pub fn edge_rect(shot: &DesktopShot, at: (f32, f32)) -> Option<DRect> {
 
     let (rw, rh) = (r - l, b - t);
     if rw < MIN_SIDE || rh < MIN_SIDE || (rw + 4 >= w && rh + 4 >= h) {
+        return None;
+    }
+    let panel = PANEL_MAX * ppu * mon.scale;
+    if (rw + 4 >= w && (rh as f32) <= panel) || (rh + 4 >= h && (rw as f32) <= panel) {
         return None;
     }
     Some(DRect {
@@ -434,6 +441,26 @@ mod tests {
         near(
             edge_rect(&s, (400.0, 300.0)).unwrap(),
             r(0.0, 30.0, 800.0, 570.0),
+            2.0,
+        );
+    }
+
+    #[test]
+    fn edges_give_none_on_a_panel() {
+        // A 48-point taskbar along the bottom, on a monitor at scale 1.5.
+        let mut img = RgbaImage::from_pixel(1200, 900, Rgba([180, 180, 180, 255]));
+        for x in 0..1200 {
+            for y in 828..900 {
+                img.put_pixel(x, y, Rgba([30, 30, 30, 255]));
+            }
+        }
+        let mut s = shot(img, r(0.0, 0.0, 1200.0, 900.0));
+        s.monitors[0].scale = 1.5;
+        assert_eq!(edge_rect(&s, (600.0, 860.0)), None);
+        // Above it, the wallpaper is the size of a maximised window: kept.
+        near(
+            edge_rect(&s, (600.0, 400.0)).unwrap(),
+            r(0.0, 0.0, 1200.0, 828.0),
             2.0,
         );
     }

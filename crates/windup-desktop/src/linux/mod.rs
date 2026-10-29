@@ -250,11 +250,7 @@ impl Background {
         let stamp = config_stamp();
         if stamp != self.config_stamp {
             self.config_stamp = stamp;
-            let before = config.launch_at_login;
-            *config = Config::load();
-            if config.launch_at_login != before {
-                autostart::sync(config.launch_at_login);
-            }
+            reload(config);
         }
         shared
             .max_items
@@ -347,8 +343,19 @@ impl Background {
     }
 
     fn save_popup_size(&mut self, config: &mut Config, w: f32, h: f32) {
-        config.clipboard.popup_width = w;
-        config.clipboard.popup_height = h;
+        self.change_config(config, |c| {
+            c.clipboard.popup_width = w;
+            c.clipboard.popup_height = h;
+        });
+    }
+
+    /// Applies `change` and saves. When the settings window saved since the
+    /// last look, its file is read first, so the save does not undo it.
+    pub(super) fn change_config(&mut self, config: &mut Config, change: impl FnOnce(&mut Config)) {
+        if config_stamp() != self.config_stamp {
+            reload(config);
+        }
+        change(config);
         config.save();
         self.config_stamp = config_stamp();
     }
@@ -378,6 +385,15 @@ pub fn popup_setup(config: &Config) -> PopupSetup {
             config.clipboard.popup_height.clamp(260.0, 1000.0),
         ),
         auto_paste: config.clipboard.auto_paste,
+    }
+}
+
+/// Reads config.json again, as the settings window left it.
+fn reload(config: &mut Config) {
+    let before = config.launch_at_login;
+    *config = Config::load();
+    if config.launch_at_login != before {
+        autostart::sync(config.launch_at_login);
     }
 }
 
