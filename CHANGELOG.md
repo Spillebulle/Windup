@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - Screen recording. Win+Shift+R (Super+Shift+R on Linux) opens the capture bar ready to record an area, a window or the whole screen, to MP4, WebM, MOV, MKV or a GIF, with the computer's sound and the microphone if you turn them on. A small bar with a timer, pause and stop stays out of the recording; the same keys stop it, Win+Shift+P pauses it and Esc throws it away. A notice says where the file went, with a button that opens the folder.
 - Recordings are encoded on the graphics card where it can (NVENC, AMF, Quick Sync, VA-API), and Windup only offers the encoders it has seen work on your computer. FFmpeg comes with Windup, with its licence and a note saying where its source is.

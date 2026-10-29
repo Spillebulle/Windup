@@ -47,6 +47,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.0" date="2026-10-29">
+      <description>
+        <p>Screen recording: an area, a window or the whole screen to MP4, WebM, MOV, MKV or GIF, with optional computer sound and microphone, a recording bar that stays out of the video, and a Video settings pane.</p>
+      </description>
+    </release>
     <release version="0.2.2" date="2026-10-29">
       <description>
         <p>After an update, the running Windup hands over to the new version by itself instead of answering the shortcuts until it is stopped.</p>

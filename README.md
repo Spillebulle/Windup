@@ -21,20 +21,20 @@
 
 ## Install
 
-**Windup 0.2.2.** Take the installer for your PC, or browse the
+**Windup 0.3.0.** Take the installer for your PC, or browse the
 [release itself](https://github.com/Spillebulle/Windup/releases/latest) for the
 notes.
 
 | | x64 | ARM64 |
 |---|---|---|
-| Windows | [Installer](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/windup-setup-0.2.2-x64.exe) | [Installer](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/windup-setup-0.2.2-arm64.exe) |
-| Windows, `.msi` to deploy | [`.msi`](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/windup-0.2.2-x64.msi) | [`.msi`](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/windup-0.2.2-arm64.msi) |
-| Windows, no installer | [`.zip`](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/windup-0.2.2-x86_64-pc-windows-msvc.zip) | [`.zip`](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/windup-0.2.2-aarch64-pc-windows-msvc.zip) |
-| Debian, Ubuntu, Mint, Pop!\_OS | [`.deb`](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/windup_0.2.2_amd64.deb) | |
-| Fedora, openSUSE | [`.rpm`](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/windup-0.2.2-1.x86_64.rpm) | |
-| Arch, CachyOS, EndeavourOS, Manjaro | [`.pkg.tar.zst`](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/windup-bin-0.2.2-1-x86_64.pkg.tar.zst) | |
-| Any other Linux | [AppImage](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/Windup-0.2.2-x86_64.AppImage) | |
-| Linux, no package | [`.tar.gz`](https://github.com/Spillebulle/Windup/releases/download/v0.2.2/windup-0.2.2-x86_64-unknown-linux-gnu.tar.gz) | |
+| Windows | [Installer](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/windup-setup-0.3.0-x64.exe) | [Installer](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/windup-setup-0.3.0-arm64.exe) |
+| Windows, `.msi` to deploy | [`.msi`](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/windup-0.3.0-x64.msi) | [`.msi`](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/windup-0.3.0-arm64.msi) |
+| Windows, no installer | [`.zip`](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/windup-0.3.0-x86_64-pc-windows-msvc.zip) | [`.zip`](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/windup-0.3.0-aarch64-pc-windows-msvc.zip) |
+| Debian, Ubuntu, Mint, Pop!\_OS | [`.deb`](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/windup_0.3.0_amd64.deb) | |
+| Fedora, openSUSE | [`.rpm`](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/windup-0.3.0-1.x86_64.rpm) | |
+| Arch, CachyOS, EndeavourOS, Manjaro | [`.pkg.tar.zst`](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/windup-bin-0.3.0-1-x86_64.pkg.tar.zst) | |
+| Any other Linux | [AppImage](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/Windup-0.3.0-x86_64.AppImage) | |
+| Linux, no package | [`.tar.gz`](https://github.com/Spillebulle/Windup/releases/download/v0.3.0/windup-0.3.0-x86_64-unknown-linux-gnu.tar.gz) | |
 
 The installer asks Windows for permission once, installs for everyone on the
 PC, adds Windup to the Start menu and starts it. Uninstall it from Settings,
@@ -45,8 +45,8 @@ You need Windows 10 or 11 and a GPU with Direct3D 12 or Vulkan, which is
 essentially any machine from the last ten years.
 
 On Linux, install the package for your distribution (`sudo apt install
-./windup_0.2.2_amd64.deb`, `sudo dnf install ./windup-0.2.2-1.x86_64.rpm`,
-`sudo pacman -U windup-bin-0.2.2-1-x86_64.pkg.tar.zst`) and start Windup from
+./windup_0.3.0_amd64.deb`, `sudo dnf install ./windup-0.3.0-1.x86_64.rpm`,
+`sudo pacman -U windup-bin-0.3.0-1-x86_64.pkg.tar.zst`) and start Windup from
 the app menu. Each of the three packages also adds the
 [Spillebulle package archive](https://spillebulle.github.io/packages/), so
 Windup updates with the rest of the system (`sudo apt upgrade`,
