@@ -398,7 +398,15 @@ impl Run {
         };
         let args = segment_args(&job, self.cfg.container);
         log::debug!("segment {index}: ffmpeg {}", args.join(" "));
-        let mut child = ffmpeg::command(&self.ffmpeg)
+        let mut command = ffmpeg::command(&self.ffmpeg);
+        #[cfg(target_os = "windows")]
+        if matches!(job.source, Source::Gdigrab { .. }) {
+            command.env(
+                "__COMPAT_LAYER",
+                super::windows::compat_layer(std::env::var("__COMPAT_LAYER").ok().as_deref()),
+            );
+        }
+        let mut child = command
             .args(&args)
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
@@ -547,22 +555,11 @@ impl Run {
                     None => "ffmpeg stopped.".into(),
                 }),
         };
-        // The two fallbacks are independent: a source that fails at once is
-        // tried as its fallback, and that new segment may still lose its
-        // hardware encoder next.
-        if early && ffmpeg_failed && !self.source_fell_back && self.factory.fallback().is_some() {
-            log::warn!(
-                "segment {index}: the screen source failed at once ({why}); using its fallback from here on"
-            );
-            self.source_fell_back = true;
-            match self.open_segment(index) {
-                Ok(seg) => {
-                    self.seg = Some(seg);
-                    return;
-                }
-                Err(e) => why = e,
-            }
-        } else if early && ffmpeg_failed && self.hardware && !self.fell_back {
+        // The two fallbacks are independent, and the encoder is the likelier
+        // culprit, so a hardware encoder that failed at once is swapped first
+        // with the source kept. Only a failure after that (or with no
+        // hardware encoder to blame) moves to the source's fallback.
+        if early && ffmpeg_failed && self.hardware && !self.fell_back {
             let sw = software(self.codec);
             log::warn!(
                 "segment {index}: {} failed at once ({why}); using {sw} from here on",
@@ -571,6 +568,22 @@ impl Run {
             self.encoder = sw;
             self.hardware = false;
             self.fell_back = true;
+            match self.open_segment(index) {
+                Ok(seg) => {
+                    self.seg = Some(seg);
+                    return;
+                }
+                Err(e) => why = e,
+            }
+        } else if early
+            && ffmpeg_failed
+            && !self.source_fell_back
+            && self.factory.fallback().is_some()
+        {
+            log::warn!(
+                "segment {index}: the screen source failed at once ({why}); using its fallback from here on"
+            );
+            self.source_fell_back = true;
             match self.open_segment(index) {
                 Ok(seg) => {
                     self.seg = Some(seg);
@@ -1129,9 +1142,50 @@ mod tests {
         let mut j = job(&dir, vec![]);
         j.factory = Box::new(BrokenSource);
         let mut rec = fallback(&dir, j, false);
-        sleep(3.0);
+        sleep(4.0);
         assert!(rec.failed().is_none(), "{:?}", rec.failed());
         let out = rec.stop().join().unwrap().unwrap();
+        let text = info(&ff, &out);
+        assert!(text.contains("64x64") && text.contains("h264"), "{text}");
+    }
+
+    /// A working source (the pattern) whose fallback is one ffmpeg cannot
+    /// open, counting the segments that opened the working one.
+    struct WorkingSource {
+        opened: Arc<AtomicU32>,
+    }
+
+    impl SourceFactory for WorkingSource {
+        fn source(&self) -> Source {
+            PatternFactory { w: 64, h: 64 }.source()
+        }
+        fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
+            self.opened.fetch_add(1, Ordering::Relaxed);
+            PatternFactory { w: 64, h: 64 }.open_pipe()
+        }
+        fn fallback(&self) -> Option<Source> {
+            BrokenSource.source().into()
+        }
+    }
+
+    #[test]
+    fn a_failing_hardware_encoder_keeps_a_working_source() {
+        let Some(ff) = ffmpeg_or_skip("a_failing_hardware_encoder_keeps_a_working_source") else {
+            return;
+        };
+        let dir = TempDir::new("encoder-not-source");
+        let opened = Arc::new(AtomicU32::new(0));
+        let mut j = job(&dir, vec![]);
+        j.factory = Box::new(WorkingSource {
+            opened: Arc::clone(&opened),
+        });
+        let mut rec = fallback(&dir, j, false);
+        sleep(2.0);
+        assert!(rec.failed().is_none(), "{:?}", rec.failed());
+        let out = rec.stop().join().unwrap().unwrap();
+        // The first segment and its retry with the software encoder both
+        // read the original source; its (broken) fallback was never used.
+        assert!(opened.load(Ordering::Relaxed) >= 2);
         let text = info(&ff, &out);
         assert!(text.contains("64x64") && text.contains("h264"), "{text}");
     }

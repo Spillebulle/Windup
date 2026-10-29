@@ -32,10 +32,10 @@ use windup_core::capture::geometry::{DRect, DesktopShot, MonitorShot};
 use windup_core::capture::pick::WindowRect;
 
 /// Per-monitor-aware for this thread until dropped, then whatever it was.
-struct DpiScope(*mut c_void);
+pub(crate) struct DpiScope(*mut c_void);
 
 impl DpiScope {
-    fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         // SAFETY: plain call; a null return (old Windows) is restored as null,
         // which `SetThreadDpiAwarenessContext` ignores.
         Self(unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) })

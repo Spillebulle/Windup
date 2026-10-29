@@ -92,8 +92,12 @@ fn screen_factory(area: Option<(i32, i32, u32, u32)>) -> Result<Box<dyn SourceFa
                 .or(layouts.first())
                 .ok_or("no monitors found")?;
             let rect = area.map_or_else(|| default(primary.x, primary.y), rect);
-            let f = super::windows::WindowsFactory::new(rect, &layouts)
-                .ok_or("the area is too small to record")?;
+            let f = super::windows::WindowsFactory::new(
+                rect,
+                &layouts,
+                &super::windows::dxgi_outputs(),
+            )
+            .ok_or("the area is too small to record")?;
             Ok(Box::new(f))
         }
         #[cfg(target_os = "linux")]
