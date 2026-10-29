@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Screenshots. Win+Shift+S (Super+Shift+S on Linux) opens the capture bar over a frozen copy of the screen: drag an area, click a window or take the whole screen, then draw on it, blur or mosaic parts of it, and copy or save it. Print Screen takes a screenshot at once and opens it in the editor.
 - Two new settings panes, Capture launcher and Screenshot: the shortcuts, the save folder, the file name and format, and the editor's keys.

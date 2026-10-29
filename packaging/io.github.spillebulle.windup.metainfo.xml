@@ -47,6 +47,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.0" date="2026-10-29">
+      <description>
+        <p>Screenshots: a capture bar over a frozen screen for an area, a window or a whole screen, an editor to draw, blur and mosaic, and copy or save. The shortcuts set in the settings window are used now.</p>
+      </description>
+    </release>
     <release version="0.1.2" date="2026-10-28">
       <description>
         <p>The clipboard history opens at the pointer on COSMIC, the list shows when each entry was copied, and settings show the version with a link to the source.</p>
