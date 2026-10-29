@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Windup is a desktop utility for Windows and Linux (Rust + egui/eframe/wgpu) that runs a settings window plus a set of global-hotkey "tools". Four tools exist today: **Clipboard history** (Win+V → floating popup at the cursor), **Paste plain text** (Win+Shift+V → strips formatting and pastes), **Capture launcher** (Print Screen → capture bar over a frozen screen) and **Screenshot** (Ctrl+Shift+S → straight to the editor).
+Windup is a desktop utility for Windows and Linux (Rust + egui/eframe/wgpu) that runs a settings window plus a set of global-hotkey "tools". Five tools exist today: **Clipboard history** (Win+V → floating popup at the cursor), **Paste plain text** (Win+Shift+V → strips formatting and pastes), **Capture launcher** (Print Screen → capture bar over a frozen screen), **Screenshot** (Ctrl+Shift+S → straight to the editor) and **Video** (Win+Shift+R → capture bar in Video mode, records to a file; pressed again it stops).
 
 ## Commands
 
@@ -84,13 +84,15 @@ A tool is a `ToolId` variant + a config struct + a settings pane + a hotkey bran
 
 Configured shortcuts are honoured: `core/hotkeys.rs` is the one table (`bindings(config)` -> `(Shortcut, Action)`, first enabled tool wins; `clashes` lists the losers, which the settings show as a caution keycap; plus the per-backend key names `windows_vk`, `xkb_keysym_name`, `portal_trigger`). The Windows hook reads its bindings from it, X11 rebinds when they change, and the settings window sets `hotkey_hint` so a Wayland desktop's shortcut rows say how to bind the keys. So a tool also needs an `Action` there. On Wayland it needs an `ipc::Command` and a `windup --flag`. Two caveats: portal shortcuts (KDE/GNOME) are registered once at start, and COSMIC gets Windup's defaults written once into its custom shortcuts, never moved, so a changed key must be changed in COSMIC Settings too.
 
-## Capture (screenshots)
+## Capture (screenshots and video)
 
 Capture launcher (Print Screen, bar over a frozen desktop) and Screenshot (Ctrl+Shift+S, straight to the editor) share one session. Windup photographs the desktop first and the overlay draws over the photo.
 
 - **core `capture/`**: `geometry` (desktop units, monitors), `selection` (drag/resize/nudge), `annotate` (tools, shapes), `raster` (draws them, blur, mosaic), `pick` (window choice, `edge_rect` fallback), `output` (file names, PNG/JPEG, default folder), `backend` (pure `detect` of which mechanism takes the still and finds windows, like `platform::detect`), `session` (pure state machine from freeze to copy/save/cancel).
 - **ui `capture/`**: `CaptureView`, the overlay drawn per monitor: bar, loupe, marching ants, annotations. Painted, no platform knowledge.
 - **desktop**: `capture/` picks and runs the stills (`grab_all` tries `still_order` in turn; `windows` GDI, `x11`, `ipcrects` Sway/Hyprland, `kwin_rects`, `pixels`/`surfaces`/`split` for Wayland geometry, `gate` ignores a hotkey while one capture is open, `finish` copies/saves). `overlay.rs` is the overlay and notice on Windows and X11. On Wayland: `linux/capture.rs` drives it and `linux/wayland/{overlay,pane,gpu,notice}.rs` draw it with egui-wgpu on layer surfaces (or toplevels on the window host); `linux/kde.rs` is KWin ScreenShot2 (needs the installed package, the AppImage falls back to the portal) plus a KWin script for window rects; `linux/portal.rs` has the GNOME screenshot portal.
+
+**Video** starts from the same launcher (Video mode) and records with a bundled ffmpeg (`tools/fetch-ffmpeg.sh`; `ffmpeg::locate`: `WINDUP_FFMPEG`, beside the exe, `../lib/windup/`, `PATH` in debug builds). Core `video/`: `format` (containers, `codecs_for`, `job_rate`), `probe` (encoder candidates, `pick_encoder`), `avail` (why Video or sound is off; `ProbeState`, `AudioDevices` as the settings pane gets them), `command` (ffmpeg arguments per segment), `recorder` (pause/stop state, segments joined at the end), `compose`/`pacing`/`pcm` (frames and sound for the pipe), `place` (the recording bar outside the recorded area), `screencast` (ScreenCast portal decisions). Desktop: `video/ffmpeg.rs` probes once per ffmpeg (cached in `encoders.json`), `video/live.rs` runs one recording for every host and picks the frame source, `recording.rs` is the bar and notice on Windows/X11, `linux/video/` the Wayland sources (screencopy, ScreenCast portal) and PipeWire sound. Esc cancels globally where `platform::recording_keys` finds a way; elsewhere the Video pane says so (`EscCaution`).
 
 ## Packaging and releases
 

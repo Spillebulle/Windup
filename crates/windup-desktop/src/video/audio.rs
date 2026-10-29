@@ -15,15 +15,7 @@ use super::run::AudioSource;
 
 /// The sound devices settings can offer, by the names `open_system` and
 /// `open_mic` take.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct AudioDevices {
-    /// Where computer sound can be recorded from.
-    pub outputs: Vec<String>,
-    /// Microphones.
-    pub inputs: Vec<String>,
-    /// False when there is no sound system to ask (Linux without PipeWire).
-    pub available: bool,
-}
+pub(crate) use windup_core::video::avail::AudioDevices;
 
 /// The source every device feeds. Unused where there is no sound backend
 /// (Linux built without PipeWire, macOS).

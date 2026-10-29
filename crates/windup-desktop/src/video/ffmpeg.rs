@@ -21,12 +21,7 @@ use windup_core::video::{
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PARALLEL: usize = 4;
 
-#[derive(Clone)]
-pub(crate) enum ProbeState {
-    Running,
-    Done(Probe),
-    NoFfmpeg,
-}
+pub(crate) use windup_core::video::avail::ProbeState;
 
 /// `Running` until there is any answer: the cache for this ffmpeg, then the
 /// fresh probe, which replaces it.
@@ -284,6 +279,29 @@ pub(crate) fn start_probe() {
             write_cache(&ffmpeg, &probe);
             publish(ProbeState::Done(probe));
         })
+    });
+}
+
+/// How long the settings child waits for the recording process's first
+/// probe to be cached, asking once a second.
+const FOLLOW_TRIES: u32 = 120;
+
+/// For the settings child, which never probes: no ffmpeg, or the cache the
+/// recording process writes. On a first start that process may still be
+/// probing when settings open, so the cache is asked for until it is there.
+pub(crate) fn follow_cache() {
+    std::thread::spawn(|| {
+        if locate().is_none() {
+            publish(ProbeState::NoFfmpeg);
+            return;
+        }
+        for _ in 0..FOLLOW_TRIES {
+            if let Some(p) = read_cache() {
+                publish(ProbeState::Done(p));
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
     });
 }
 

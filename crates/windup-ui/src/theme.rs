@@ -76,6 +76,8 @@ pub mod metrics {
     pub const RADIUS_SEG: f32 = 4.0;
     /// Width of an icon-only segment in the capture bar (mockup `.si`).
     pub const SEG_ICON_W: f32 = 28.0;
+    /// A settings row's dropdown trigger (§7.7), as wide as the theme picker's.
+    pub const DROPDOWN_W: f32 = 200.0;
     /// The chevron of a dropdown trigger (§7.7, mockup `.dd svg.chev`).
     pub const CHEVRON: f32 = 12.0;
     /// Gap between an icon and its label inside a control (mockup `gap: 6px`).

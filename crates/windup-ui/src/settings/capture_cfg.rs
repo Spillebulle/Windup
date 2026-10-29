@@ -104,7 +104,7 @@ pub(super) fn hotkey_note(ui: &mut Ui, p: &Palette, hint: HotkeyHint) {
     let note = match hint {
         HotkeyHint::None => return,
         HotkeyHint::Command => {
-            "Bind windup --capture and windup --screenshot in your desktop's keyboard settings."
+            "Bind windup --capture, windup --screenshot and windup --record in your desktop's keyboard settings."
         }
         HotkeyHint::Cosmic => {
             "On COSMIC, change it in COSMIC Settings, Keyboard, Custom shortcuts too."

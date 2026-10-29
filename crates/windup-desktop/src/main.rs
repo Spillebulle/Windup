@@ -44,6 +44,9 @@ struct WindupApp {
     /// The recording's keys as last bound (live only while one runs).
     applied_recording: Vec<(windup_core::Shortcut, windup_core::hotkeys::Action)>,
     settings_only: bool,
+    /// Whether the Video pane was open last frame, to list the sound
+    /// devices again each time it opens.
+    video_pane_open: bool,
     popup_view: PopupView,
     popup_open: bool,
     popup_opened_at: Option<std::time::Instant>,
@@ -92,23 +95,30 @@ fn hotkey_hint(plan: Plan, settings_only: bool) -> windup_ui::HotkeyHint {
     windup_ui::HotkeyHint::None
 }
 
-/// Whether this desktop has no way to take Esc globally while a recording
-/// runs (Sway, GNOME without the GlobalShortcuts portal, Weston), which the
-/// Video settings must say. Asked of the desktop as `hotkey_hint` is.
+/// What the Video settings must say where this desktop has no way to take
+/// Esc globally while a recording runs (Sway, GNOME without the
+/// GlobalShortcuts portal, Weston): Esc on the recording bar where there is
+/// one (Sway), nothing where there is none (GNOME, Weston). Asked of the
+/// desktop as `hotkey_hint` is.
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-fn esc_only_on_bar(plan: Plan, settings_only: bool) -> bool {
+fn esc_caution(plan: Plan, settings_only: bool) -> windup_ui::EscCaution {
     #[cfg(target_os = "linux")]
     {
+        use windup_core::capture::backend::{BarHost, record_bar_host};
         let plan = if settings_only { linux::detect() } else { plan };
         let cosmic = linux::cosmic::is_cosmic();
         // The portal is asked only where it would be the way in.
         let portal = plan.hotkeys == platform::HotkeysVia::Command
             && !cosmic
             && linux::portal::global_shortcuts_available();
-        return !platform::recording_keys(plan.hotkeys, cosmic, portal).global_esc();
+        if platform::recording_keys(plan.hotkeys, cosmic, portal).global_esc() {
+            return windup_ui::EscCaution::None;
+        }
+        let bar = record_bar_host(&capture::facts()) != BarHost::Hidden;
+        return windup_ui::EscCaution::new(false, bar);
     }
     #[allow(unreachable_code)]
-    false
+    windup_ui::EscCaution::None
 }
 
 impl WindupApp {
@@ -139,7 +149,9 @@ impl WindupApp {
         let mut plan = startup.plan;
         let mut monitor = None;
         let mut hotkey_listener = None;
-        if !startup.settings_only {
+        if startup.settings_only {
+            video::ffmpeg::follow_cache();
+        } else {
             video::ffmpeg::start_probe();
             video::availability::refresh();
             #[cfg(target_os = "linux")]
@@ -202,7 +214,7 @@ impl WindupApp {
             config,
             settings_view: SettingsView {
                 hotkey_hint: hotkey_hint(plan, startup.settings_only),
-                esc_only_on_bar: esc_only_on_bar(plan, startup.settings_only),
+                esc_caution: esc_caution(plan, startup.settings_only),
                 ..SettingsView::default()
             },
             history,
@@ -211,6 +223,7 @@ impl WindupApp {
             applied_bindings,
             applied_recording,
             settings_only: startup.settings_only,
+            video_pane_open: false,
             popup_view: PopupView::new(),
             popup_open: false,
             popup_opened_at: None,
@@ -237,6 +250,30 @@ impl WindupApp {
 
     fn resolved_palette(&self, mode: Mode) -> Palette {
         resolve_palette(&self.config, mode)
+    }
+
+    /// Hands the Video pane the probe and the sound devices while it is
+    /// open. The devices are listed again each time it opens, so one plugged
+    /// in since is offered; until the answers are in, it is redrawn now and
+    /// then to show them.
+    fn sync_video_facts(&mut self, ctx: &egui::Context) {
+        use video::availability::{probe_state, refresh_sound, sound_list};
+        let open = self.settings_view.active_pane == windup_ui::settings::SettingsPane::Video;
+        if open && !self.video_pane_open {
+            let _ = refresh_sound();
+        }
+        self.video_pane_open = open;
+        if !open {
+            return;
+        }
+        let facts = windup_ui::VideoFacts {
+            probe: probe_state(),
+            sound: sound_list(),
+        };
+        if facts.probe == video::ffmpeg::ProbeState::Running || facts.sound.is_none() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        self.settings_view.video = facts;
     }
 }
 
@@ -415,6 +452,7 @@ impl eframe::App for WindupApp {
         // -------------------------------------------------------------
         // Main Window: Settings Hub
         // -------------------------------------------------------------
+        self.sync_video_facts(ctx);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(palette.window))
             .show(ctx, |ui| {

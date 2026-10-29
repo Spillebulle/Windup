@@ -14,6 +14,8 @@ use crate::theme::{Mode, Palette, metrics, strong, text};
 use egui::{Rect, Stroke, Ui, pos2, vec2};
 use windup_core::Config;
 
+pub use video_cfg::VideoFacts;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SettingsPane {
     #[default]
@@ -90,16 +92,55 @@ pub enum HotkeyHint {
 }
 
 /// The Video pane's caution where the desktop gives Windup no way to take
-/// Esc while a recording runs (`SettingsView::esc_only_on_bar`).
+/// Esc while a recording runs but shows the recording bar (Sway).
 pub const ESC_ONLY_ON_BAR: &str = "On this desktop Esc only cancels from the recording bar; bind windup --record-cancel in your desktop's settings.";
+
+/// The same where there is no recording bar either (GNOME without the
+/// GlobalShortcuts portal, Weston).
+pub const ESC_NO_BAR: &str = "On this desktop Esc does not cancel a recording; bind windup --record-cancel in your desktop's settings.";
+
+/// Which of those the Video pane shows. The UI knows no platform, so the
+/// desktop crate decides with [`EscCaution::new`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EscCaution {
+    /// Esc cancels from anywhere: nothing to say.
+    #[default]
+    None,
+    /// [`ESC_ONLY_ON_BAR`].
+    OnlyOnBar,
+    /// [`ESC_NO_BAR`].
+    NoBar,
+}
+
+impl EscCaution {
+    /// From whether Esc is taken globally while recording, and whether the
+    /// recording bar is shown.
+    pub fn new(global_esc: bool, bar_shown: bool) -> Self {
+        match (global_esc, bar_shown) {
+            (true, _) => EscCaution::None,
+            (false, true) => EscCaution::OnlyOnBar,
+            (false, false) => EscCaution::NoBar,
+        }
+    }
+
+    pub fn line(self) -> Option<&'static str> {
+        match self {
+            EscCaution::None => None,
+            EscCaution::OnlyOnBar => Some(ESC_ONLY_ON_BAR),
+            EscCaution::NoBar => Some(ESC_NO_BAR),
+        }
+    }
+}
 
 pub struct SettingsView {
     pub active_pane: SettingsPane,
     pub hotkey_hint: HotkeyHint,
-    /// Esc cannot be taken globally here (Sway, GNOME without the
-    /// GlobalShortcuts portal): the Video pane shows [`ESC_ONLY_ON_BAR`].
+    /// What the Video pane says about Esc where it cannot be taken globally.
     /// The UI knows no platform, so the desktop crate sets this.
-    pub esc_only_on_bar: bool,
+    pub esc_caution: EscCaution,
+    /// The probe and the sound devices, which the desktop keeps current
+    /// while the Video pane is open.
+    pub video: VideoFacts,
 }
 
 impl Default for SettingsView {
@@ -107,7 +148,8 @@ impl Default for SettingsView {
         Self {
             active_pane: SettingsPane::Overview,
             hotkey_hint: HotkeyHint::None,
-            esc_only_on_bar: false,
+            esc_caution: EscCaution::None,
+            video: VideoFacts::default(),
         }
     }
 }
@@ -314,7 +356,15 @@ impl SettingsView {
                                 screenshot_cfg::render(ui, config, p, self.hotkey_hint);
                             }
                             SettingsPane::Video => {
-                                video_cfg::render(ui, config, p);
+                                video_cfg::render(
+                                    ui,
+                                    config,
+                                    p,
+                                    mode,
+                                    self.hotkey_hint,
+                                    &self.video,
+                                    self.esc_caution,
+                                );
                             }
                         }
                     });
@@ -382,6 +432,17 @@ mod tests {
             assert!(!pane.label().is_empty());
             assert!(pane.blurb().ends_with('.'), "{pane:?}");
         }
+    }
+
+    #[test]
+    fn the_esc_caution_depends_on_the_bar() {
+        assert_eq!(EscCaution::new(true, true), EscCaution::None);
+        assert_eq!(EscCaution::new(true, false), EscCaution::None);
+        assert_eq!(EscCaution::new(false, true), EscCaution::OnlyOnBar);
+        assert_eq!(EscCaution::new(false, false), EscCaution::NoBar);
+        assert_eq!(EscCaution::None.line(), None);
+        assert_eq!(EscCaution::OnlyOnBar.line(), Some(ESC_ONLY_ON_BAR));
+        assert_eq!(EscCaution::NoBar.line(), Some(ESC_NO_BAR));
     }
 
     #[test]

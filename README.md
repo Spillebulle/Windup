@@ -12,11 +12,11 @@
 
 <p align="center">
   Clipboard history at your cursor · plain-text paste · screenshots with an
-  editor · one settings window · runs in the background
+  editor · screen recording · one settings window · runs in the background
 </p>
 
-> **Early days.** Four tools work, on Windows and on Linux: clipboard history,
-> plain-text paste and two ways to take a screenshot. [What is not there yet](#what-is-not-there-yet) is honest about the
+> **Early days.** Five tools work, on Windows and on Linux: clipboard history,
+> plain-text paste, two ways to take a screenshot and screen recording. [What is not there yet](#what-is-not-there-yet) is honest about the
 > rest.
 
 ## Install
@@ -77,6 +77,18 @@ click a window or take the whole screen. Then draw on it with a pen, boxes and
 ellipses, blur or mosaic what should not be seen, and copy or save it.
 Ctrl+Shift+S skips the bar and opens a screenshot in the editor at once.
 
+## Screen recording
+
+Press Win+Shift+R (Super+Shift+R) and the capture bar opens ready to record:
+pick an area, a window or the whole screen, and the frame rate, the bitrate
+and whether to record the computer's sound or the microphone, both off until
+you turn them on. A small bar with a timer, pause and stop stays out of the
+picture while you record. Press the same keys again to stop, Win+Shift+P to
+pause, Esc to throw the recording away. The file lands in Videos, Windup, as
+MP4 unless you choose WebM, MOV, MKV or a GIF, encoded on the graphics card
+where it can be. The Video settings pane has the codec, the encoder and the
+sound devices.
+
 ## What is not there yet
 
 - **No tray icon, and no start at sign-in on Windows.** Both settings are
@@ -90,8 +102,6 @@ Ctrl+Shift+S skips the bar and opens a screenshot in the editor at once.
   overlay layer other desktops offer to itself. Pasting asks for permission
   once.
 - **No ARM64 Linux packages yet**, and no macOS.
-- **No screen recording.** The capture bar is for stills; recording is not
-  built yet.
 
 ## Controls
 
@@ -101,11 +111,13 @@ Ctrl+Shift+S skips the bar and opens a screenshot in the editor at once.
 | Win+Shift+V, Super+Shift+V | Paste the clipboard as plain text |
 | Print Screen | Open the capture bar |
 | Ctrl+Shift+S | Take a screenshot at once |
+| Win+Shift+R, Super+Shift+R | Start a recording, or stop it |
+| Win+Shift+P, Super+Shift+P | Pause or resume a recording |
 | Type | Search the history |
 | Up, Down | Move through the history |
 | Enter | Paste the selected entry |
 | Delete | Remove the selected entry |
-| Esc | Close the popup |
+| Esc | Close the popup, or cancel a recording |
 
 Every tool can be switched off in the settings window, and every shortcut
 changed there. Where a Linux desktop keeps the keys to itself, they live in
@@ -127,4 +139,6 @@ packages for libxkbcommon, Wayland, X11 and libxdo.
 
 GPL-3.0-or-later, see [`LICENSE`](LICENSE). The Archivo typeface is under the
 SIL Open Font Licence ([`assets/OFL.txt`](assets/OFL.txt)); icons are from
-[Lucide](https://lucide.dev) (ISC).
+[Lucide](https://lucide.dev) (ISC). Recordings are encoded by a bundled
+[FFmpeg](https://ffmpeg.org), a GPL build that ships with its licence and a
+note saying where its source is.

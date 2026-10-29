@@ -133,10 +133,48 @@ change the key in COSMIC Settings, Keyboard, Custom shortcuts as well.
 
 ## Recording the screen
 
-KDE and GNOME keep screen copying to themselves, so there Windup records
-through the screen sharing portal: the first time, the desktop asks once
-whether Windup may share every screen, and the answer is remembered. Stopping
-the sharing from the desktop's own indicator ends the recording.
+Bind **Super+Shift+R** to `windup --record`, which opens the capture bar ready
+to record and, pressed again, stops the recording. Where Windup binds the
+other shortcuts for you, it binds this one the same way. While a recording
+runs there are three more commands, for desktops where you bind keys by hand:
+
+| Command | Does | Usual key |
+|---|---|---|
+| `windup --record-pause` | Pause or resume | Super+Shift+P |
+| `windup --record-stop` | Stop and save | |
+| `windup --record-cancel` | Stop and throw the recording away | Esc |
+
+Where the frames come from depends on the desktop:
+
+| | Records with | The recording bar |
+|---|---|---|
+| **COSMIC, Sway, Hyprland, river, Wayfire, labwc, niri** | the compositor's screencopy protocol, no question asked | beside the recorded area |
+| **KDE Plasma 6, GNOME** | the screen sharing portal, which asks once | KDE: beside the recorded area; GNOME: none |
+| **X11** | the X server directly | beside the recorded area |
+
+- **KDE and GNOME ask once.** The first time, the desktop asks whether Windup
+  may share every screen; the answer is remembered, so it does not ask
+  again. Stopping the sharing from the desktop's own indicator ends the
+  recording.
+- **The bar is never in the picture.** It sits just outside the recorded
+  area, or on another monitor when there is no room. On GNOME and Weston
+  there is nowhere to put it, so there is no bar: Super+Shift+R stops the
+  recording.
+- **Sound** (the computer's and the microphone's) needs PipeWire.
+
+Esc always cancels a recording, where the desktop lets Windup hear it:
+
+- **X11, COSMIC, KDE, GNOME 48 and newer, Hyprland:** from anywhere. On
+  COSMIC, Windup adds the recording's keys to Custom shortcuts while it runs
+  and takes them out again afterwards; KDE, GNOME and Hyprland may ask once
+  to let Windup have them.
+- **Sway, river, niri, labwc, Wayfire:** only while the recording bar has
+  the keyboard. Bind Esc, or another key, to `windup --record-cancel` to
+  cancel from anywhere.
+- **GNOME before 48, Weston:** Esc does not cancel, as there is no bar to
+  press it on. Bind `windup --record-cancel`.
+
+The Video settings pane says which of these applies on your desktop.
 
 ## Starting at login
 

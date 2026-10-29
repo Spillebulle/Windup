@@ -14,6 +14,27 @@ pub const NO_ENCODER: &str = "No video encoder works on this computer.";
 pub const NO_SCREEN_SOURCE: &str = "This desktop does not let applications record the screen.";
 pub const SOURCES_CHECKING: &str = "Windup is still checking how this desktop can be recorded.";
 
+/// The probe as the process that runs it publishes it, and as the settings
+/// window is handed it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ProbeState {
+    /// No answer yet, not even a cached one.
+    #[default]
+    Running,
+    Done(Probe),
+    NoFfmpeg,
+}
+
+impl ProbeState {
+    pub fn probed(&self) -> Probed<'_> {
+        match self {
+            ProbeState::Running => Probed::Running,
+            ProbeState::Done(p) => Probed::Done(p),
+            ProbeState::NoFfmpeg => Probed::NoFfmpeg,
+        }
+    }
+}
+
 /// What the encoder probe has found so far.
 #[derive(Clone, Copy, Debug)]
 pub enum Probed<'a> {
@@ -51,6 +72,28 @@ pub fn video(
         None => Err(SOURCES_CHECKING),
         Some(order) if order.iter().all(|m| *m == Moving::None) => Err(NO_SCREEN_SOURCE),
         Some(_) => Ok(()),
+    }
+}
+
+/// The sound devices there are to record from, by the names a recording
+/// opens them with.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AudioDevices {
+    /// Where computer sound can be recorded from.
+    pub outputs: Vec<String>,
+    /// Microphones.
+    pub inputs: Vec<String>,
+    /// False when there is no sound system to ask (Linux without PipeWire).
+    pub available: bool,
+}
+
+impl AudioDevices {
+    pub fn counts(&self) -> SoundDevices {
+        SoundDevices {
+            system: self.available,
+            outputs: self.outputs.len(),
+            inputs: self.inputs.len(),
+        }
     }
 }
 

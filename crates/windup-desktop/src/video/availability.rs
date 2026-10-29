@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use windup_core::capture::backend::{Moving, video_order};
 use windup_core::capture::session::ModeAvailability;
 use windup_core::config::VideoConfig;
-use windup_core::video::avail::{self, Probed, SoundDevices};
+use windup_core::video::avail::{self, AudioDevices};
 
 use super::audio::audio_devices;
 use super::ffmpeg::{PROBE, ProbeState};
@@ -32,17 +32,17 @@ use super::ffmpeg::{PROBE, ProbeState};
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) const FRESH_WAIT: Duration = Duration::from_millis(150);
 
-static SOUND: RwLock<Option<SoundDevices>> = RwLock::new(None);
+static SOUND: RwLock<Option<AudioDevices>> = RwLock::new(None);
 static LISTING: AtomicBool = AtomicBool::new(false);
 static SOURCES: RwLock<Option<Vec<Moving>>> = RwLock::new(None);
 static FINDING: AtomicBool = AtomicBool::new(false);
 
 /// What a sound listing that panicked leaves: a sound system with no
 /// devices, which the toggles report as "No sound device was found."
-const SOUND_FAILED: SoundDevices = SoundDevices {
-    system: true,
-    outputs: 0,
-    inputs: 0,
+const SOUND_FAILED: AudioDevices = AudioDevices {
+    outputs: Vec::new(),
+    inputs: Vec::new(),
+    available: true,
 };
 
 /// Runs `find` and keeps its answer in `slot`, or `failed` if it panics.
@@ -116,16 +116,20 @@ impl Refresh {
     }
 }
 
+/// Lists the sound devices again, on a thread.
+pub(crate) fn refresh_sound() -> Receiver<()> {
+    spawn_keep(
+        "sound-devices",
+        &SOUND,
+        &LISTING,
+        SOUND_FAILED,
+        audio_devices,
+    )
+}
+
 /// Finds the sound devices and the frame sources again, on threads.
 pub(crate) fn refresh() -> Refresh {
-    let sound = spawn_keep("sound-devices", &SOUND, &LISTING, SOUND_FAILED, || {
-        let d = audio_devices();
-        SoundDevices {
-            system: d.available,
-            outputs: d.outputs.len(),
-            inputs: d.inputs.len(),
-        }
-    });
+    let sound = refresh_sound();
     let sources = spawn_keep(
         "video-sources",
         &SOURCES,
@@ -138,24 +142,34 @@ pub(crate) fn refresh() -> Refresh {
 
 /// What is kept now. Never blocks.
 pub(crate) fn current(config: &VideoConfig) -> ModeAvailability {
-    let state = PROBE
-        .read()
-        .map(|g| g.clone())
-        .unwrap_or(ProbeState::Running);
-    let probed = match &state {
-        ProbeState::NoFfmpeg => Probed::NoFfmpeg,
-        ProbeState::Running => Probed::Running,
-        ProbeState::Done(p) => Probed::Done(p),
-    };
+    let state = probe_state();
     let sources = SOURCES.read().ok().and_then(|g| g.clone());
-    let video = avail::video(probed, config.container, config.codec, sources.as_deref());
-    let sound = SOUND.read().ok().and_then(|g| *g);
+    let video = avail::video(
+        state.probed(),
+        config.container,
+        config.codec,
+        sources.as_deref(),
+    );
+    let sound = sound_list().map(|d| d.counts());
     let (system_audio, mic) = avail::sound(sound);
     ModeAvailability {
         video,
         system_audio,
         mic,
     }
+}
+
+/// The probe as published now.
+pub(crate) fn probe_state() -> ProbeState {
+    PROBE
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or(ProbeState::Running)
+}
+
+/// The sound devices as last listed; `None` before the first list.
+pub(crate) fn sound_list() -> Option<AudioDevices> {
+    SOUND.read().ok().and_then(|g| g.clone())
 }
 
 /// For a capture built on the UI thread: what is kept, and a refresh
@@ -193,7 +207,7 @@ mod tests {
     #[test]
     fn a_failed_sound_listing_says_no_device_not_still_checking() {
         assert_eq!(
-            avail::sound(Some(SOUND_FAILED)),
+            avail::sound(Some(SOUND_FAILED.counts())),
             (Err(NO_SOUND_DEVICE), Err(NO_SOUND_DEVICE))
         );
     }
