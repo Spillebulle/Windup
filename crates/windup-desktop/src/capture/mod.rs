@@ -111,7 +111,9 @@ pub(crate) fn video_facts() -> Facts {
     {
         let mut f = facts();
         let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
-        f.portal_screencast = wayland && crate::linux::portal::screencast_available();
+        // A build without PipeWire could not read the streams.
+        f.portal_screencast =
+            cfg!(feature = "pipewire") && wayland && crate::linux::portal::screencast_available();
         f
     }
     #[cfg(not(target_os = "linux"))]

@@ -327,8 +327,13 @@ fi
 # The one format that runs on a distribution nobody chose, so it carries its
 # linked libraries. The dlopened display and Vulkan libraries are the host's,
 # deliberately: bundled ones would talk to the wrong driver. So is
-# libpipewire: it loads its modules from the host's PipeWire, which must be
-# the version it was built with.
+# libpipewire where the host has one: the client library loads its modules
+# from its own compiled-in module path, whose ABI matches its own version, so
+# on a host with PipeWire only the host's library fits the host's modules.
+# Windup links it, though, and would not start at all without one, so the
+# build's copy goes in usr/lib/pipewire-fallback, outside the library path,
+# and an AppRun hook puts it on LD_LIBRARY_PATH only when the host has none.
+# Recording then fails there with a reason; everything else works.
 
 appimage_name="Windup-${version}-${appimage_arch}.AppImage"
 echo "==> $appimage_name"
@@ -336,6 +341,11 @@ appdir=$work/AppDir
 stage_tree "$appdir/usr"
 cp "$root/packaging/$APP_ID.desktop" "$appdir/$APP_ID.desktop"
 cp "$root/assets/icons/hicolor/256.png" "$appdir/$APP_ID.png"
+pipewire_lib=$(ldd "$binary" | awk '$1 == "libpipewire-0.3.so.0" { print $3 }')
+[ -f "$pipewire_lib" ] || { echo "the build links no libpipewire-0.3.so.0" >&2; exit 1; }
+install -Dm644 "$pipewire_lib" "$appdir/usr/lib/pipewire-fallback/libpipewire-0.3.so.0"
+install -Dm644 "$root/packaging/linux/apprun-pipewire-fallback.sh" \
+    "$appdir/apprun-hooks/windup-pipewire-fallback.sh"
 tools=${APPIMAGE_TOOL_DIR:-$work/tools}
 mkdir -p "$tools"
 if [ ! -x "$tools/linuxdeploy" ]; then

@@ -99,26 +99,8 @@ impl SourceFactory for ScreenCastFactory {
     /// A session per segment: after a pause the token restores the grant,
     /// so the user is not asked again.
     fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
-        let saved = self.token();
-        match open_screencast(self.rect, saved.clone()) {
-            Ok((stream, returned)) => {
-                log::info!(
-                    "ScreenCast: the portal {} a restore token",
-                    if returned.is_some() {
-                        "gave"
-                    } else {
-                        "gave no"
-                    }
-                );
-                if let Ok(mut t) = self.token.lock() {
-                    match token_change(saved.as_deref(), returned.as_deref()) {
-                        TokenChange::Keep => {}
-                        TokenChange::Set(new) => *t = Some(new),
-                        TokenChange::Clear => *t = None,
-                    }
-                }
-                Some(Box::new(stream))
-            }
+        match open_screencast(self.rect, &self.token) {
+            Ok(stream) => Some(Box::new(stream)),
             Err(e) => {
                 log::warn!("ScreenCast: {e:?}");
                 None
@@ -128,28 +110,31 @@ impl SourceFactory for ScreenCastFactory {
 }
 
 /// Asks the portal for every monitor and starts reading them, for `rect`
-/// (desktop units). Gives the stream and the session's new restore token,
-/// which the caller saves. A refused dialog is `Denied`, no portal (or a
-/// build without PipeWire) `Unsupported`.
+/// (desktop units), with the restore token in `token`. As soon as the
+/// session has started, `token` holds the next one (`token_change`), even if
+/// reading the streams then fails: the one sent is spent either way. The
+/// caller saves it. A refused dialog is `Denied` and no portal (or a build
+/// without PipeWire) `Unsupported`; both leave `token` as it was.
 ///
 /// Blocks until the portal answers, which includes the user answering the
 /// dialog: call it from a thread of its own, never the event thread.
 pub(crate) fn open_screencast(
     rect: DRect,
-    token: Option<String>,
-) -> Result<(ScreenCastStream, Option<String>), CaptureError> {
+    token: &Mutex<Option<String>>,
+) -> Result<ScreenCastStream, CaptureError> {
     if !cfg!(feature = "pipewire") {
         // Asking would show the dialog for frames nothing could read.
         return Err(CaptureError::Unsupported);
     }
+    let saved = token.lock().ok().and_then(|t| t.clone());
     let latest = Arc::new(Mutex::new(Latest::default()));
     let stop = Stop::default();
     let (tx, rx) = mpsc::channel();
     {
-        let (stop, latest) = (stop.clone(), Arc::clone(&latest));
+        let (stop, latest, sent) = (stop.clone(), Arc::clone(&latest), saved.clone());
         std::thread::Builder::new()
             .name("windup-screencast-portal".into())
-            .spawn(move || pollster::block_on(session(token, tx, stop, latest)))
+            .spawn(move || pollster::block_on(session(sent, tx, stop, latest)))
             .map_err(|e| CaptureError::Failed(e.to_string()))?;
     }
     let started = match rx.recv_timeout(PORTAL_WAIT) {
@@ -162,19 +147,37 @@ pub(crate) fn open_screencast(
         }
     };
     log::debug!("ScreenCast streams: {:?}", started.streams);
+    log::info!(
+        "ScreenCast: the portal {} a restore token",
+        if started.token.is_some() {
+            "gave"
+        } else {
+            "gave no"
+        }
+    );
+    apply_token(token, saved.as_deref(), started.token.as_deref());
     match pw_stream::spawn(started.fd, &started.streams, rect, Arc::clone(&latest)) {
-        Ok(pw) => Ok((
-            ScreenCastStream {
-                size: pw.size,
-                latest,
-                pw: Some(pw),
-                stop,
-            },
-            started.token,
-        )),
+        Ok(pw) => Ok(ScreenCastStream {
+            size: pw.size,
+            latest,
+            pw: Some(pw),
+            stop,
+        }),
         Err(e) => {
             stop.set();
             Err(CaptureError::Failed(e))
+        }
+    }
+}
+
+/// Puts the next restore token in `slot` once a session started with
+/// `saved` and the portal `returned` one (or none).
+fn apply_token(slot: &Mutex<Option<String>>, saved: Option<&str>, returned: Option<&str>) {
+    if let Ok(mut t) = slot.lock() {
+        match token_change(saved, returned) {
+            TokenChange::Keep => {}
+            TokenChange::Set(new) => *t = Some(new),
+            TokenChange::Clear => *t = None,
         }
     }
 }
@@ -336,6 +339,16 @@ impl Drop for ScreenCastStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_started_session_leaves_the_next_token_in_the_slot() {
+        let slot = Mutex::new(Some("a".to_owned()));
+        apply_token(&slot, Some("a"), Some("b"));
+        assert_eq!(slot.lock().unwrap().as_deref(), Some("b"));
+        // No token back: the spent one is not kept.
+        apply_token(&slot, Some("b"), None);
+        assert_eq!(*slot.lock().unwrap(), None);
+    }
 
     #[test]
     fn stop_wakes_a_waiting_portal_thread() {
