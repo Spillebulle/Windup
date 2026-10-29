@@ -1,6 +1,7 @@
 //! Screen recording that needs no platform: which formats go together and
 //! how fast the encoder should run.
 
+pub mod avail;
 pub mod command;
 pub mod compose;
 pub mod format;

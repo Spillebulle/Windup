@@ -1,6 +1,7 @@
 //! Screen recording: the bundled ffmpeg and what it can encode.
 
 pub(crate) mod audio;
+pub(crate) mod availability;
 pub(crate) mod ffmpeg;
 pub(crate) mod pipe;
 pub(crate) mod run;

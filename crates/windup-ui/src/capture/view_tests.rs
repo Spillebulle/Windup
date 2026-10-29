@@ -3,11 +3,12 @@
 
 use super::*;
 
-use egui::{Modifiers, PointerButton, RawInput};
+use egui::epaint::ClippedShape;
+use egui::{LayerId, Modifiers, PointerButton, RawInput, Shape};
 use image::RgbaImage;
-use windup_core::capture::session::Outcome;
+use windup_core::capture::session::{CaptureMode, ModeAvailability, Outcome};
 use windup_core::capture::{DesktopShot, MonitorShot};
-use windup_core::config::ScreenshotConfig;
+use windup_core::config::{ScreenshotConfig, VideoConfig};
 
 /// Two monitors side by side in one 400 x 200 point window, one point to
 /// one desktop unit: monitor 0 at x = -200 at 1x, monitor 1 at x = 0 at
@@ -18,54 +19,80 @@ struct Rig {
     view: CaptureView,
     keys: EditorKeys,
     t: f64,
+    /// Each monitor's width in points and units.
+    w: f32,
+    /// What the last frame painted.
+    shapes: Vec<ClippedShape>,
 }
 
 impl Rig {
     fn new() -> Self {
+        Self::with(200.0, VideoConfig::default(), ModeAvailability::ALL)
+    }
+
+    /// Monitors `w` wide (the launcher bar is wider than 200), with this
+    /// video setup.
+    fn with(w: f32, video: VideoConfig, availability: ModeAvailability) -> Self {
         let monitor = |x: f32, ppu: u32| MonitorShot {
             layout: DRect {
                 x,
                 y: 0.0,
-                w: 200.0,
+                w,
                 h: 200.0,
             },
-            image: RgbaImage::from_pixel(200 * ppu, 200 * ppu, image::Rgba([90, 90, 90, 255])),
+            image: RgbaImage::from_pixel(w as u32 * ppu, 200 * ppu, image::Rgba([90, 90, 90, 255])),
             name: String::new(),
             scale: 1.0,
             refresh_hz: None,
         };
         let shot = DesktopShot {
-            monitors: vec![monitor(-200.0, 1), monitor(0.0, 2)],
+            monitors: vec![monitor(-w, 1), monitor(0.0, 2)],
         };
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
+        let session = Session::new(
+            shot,
+            Vec::new(),
+            &ScreenshotConfig::default(),
+            &video,
+            availability,
+        );
         Rig {
             ctx,
-            session: Session::new(shot, Vec::new(), &ScreenshotConfig::default()),
+            session,
             view: CaptureView::new(),
             keys: EditorKeys::default(),
             t: 0.0,
+            w,
+            shapes: Vec::new(),
+        }
+    }
+
+    fn surface(&self, i: usize) -> Rect {
+        Rect::from_min_size(pos2(self.w * i as f32, 0.0), vec2(self.w, 200.0))
+    }
+
+    fn raw(&mut self, events: Vec<Event>) -> RawInput {
+        self.t += 0.016;
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(2.0 * self.w, 200.0))),
+            time: Some(self.t),
+            events,
+            ..Default::default()
         }
     }
 
     /// One frame with these events; the outcome if any surface ended it.
     fn frame(&mut self, events: Vec<Event>) -> Option<Outcome> {
-        self.t += 0.016;
-        let raw = RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0))),
-            time: Some(self.t),
-            events,
-            ..Default::default()
-        };
+        let raw = self.raw(events);
         let p = Palette::dark(28.0);
+        let surfaces = [self.surface(0), self.surface(1)];
         let mut out = None;
-        let _ = self.ctx.run(raw, |ctx| {
+        let full = self.ctx.run(raw, |ctx| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ctx, |ui| {
-                    for i in 0..2 {
-                        let surface =
-                            Rect::from_min_size(pos2(200.0 * i as f32, 0.0), vec2(200.0, 200.0));
+                    for (i, surface) in surfaces.into_iter().enumerate() {
                         let o = ui
                             .scope_builder(egui::UiBuilder::new().max_rect(surface), |ui| {
                                 self.view
@@ -78,7 +105,71 @@ impl Rig {
                     }
                 });
         });
+        self.shapes = full.shapes;
         out
+    }
+
+    /// Where the bar is on monitor 1's surface, measured as the view lays it
+    /// out.
+    fn bar_rect(&mut self) -> Rect {
+        let raw = self.raw(vec![]);
+        let surface = self.surface(1);
+        let mut rect = Rect::NOTHING;
+        let _ = self.ctx.run(raw, |ctx| {
+            let painter = ctx.layer_painter(LayerId::background());
+            let state = bar_state(&self.session, &self.keys);
+            rect = self.view.bar.rect(&painter, surface, &state);
+        });
+        rect
+    }
+
+    /// The centre of mode button `k` in the launcher (Screenshot, Video,
+    /// Steps): the first item, a segmented box.
+    fn mode_button(&mut self, k: usize) -> Pos2 {
+        let bar = self.bar_rect();
+        let x = bar.left()
+            + metrics::S2
+            + metrics::HAIRLINE
+            + metrics::SEG_PAD
+            + k as f32 * (metrics::SEG_ICON_W + metrics::SEG_PAD)
+            + metrics::SEG_ICON_W / 2.0;
+        pos2(x, bar.center().y)
+    }
+
+    fn click(&mut self, at: Pos2) {
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        self.frame(vec![Event::PointerMoved(at)]);
+        self.frame(vec![button(true)]);
+        self.frame(vec![button(false)]);
+    }
+
+    /// Whether the last frame painted this text.
+    fn painted(&self, text: &str) -> bool {
+        fn has(shape: &Shape, text: &str) -> bool {
+            match shape {
+                Shape::Text(t) => t.galley.text() == text,
+                Shape::Vec(v) => v.iter().any(|s| has(s, text)),
+                _ => false,
+            }
+        }
+        self.shapes.iter().any(|c| has(&c.shape, text))
+    }
+
+    /// Rests the pointer at `at` until `text` is painted (a tooltip's delay),
+    /// for at most two seconds.
+    fn hover_until(&mut self, at: Pos2, text: &str) -> bool {
+        for _ in 0..125 {
+            self.frame(vec![Event::PointerMoved(at)]);
+            if self.painted(text) {
+                return true;
+            }
+        }
+        false
     }
 
     /// A primary-button drag from `a` to `b`, in window points, over
@@ -222,4 +313,76 @@ fn the_highlight_glides_for_one_tween_and_not_with_reduced_motion() {
         !gliding(&rig.session, 1.0 + TWEEN_SECS + 0.01, false),
         "arrived"
     );
+}
+
+const NO_FFMPEG: &str = "Video needs FFmpeg, which is missing from this installation.";
+
+#[test]
+fn the_disabled_video_button_shows_its_reason() {
+    let avail = ModeAvailability {
+        video: Err(NO_FFMPEG),
+        ..ModeAvailability::ALL
+    };
+    let mut rig = Rig::with(400.0, VideoConfig::default(), avail);
+    // The pointer on monitor 1, so the bar is there.
+    rig.frame(vec![Event::PointerMoved(pos2(600.0, Y0))]);
+    let video = rig.mode_button(1);
+    assert!(rig.surface(1).contains(video), "{video:?}");
+    assert!(
+        rig.hover_until(video, NO_FFMPEG),
+        "the tooltip is the reason"
+    );
+    rig.click(video);
+    assert_eq!(
+        rig.session.mode,
+        CaptureMode::Screenshot,
+        "and it does nothing"
+    );
+}
+
+#[test]
+fn steps_still_says_later_and_video_says_video() {
+    let mut rig = Rig::with(400.0, VideoConfig::default(), ModeAvailability::ALL);
+    rig.frame(vec![Event::PointerMoved(pos2(600.0, Y0))]);
+    let steps = rig.mode_button(2);
+    assert!(rig.hover_until(steps, bar::LATER));
+    let video = rig.mode_button(1);
+    assert!(rig.hover_until(video, "Video"));
+}
+
+#[test]
+fn video_shows_the_options_and_enter_records() {
+    let mut rig = Rig::with(400.0, VideoConfig::default(), ModeAvailability::ALL);
+    rig.frame(vec![Event::PointerMoved(pos2(600.0, Y0))]);
+    let video = rig.mode_button(1);
+    rig.click(video);
+    assert_eq!(rig.session.mode, CaptureMode::Video);
+    rig.drag(pos2(460.0, Y0), pos2(540.0, Y0 + 80.0));
+    assert_eq!(rig.session.stage, Stage::Ready);
+    rig.frame(vec![]);
+    for label in ["30 fps", "Auto", "Record"] {
+        assert!(rig.painted(label), "{label}");
+    }
+    assert!(!rig.painted("Copy"));
+    match rig.key(egui::Key::Enter, Modifiers::NONE) {
+        Some(Outcome::Record { rect, choice }) => {
+            assert_eq!((rect.x, rect.y, rect.w, rect.h), (60.0, Y0, 80.0, 80.0));
+            assert_eq!(choice.fps, 30);
+        }
+        other => panic!("expected a recording, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_gif_offers_colours_instead_of_a_bitrate() {
+    let video = VideoConfig {
+        container: windup_core::video::Container::Gif,
+        ..VideoConfig::default()
+    };
+    let mut rig = Rig::with(400.0, video, ModeAvailability::ALL);
+    rig.session.act(Action::SetMode(CaptureMode::Video));
+    rig.drag(pos2(460.0, Y0), pos2(540.0, Y0 + 80.0));
+    rig.frame(vec![]);
+    assert!(rig.painted("256 colours"));
+    assert!(!rig.painted("Auto"));
 }

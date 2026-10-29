@@ -8,8 +8,8 @@ use image::RgbaImage;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use windup_core::capture::output;
-use windup_core::capture::session::{Outcome, Session};
-use windup_core::config::ScreenshotConfig;
+use windup_core::capture::session::{CaptureMode, Outcome, Session};
+use windup_core::config::{ScreenshotConfig, VideoConfig};
 
 /// How many taken names a save steps past before it gives up.
 pub(crate) const SAVE_TRIES: usize = 16;
@@ -23,15 +23,28 @@ pub(crate) fn wants(outcome: &Outcome) -> (bool, bool) {
         Outcome::Copy(_) => (true, false),
         Outcome::Save(_) => (false, true),
         Outcome::CopyAndSave(_) => (true, true),
-        Outcome::Cancel => (false, false),
+        Outcome::Record { .. } | Outcome::Cancel => (false, false),
     }
 }
 
 /// What the next capture starts with: this one's target, colour and sizes.
 pub(crate) fn remember(cfg: &mut ScreenshotConfig, session: &Session) {
-    cfg.last_target = session.target;
+    cfg.last_target = session.target_of(CaptureMode::Screenshot);
     cfg.colour = session.colour;
     cfg.sizes = session.sizes.clone();
+}
+
+/// What the next recording starts with, once one is asked for: the bar's
+/// choices as picked (a sound toggle that could not apply this time keeps
+/// its setting) and Video's target.
+pub(crate) fn remember_video(cfg: &mut VideoConfig, session: &Session) {
+    let v = &session.video;
+    cfg.fps = v.fps;
+    cfg.bitrate = v.bitrate;
+    cfg.gif_colours = v.gif_colours;
+    cfg.system_audio = v.system_audio;
+    cfg.mic = v.mic;
+    cfg.last_target = session.target_of(CaptureMode::Video);
 }
 
 /// Writes `bytes` to a new file in `dir`, named by `pick(dir, name)`. The file
@@ -104,7 +117,7 @@ pub(crate) fn deliver(
     let (want_copy, want_save) = wants(&outcome);
     let img = match outcome {
         Outcome::Copy(img) | Outcome::Save(img) | Outcome::CopyAndSave(img) => img,
-        Outcome::Cancel => return None,
+        Outcome::Record { .. } | Outcome::Cancel => return None,
     };
     let mut errors = Vec::new();
     if want_save {
@@ -128,7 +141,9 @@ pub(crate) fn deliver(
 mod tests {
     use super::*;
     use windup_core::capture::DesktopShot;
+    use windup_core::capture::session::{Action, ModeAvailability};
     use windup_core::config::{ImageFormat, TargetKind, ToolSizes};
+    use windup_core::video::Bitrate;
 
     /// A fresh, empty folder under the temp dir.
     fn temp(name: &str) -> PathBuf {
@@ -163,7 +178,13 @@ mod tests {
     #[test]
     fn the_session_choices_are_remembered() {
         let mut cfg = ScreenshotConfig::default();
-        let mut s = Session::new(DesktopShot { monitors: vec![] }, vec![], &cfg);
+        let mut s = Session::new(
+            DesktopShot { monitors: vec![] },
+            vec![],
+            &cfg,
+            &VideoConfig::default(),
+            ModeAvailability::ALL,
+        );
         s.target = TargetKind::Window;
         s.colour = [1, 2, 3, 255];
         s.sizes = ToolSizes {
@@ -174,6 +195,34 @@ mod tests {
         assert_eq!(cfg.last_target, TargetKind::Window);
         assert_eq!(cfg.colour, [1, 2, 3, 255]);
         assert_eq!(cfg.sizes.pen, 9.0);
+    }
+
+    #[test]
+    fn the_video_choices_are_remembered_and_the_targets_kept_apart() {
+        let mut shots = ScreenshotConfig::default();
+        let mut video = VideoConfig {
+            last_target: TargetKind::FullScreen,
+            ..VideoConfig::default()
+        };
+        let mut s = Session::new(
+            DesktopShot { monitors: vec![] },
+            vec![],
+            &shots,
+            &video,
+            ModeAvailability::ALL,
+        );
+        s.act(Action::SetMode(CaptureMode::Video));
+        s.act(Action::SetTarget(TargetKind::Window));
+        s.act(Action::SetFps(60));
+        s.act(Action::SetBitrate(Bitrate::Kbps(20000)));
+        s.act(Action::ToggleMic);
+        remember(&mut shots, &s);
+        remember_video(&mut video, &s);
+        assert_eq!(shots.last_target, TargetKind::Area, "the screenshot's own");
+        assert_eq!(video.last_target, TargetKind::Window);
+        assert_eq!(video.fps, 60);
+        assert_eq!(video.bitrate, Bitrate::Kbps(20000));
+        assert!(video.mic && !video.system_audio);
     }
 
     #[test]

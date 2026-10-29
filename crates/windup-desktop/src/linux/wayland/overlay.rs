@@ -220,6 +220,7 @@ impl State {
                 Outcome::Copy(_) => "copy",
                 Outcome::Save(_) => "save",
                 Outcome::CopyAndSave(_) => "copy and save",
+                Outcome::Record { .. } => "record",
                 Outcome::Cancel if open_settings => "settings",
                 Outcome::Cancel => "cancel",
             }

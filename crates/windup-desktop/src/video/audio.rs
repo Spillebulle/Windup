@@ -15,8 +15,6 @@ use super::run::AudioSource;
 
 /// The sound devices settings can offer, by the names `open_system` and
 /// `open_mic` take.
-// Task 11's settings and bar are the callers.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AudioDevices {
     /// Where computer sound can be recorded from.
@@ -142,7 +140,6 @@ mod captured {
 }
 
 /// The devices there are to record from.
-#[allow(dead_code)]
 pub(crate) fn audio_devices() -> AudioDevices {
     platform::audio_devices()
 }

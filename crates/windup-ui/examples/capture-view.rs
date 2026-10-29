@@ -12,9 +12,9 @@
 use eframe::egui;
 use egui::{Rect, UiBuilder, vec2};
 use image::{Rgba, RgbaImage};
-use windup_core::capture::session::{Outcome, Session};
+use windup_core::capture::session::{ModeAvailability, Outcome, Session};
 use windup_core::capture::{DRect, DesktopShot, MonitorShot, WindowRect};
-use windup_core::config::{EditorKeys, ScreenshotConfig};
+use windup_core::config::{EditorKeys, ScreenshotConfig, VideoConfig};
 use windup_ui::capture::CaptureView;
 use windup_ui::{Mode, Palette, apply_theme, install_fonts, metrics};
 
@@ -91,6 +91,8 @@ fn session() -> Session {
         DesktopShot { monitors },
         windows,
         &ScreenshotConfig::default(),
+        &VideoConfig::default(),
+        ModeAvailability::ALL,
     )
 }
 
@@ -147,6 +149,9 @@ impl eframe::App for App {
                         Outcome::Save(img) => println!("Save {}x{}", img.width(), img.height()),
                         Outcome::CopyAndSave(img) => {
                             println!("Copy and save {}x{}", img.width(), img.height())
+                        }
+                        Outcome::Record { rect, choice } => {
+                            println!("Record {}x{} at {} fps", rect.w, rect.h, choice.fps)
                         }
                         Outcome::Cancel => println!("Cancel"),
                     }

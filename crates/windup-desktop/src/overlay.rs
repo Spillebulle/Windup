@@ -15,11 +15,11 @@
 
 use crate::platform::{Host, Target};
 use crate::{WindupApp, capture, cursor, paste};
-use capture::finish::{self, remember};
+use capture::finish::{self, remember, remember_video};
 use eframe::egui;
 use windup_core::ToolId;
 use windup_core::capture::DRect;
-use windup_core::capture::session::{CaptureMode, Outcome, Session};
+use windup_core::capture::session::{Action, CaptureMode, Outcome, Session};
 use windup_core::placement::{self, Area};
 use windup_ui::capture::CaptureView;
 use windup_ui::{Palette, notice};
@@ -159,8 +159,17 @@ impl WindupApp {
             }
         };
         let windows = capture::window_rects(&shot);
-        let mut session = Session::new(shot, windows, &self.config.screenshot);
-        session.mode = mode;
+        // The UI thread: the sound devices as last listed, never listed here.
+        let availability = crate::video::availability::cached(&self.config.video);
+        let mut session = Session::new(
+            shot,
+            windows,
+            &self.config.screenshot,
+            &self.config.video,
+            availability,
+        );
+        // Refused, and left on Screenshot, when Video cannot work here.
+        session.act(Action::SetMode(mode));
 
         // Desktop units are the cursor's own: physical pixels on Windows,
         // root pixels on X11. Seeding the pointer puts the bar on its monitor
@@ -301,6 +310,12 @@ impl WindupApp {
             );
         }
         remember(&mut self.config.screenshot, &cap.session);
+        if let Some(Outcome::Record { rect, choice }) = &outcome {
+            remember_video(&mut self.config.video, &cap.session);
+            // Task 13 starts the recording here.
+            log::info!("Recording arrives in a later task ({rect:?}, {choice:?})");
+            outcome = None;
+        }
         self.config.save();
         if settings {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));

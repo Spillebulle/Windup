@@ -31,6 +31,7 @@ use windup_core::capture::session::{Action, Mods, Outcome, Session, Stage};
 use windup_core::capture::{DRect, TWEEN_SECS};
 use windup_core::config::{EditorKeys, TargetKind};
 use windup_core::shortcut::{Shortcut, ShortcutModifiers};
+use windup_core::video::Container;
 
 /// Wheel input given in points (a touchpad, or a platform that reports
 /// pixels) is this many points to one size step: egui's own figure for one
@@ -118,7 +119,11 @@ fn matches(s: &Shortcut, k: &KeyPress) -> bool {
 /// redo, which the spec names beside the configured redo key, so both work
 /// whichever one the settings hold. Modifiers match exactly, so the
 /// loupe's bare Z and undo's Ctrl+Z do not overlap.
-pub fn action_for(k: &KeyPress, keys: &EditorKeys) -> Option<Action> {
+///
+/// Video's Ready stage has nothing to copy, save or undo: plain Enter
+/// records (fixed, as Esc is, since the editor's keys are the screenshot's),
+/// and the arrows, the loupe and select-all work as in the editor.
+pub fn action_for(k: &KeyPress, keys: &EditorKeys, stage: Stage) -> Option<Action> {
     const NONE: ShortcutModifiers = ShortcutModifiers::NONE;
     const SHIFT: ShortcutModifiers = ShortcutModifiers {
         super_key: false,
@@ -129,6 +134,10 @@ pub fn action_for(k: &KeyPress, keys: &EditorKeys) -> Option<Action> {
     if k.key == "ESCAPE" {
         return Some(Action::Cancel);
     }
+    let ready = stage == Stage::Ready;
+    if ready && k.mods == NONE && k.key == "ENTER" {
+        return Some(Action::Record);
+    }
     for (s, a) in [
         (&keys.copy, Action::Copy),
         (&keys.save, Action::Save),
@@ -138,11 +147,13 @@ pub fn action_for(k: &KeyPress, keys: &EditorKeys) -> Option<Action> {
         (&keys.select_all, Action::SelectAll),
     ] {
         if matches(s, k) {
-            return Some(a);
+            let works = !ready || matches!(a, Action::ToggleLoupe | Action::SelectAll);
+            return works.then_some(a);
         }
     }
-    if (k.mods == ShortcutModifiers::CTRL && k.key == "Y")
-        || (k.mods == ShortcutModifiers::CTRL_SHIFT && k.key == "Z")
+    if !ready
+        && ((k.mods == ShortcutModifiers::CTRL && k.key == "Y")
+            || (k.mods == ShortcutModifiers::CTRL_SHIFT && k.key == "Z"))
     {
         return Some(Action::Redo);
     }
@@ -159,7 +170,7 @@ pub fn action_for(k: &KeyPress, keys: &EditorKeys) -> Option<Action> {
             return Some(Action::Nudge { dx, dy });
         }
     }
-    if k.mods == NONE && k.key == "DELETE" {
+    if !ready && k.mods == NONE && k.key == "DELETE" {
         return Some(Action::Delete);
     }
     None
@@ -251,14 +262,7 @@ impl CaptureView {
         // The bar first: it paints on its own layer above the overlay, and
         // where it is decides who gets the pointer.
         let bar_out = if out.is_none() && self.bar_monitor(session) == monitor {
-            let state = BarState {
-                stage: session.stage,
-                mode: session.mode,
-                target: session.target,
-                tool: session.tool,
-                colour: session.colour,
-                keys,
-            };
+            let state = bar_state(session, keys);
             let o = self.bar.show(ui, p, theme, map.surface, &state, now);
             if let Some(c) = o.command {
                 out = self.command(session, c);
@@ -313,6 +317,12 @@ impl CaptureView {
             BarCommand::Save => Action::Save,
             BarCommand::Copy => Action::Copy,
             BarCommand::Close => Action::Cancel,
+            BarCommand::Record => Action::Record,
+            BarCommand::Fps(fps) => Action::SetFps(fps),
+            BarCommand::Bitrate(b) => Action::SetBitrate(b),
+            BarCommand::GifColours(n) => Action::SetGifColours(n),
+            BarCommand::ToggleSystemAudio => Action::ToggleSystemAudio,
+            BarCommand::ToggleMic => Action::ToggleMic,
             BarCommand::Settings => {
                 self.open_settings = true;
                 return None;
@@ -346,7 +356,7 @@ impl CaptureView {
                 .collect()
         });
         for (press, repeat) in presses {
-            let Some(action) = action_for(&press, keys) else {
+            let Some(action) = action_for(&press, keys, session.stage) else {
                 continue;
             };
             // A held key repeats; a toggle must not flicker with it.
@@ -486,7 +496,7 @@ impl CaptureView {
 
         // The hole: the selection, or the highlighted target while choosing.
         let hole = match session.stage {
-            Stage::Editing => session.selection.rect,
+            Stage::Editing | Stage::Ready => session.selection.rect,
             Stage::Choosing if session.target == TargetKind::Area => session.selection.rect,
             Stage::Choosing => session.hover.map(|t| t.at(now, self.reduced_motion)),
         }
@@ -524,7 +534,7 @@ impl CaptureView {
                 ctx.request_repaint_after(Duration::from_millis(metrics::ANT_FRAME_MS));
             }
 
-            if session.stage == Stage::Editing {
+            if session.stage != Stage::Choosing {
                 handles(&painter, p, r);
             }
             if chip_monitor(session, h) == Some(monitor) {
@@ -622,14 +632,33 @@ impl CaptureView {
 }
 
 /// Whether the loupe shows: when it is on, while choosing (any target: the
-/// press or click is what it aims), and while editing only for the pipette
-/// or while an edge or corner of the selection is being dragged.
+/// press or click is what it aims), and while editing or ready only for the
+/// pipette or while an edge or corner of the selection is being dragged.
 pub fn loupe_wanted(session: &Session) -> bool {
     session.loupe
         && match session.stage {
             Stage::Choosing => true,
             Stage::Editing => session.tool == Tool::Pipette || session.adjusting_edge(),
+            Stage::Ready => session.adjusting_edge(),
         }
+}
+
+/// What the bar shows this frame, read from the session.
+fn bar_state<'a>(session: &Session, keys: &'a EditorKeys) -> BarState<'a> {
+    BarState {
+        stage: session.stage,
+        mode: session.mode,
+        target: session.target,
+        tool: session.tool,
+        colour: session.colour,
+        keys,
+        video: session.availability.video,
+        choice: session.video_choice(),
+        rates: session.frame_rates(),
+        gif: session.container == Container::Gif,
+        system_audio: session.system_audio(),
+        mic: session.mic(),
+    }
 }
 
 /// Whether the window or full-screen highlight is still gliding to its
@@ -649,6 +678,18 @@ fn cursor(session: &Session, d: [f32; 2]) -> CursorIcon {
         Stage::Choosing if session.target == TargetKind::Area => CursorIcon::Crosshair,
         Stage::Choosing => CursorIcon::PointingHand,
         Stage::Editing if session.tool == Tool::Pipette => CursorIcon::Crosshair,
+        // Ready has no tools: it acts as the select tool does.
+        Stage::Ready => match session
+            .selection
+            .handle_at((d[0], d[1]), session.handle_tolerance((d[0], d[1])))
+        {
+            Some(Handle::N | Handle::S) => CursorIcon::ResizeVertical,
+            Some(Handle::E | Handle::W) => CursorIcon::ResizeHorizontal,
+            Some(Handle::NE | Handle::SW) => CursorIcon::ResizeNeSw,
+            Some(Handle::NW | Handle::SE) => CursorIcon::ResizeNwSe,
+            Some(Handle::Move) => CursorIcon::Move,
+            None => CursorIcon::Default,
+        },
         Stage::Editing => match session
             .selection
             .handle_at((d[0], d[1]), session.handle_tolerance((d[0], d[1])))
@@ -732,7 +773,7 @@ mod tests {
     #[test]
     fn the_default_keys_map_to_their_actions() {
         let k = EditorKeys::default();
-        let a = |m, key| action_for(&press(m, key), &k);
+        let a = |m, key| action_for(&press(m, key), &k, Stage::Editing);
         assert_eq!(a(NONE, "Escape"), Some(Action::Cancel));
         assert_eq!(a(NONE, "Enter"), Some(Action::Copy));
         assert_eq!(a(CTRL, "S"), Some(Action::Save));
@@ -750,7 +791,7 @@ mod tests {
             redo: Shortcut::new(ShortcutModifiers::CTRL, "R"),
             ..EditorKeys::default()
         };
-        let a = |m, key| action_for(&press(m, key), &k);
+        let a = |m, key| action_for(&press(m, key), &k, Stage::Editing);
         assert_eq!(a(CTRL, "R"), Some(Action::Redo));
         assert_eq!(a(CTRL, "Y"), Some(Action::Redo));
         assert_eq!(a(CTRL_SHIFT, "Z"), Some(Action::Redo));
@@ -759,7 +800,7 @@ mod tests {
     #[test]
     fn modifiers_must_match_exactly() {
         let k = EditorKeys::default();
-        let a = |m, key| action_for(&press(m, key), &k);
+        let a = |m, key| action_for(&press(m, key), &k, Stage::Editing);
         assert_eq!(a(NONE, "S"), None);
         assert_eq!(a(CTRL_SHIFT, "S"), None);
         assert_eq!(a(SHIFT, "Z"), None);
@@ -770,7 +811,7 @@ mod tests {
     #[test]
     fn arrows_nudge_by_one_and_by_ten_with_shift() {
         let k = EditorKeys::default();
-        let a = |m, key| action_for(&press(m, key), &k);
+        let a = |m, key| action_for(&press(m, key), &k, Stage::Editing);
         assert_eq!(a(NONE, "Left"), Some(Action::Nudge { dx: -1.0, dy: 0.0 }));
         assert_eq!(a(NONE, "Up"), Some(Action::Nudge { dx: 0.0, dy: -1.0 }));
         assert_eq!(a(SHIFT, "Right"), Some(Action::Nudge { dx: 10.0, dy: 0.0 }));
@@ -785,7 +826,10 @@ mod tests {
             loupe: Shortcut::new(NONE, "ESCAPE"),
             ..Default::default()
         };
-        assert_eq!(action_for(&press(NONE, "Escape"), &k), Some(Action::Cancel));
+        assert_eq!(
+            action_for(&press(NONE, "Escape"), &k, Stage::Editing),
+            Some(Action::Cancel)
+        );
     }
 
     #[test]
@@ -796,7 +840,7 @@ mod tests {
             loupe: Shortcut::new(NONE, "L"),
             ..Default::default()
         };
-        let a = |m, key| action_for(&press(m, key), &k);
+        let a = |m, key| action_for(&press(m, key), &k, Stage::Editing);
         assert_eq!(a(CTRL, "C"), Some(Action::Copy));
         // Enter is only the default copy key, not a second one.
         assert_eq!(a(NONE, "Enter"), None);
@@ -807,15 +851,42 @@ mod tests {
     }
 
     #[test]
+    fn in_ready_enter_records_and_the_editor_keys_rest() {
+        let k = EditorKeys::default();
+        let a = |m, key| action_for(&press(m, key), &k, Stage::Ready);
+        assert_eq!(a(NONE, "Enter"), Some(Action::Record));
+        assert_eq!(a(NONE, "Escape"), Some(Action::Cancel));
+        assert_eq!(a(CTRL, "S"), None);
+        assert_eq!(a(CTRL, "Z"), None);
+        assert_eq!(a(CTRL, "Y"), None);
+        assert_eq!(a(NONE, "Delete"), None);
+        assert_eq!(a(NONE, "Z"), Some(Action::ToggleLoupe));
+        assert_eq!(a(NONE, "Left"), Some(Action::Nudge { dx: -1.0, dy: 0.0 }));
+        // Enter is Record even when copy is bound elsewhere.
+        let k = EditorKeys {
+            copy: Shortcut::new(CTRL, "C"),
+            ..EditorKeys::default()
+        };
+        assert_eq!(
+            action_for(&press(NONE, "Enter"), &k, Stage::Ready),
+            Some(Action::Record)
+        );
+        assert_eq!(action_for(&press(CTRL, "C"), &k, Stage::Ready), None);
+    }
+
+    #[test]
     fn egui_key_names_match_the_stored_shortcut_names() {
         // The recorder stores `key.name().to_uppercase()`; so must a press.
         let k = KeyPress::from_egui(egui::Key::Enter, egui::Modifiers::NONE);
         assert_eq!(k.key, EditorKeys::default().copy.key);
         let k = KeyPress::from_egui(egui::Key::S, egui::Modifiers::COMMAND);
-        assert_eq!(action_for(&k, &EditorKeys::default()), Some(Action::Save));
+        assert_eq!(
+            action_for(&k, &EditorKeys::default(), Stage::Editing),
+            Some(Action::Save)
+        );
         let k = KeyPress::from_egui(egui::Key::ArrowLeft, egui::Modifiers::NONE);
         assert_eq!(
-            action_for(&k, &EditorKeys::default()),
+            action_for(&k, &EditorKeys::default(), Stage::Editing),
             Some(Action::Nudge { dx: -1.0, dy: 0.0 })
         );
         for (key, name) in [

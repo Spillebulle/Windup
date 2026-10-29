@@ -1,4 +1,5 @@
-//! The capture bar: the launcher while choosing, the tool bar while editing.
+//! The capture bar: the launcher while choosing, the tool bar while editing,
+//! the recording options while Video is ready.
 //!
 //! One floating panel centred at the top of the monitor under the pointer
 //! that **changes in place** between stages (spec "The launcher bar"). Laid
@@ -21,9 +22,10 @@ use egui::{
 };
 use std::time::Duration;
 use windup_core::capture::annotate::Tool;
-use windup_core::capture::session::{CaptureMode, Stage};
+use windup_core::capture::session::{CaptureMode, Stage, VideoChoice};
 use windup_core::config::{EditorKeys, TargetKind};
 use windup_core::shortcut::{Shortcut, ShortcutModifiers};
+use windup_core::video::{Bitrate, FIXED_BITRATES, GIF_COLOURS};
 
 /// What a click on the bar asks for. The view turns it into a session action.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,6 +39,12 @@ pub enum BarCommand {
     Copy,
     Close,
     Settings,
+    Record,
+    Fps(u32),
+    Bitrate(Bitrate),
+    GifColours(u16),
+    ToggleSystemAudio,
+    ToggleMic,
 }
 
 /// What the bar shows, read from the session each frame.
@@ -47,6 +55,16 @@ pub struct BarState<'a> {
     pub tool: Tool,
     pub colour: [u8; 4],
     pub keys: &'a EditorKeys,
+    /// Whether the Video mode can be chosen, and why not.
+    pub video: Result<(), &'static str>,
+    /// What Record would ask for.
+    pub choice: VideoChoice,
+    /// The frame rates on offer for the selection.
+    pub rates: Vec<u32>,
+    /// A GIF: colours instead of a bitrate.
+    pub gif: bool,
+    pub system_audio: Result<(), &'static str>,
+    pub mic: Result<(), &'static str>,
 }
 
 #[derive(Default)]
@@ -62,7 +80,9 @@ pub struct BarOutput {
 
 #[derive(Default)]
 pub struct Bar {
-    menu_open: bool,
+    /// The dropdown whose list is open, by its place in the bar, and the
+    /// stage it belongs to (another stage has other items).
+    menu_open: Option<(Stage, usize)>,
     swatch_open: bool,
     hsv: Option<Hsv>,
     /// The wheel moved and the colour is not yet sent: one colour change per
@@ -77,10 +97,33 @@ enum Item {
     /// A segmented box of icon-only buttons.
     Seg(Vec<Seg>),
     Divider,
-    Target,
+    Menu(Menu),
     Swatch,
     Icon(IconButton),
-    Copy,
+    /// An icon button that stays on (§7.6 tool look).
+    Toggle(Seg),
+    Primary(Primary),
+}
+
+/// A dropdown (§7.7): the trigger shows the current entry.
+struct Menu {
+    entries: Vec<Entry>,
+    current: usize,
+    tip: Option<&'static str>,
+}
+
+struct Entry {
+    icon: Option<Icon>,
+    label: String,
+    command: BarCommand,
+}
+
+/// The one accent button (§7.6 primary): Copy, or Record.
+struct Primary {
+    icon: Icon,
+    label: &'static str,
+    key: String,
+    command: BarCommand,
 }
 
 struct Seg {
@@ -117,6 +160,46 @@ const TOOLS: [(Tool, Icon, &str); 7] = [
 /// What a disabled mode says (§7.6: disabled controls say why).
 pub const LATER: &str = "Arrives in a later version.";
 
+/// A bitrate as the dropdown reads it: `Auto`, `8 Mb/s`.
+pub fn bitrate_label(b: Bitrate) -> String {
+    match b {
+        Bitrate::Auto => "Auto".to_string(),
+        Bitrate::Kbps(k) if k % 1000 == 0 => format!("{} Mb/s", k / 1000),
+        Bitrate::Kbps(k) => format!("{:.1} Mb/s", k as f32 / 1000.0),
+    }
+}
+
+/// `30 fps`.
+pub fn fps_label(fps: u32) -> String {
+    format!("{fps} fps")
+}
+
+/// `256 colours`.
+pub fn colours_label(n: u16) -> String {
+    format!("{n} colours")
+}
+
+/// The entry of `entries` whose command is `current`, else the first.
+fn menu(entries: Vec<Entry>, current: BarCommand, tip: Option<&'static str>) -> Menu {
+    let current = entries
+        .iter()
+        .position(|e| e.command == current)
+        .unwrap_or(0);
+    Menu {
+        entries,
+        current,
+        tip,
+    }
+}
+
+fn plain(label: String, command: BarCommand) -> Entry {
+    Entry {
+        icon: None,
+        label,
+        command,
+    }
+}
+
 /// The seg box's height: the segment plus its padding and hairline (§7.9).
 fn seg_h() -> f32 {
     metrics::BUTTON + 2.0 * (metrics::SEG_PAD + metrics::HAIRLINE)
@@ -150,22 +233,33 @@ impl Bar {
             Stage::Choosing => vec![
                 Item::Seg(
                     [
-                        (CaptureMode::Screenshot, Icon::Camera, "Screenshot", true),
-                        (CaptureMode::Video, Icon::Video, "Video", false),
-                        (CaptureMode::Steps, Icon::Footprints, "Steps", false),
+                        (CaptureMode::Screenshot, Icon::Camera, Ok("Screenshot")),
+                        (CaptureMode::Video, Icon::Video, s.video.map(|()| "Video")),
+                        (CaptureMode::Steps, Icon::Footprints, Err(LATER)),
                     ]
                     .into_iter()
-                    .map(|(m, icon, tip, enabled)| Seg {
+                    .map(|(m, icon, tip)| Seg {
                         icon,
-                        tip: if enabled { tip } else { LATER },
+                        tip: tip.unwrap_or_else(|why| why),
                         on: s.mode == m,
-                        enabled,
+                        enabled: tip.is_ok(),
                         command: BarCommand::Mode(m),
                     })
                     .collect(),
                 ),
                 Item::Divider,
-                Item::Target,
+                Item::Menu(menu(
+                    TARGETS
+                        .iter()
+                        .map(|&(kind, icon, label)| Entry {
+                            icon: Some(icon),
+                            label: label.to_string(),
+                            command: BarCommand::Target(kind),
+                        })
+                        .collect(),
+                    BarCommand::Target(s.target),
+                    None,
+                )),
                 Item::Divider,
                 Item::Icon(IconButton {
                     icon: Icon::Settings,
@@ -203,20 +297,98 @@ impl Bar {
                     key: Some(s.keys.save.to_string()),
                     command: BarCommand::Save,
                 }),
-                Item::Copy,
+                Item::Primary(Primary {
+                    icon: Icon::Copy,
+                    label: "Copy",
+                    key: s.keys.copy.to_string(),
+                    command: BarCommand::Copy,
+                }),
                 Item::Icon(close),
             ],
+            // The options row takes the tool row's place (option C).
+            Stage::Ready => {
+                let rate = menu(
+                    s.rates
+                        .iter()
+                        .map(|&r| plain(fps_label(r), BarCommand::Fps(r)))
+                        .collect(),
+                    BarCommand::Fps(s.choice.fps),
+                    Some("Frame rate"),
+                );
+                let quality = if s.gif {
+                    menu(
+                        GIF_COLOURS
+                            .iter()
+                            .map(|&n| plain(colours_label(n), BarCommand::GifColours(n)))
+                            .collect(),
+                        BarCommand::GifColours(s.choice.gif_colours),
+                        Some("Colours"),
+                    )
+                } else {
+                    menu(
+                        std::iter::once(Bitrate::Auto)
+                            .chain(FIXED_BITRATES.iter().map(|&k| Bitrate::Kbps(k)))
+                            .map(|b| plain(bitrate_label(b), BarCommand::Bitrate(b)))
+                            .collect(),
+                        BarCommand::Bitrate(s.choice.bitrate),
+                        Some("Bitrate"),
+                    )
+                };
+                let toggle = |icon, tip, on, why: Result<(), &'static str>, command| {
+                    Item::Toggle(Seg {
+                        icon,
+                        tip: why.map(|()| tip).unwrap_or_else(|why| why),
+                        on,
+                        enabled: why.is_ok(),
+                        command,
+                    })
+                };
+                vec![
+                    Item::Menu(rate),
+                    Item::Menu(quality),
+                    Item::Divider,
+                    toggle(
+                        Icon::Volume2,
+                        "Computer sound",
+                        s.choice.system_audio,
+                        s.system_audio,
+                        BarCommand::ToggleSystemAudio,
+                    ),
+                    toggle(
+                        Icon::Mic,
+                        "Microphone",
+                        s.choice.mic,
+                        s.mic,
+                        BarCommand::ToggleMic,
+                    ),
+                    Item::Divider,
+                    Item::Primary(Primary {
+                        icon: Icon::Circle,
+                        label: "Record",
+                        // Fixed, as Esc is: the editor's keys are not Video's.
+                        key: Shortcut::new(ShortcutModifiers::NONE, "ENTER").to_string(),
+                        command: BarCommand::Record,
+                    }),
+                    Item::Icon(close),
+                ]
+            }
         }
     }
 
-    fn target_w(painter: &Painter) -> f32 {
-        // Wide enough for the longest label, so the trigger does not change
-        // width as the target changes and its list can match it exactly (§7.7).
-        let label = TARGETS
+    /// A dropdown is as wide as its longest entry, so the trigger keeps its
+    /// width as the choice changes and its list can match it exactly (§7.7).
+    fn menu_w(painter: &Painter, m: &Menu) -> f32 {
+        let label = m
+            .entries
             .iter()
-            .map(|t| text_w(painter, t.2, label_font()))
+            .map(|e| text_w(painter, &e.label, label_font()))
             .fold(0.0, f32::max);
-        2.0 * metrics::S2 + metrics::ICON + 2.0 * metrics::ICON_GAP + label + metrics::CHEVRON
+        let icon = if m.entries.iter().any(|e| e.icon.is_some()) {
+            metrics::ICON + metrics::ICON_GAP
+        } else {
+            0.0
+        };
+        2.0 * metrics::S2 + icon + metrics::ICON_GAP + label + metrics::CHEVRON
     }
 
     fn width(painter: &Painter, item: &Item) -> f32 {
@@ -226,14 +398,14 @@ impl Bar {
                 n * metrics::SEG_ICON_W + (n + 1.0) * metrics::SEG_PAD + 2.0 * metrics::HAIRLINE
             }
             Item::Divider => metrics::HAIRLINE,
-            Item::Target => Self::target_w(painter),
+            Item::Menu(m) => Self::menu_w(painter, m),
             Item::Swatch => metrics::SWATCH_SMALL + 2.0 * metrics::S1,
-            Item::Icon(_) => metrics::BUTTON,
-            Item::Copy => {
+            Item::Icon(_) | Item::Toggle(_) => metrics::BUTTON,
+            Item::Primary(b) => {
                 2.0 * metrics::S3
                     + metrics::ICON
                     + metrics::ICON_GAP
-                    + text_w(painter, "Copy", strong(text::CONTROL))
+                    + text_w(painter, b.label, strong(text::CONTROL))
             }
         }
     }
@@ -266,11 +438,11 @@ impl Bar {
             .layer_painter(LayerId::new(Order::Middle, id))
             .with_clip_rect(surface);
         let mut out = BarOutput {
-            busy: self.menu_open || self.swatch_open,
+            busy: self.menu_open.is_some() || self.swatch_open,
             ..Default::default()
         };
-        if s.stage != Stage::Choosing {
-            self.menu_open = false;
+        if self.menu_open.is_some_and(|(stage, _)| stage != s.stage) {
+            self.menu_open = None;
         }
         if s.stage != Stage::Editing {
             self.swatch_open = false;
@@ -296,12 +468,13 @@ impl Bar {
         );
 
         let mut hovered_tip: Option<(Id, Rect, &str, Option<String>)> = None;
-        let mut target_rect = None;
+        let mut open_menu: Option<(Rect, &Menu)> = None;
         let mut swatch_rect = None;
         let mut x = bar.left() + metrics::S2;
         let cy = bar.center().y;
-        for (n, item) in self.items(s).into_iter().enumerate() {
-            let w = Self::width(&painter, &item);
+        let items = self.items(s);
+        for (n, item) in items.iter().enumerate() {
+            let w = Self::width(&painter, item);
             let h = match item {
                 Item::Seg(_) => seg_h(),
                 Item::Divider => bar_h() - 2.0 * (metrics::S1 + metrics::S1),
@@ -327,34 +500,18 @@ impl Bar {
                             vec2(metrics::SEG_ICON_W, metrics::BUTTON),
                         );
                         sx += metrics::SEG_ICON_W + metrics::SEG_PAD;
-                        let seg_id = item_id.with(k);
-                        let resp = ui.interact(r, seg_id, Sense::click());
-                        let hover = resp.hovered();
-                        // §2.4 / §7.6 tool: the selected one is control-active
-                        // with its icon in accent; never an accent fill.
-                        let (fill, ink) = if !seg.enabled {
-                            (None, p.text_muted.gamma_multiply(metrics::DISABLED_ALPHA))
-                        } else if seg.on {
-                            (Some(p.control_active), p.accent)
-                        } else if hover {
-                            (Some(p.control_hover), p.text_strong)
-                        } else {
-                            (None, p.text_muted)
-                        };
-                        if let Some(fill) = fill {
-                            painter.rect_filled(r, metrics::RADIUS_SEG, fill);
-                        }
-                        seg.icon.paint(
-                            &painter,
-                            Rect::from_center_size(r.center(), vec2(metrics::ICON, metrics::ICON)),
-                            ink,
-                        );
-                        if hover {
-                            hovered_tip = Some((seg_id, r, seg.tip, None));
-                        }
-                        if resp.clicked() && seg.enabled && !seg.on {
+                        let clicked =
+                            tool_button(ui, &painter, p, r, item_id.with(k), seg, &mut hovered_tip);
+                        // One of a set: the chosen one stays chosen.
+                        if clicked && !seg.on {
                             out.command = Some(seg.command);
                         }
+                    }
+                }
+                Item::Toggle(seg) => {
+                    // On or off; the session decides whether it may change.
+                    if tool_button(ui, &painter, p, rect, item_id, seg, &mut hovered_tip) {
+                        out.command = Some(seg.command);
                     }
                 }
                 Item::Divider => {
@@ -363,15 +520,18 @@ impl Bar {
                         Stroke::new(metrics::HAIRLINE, p.line),
                     );
                 }
-                Item::Target => {
-                    target_rect = Some(rect);
+                Item::Menu(m) => {
                     let resp = ui.interact(rect, item_id, Sense::click());
                     if resp.clicked() {
-                        self.menu_open = !self.menu_open;
+                        self.menu_open = match self.menu_open {
+                            Some((_, k)) if k == n => None,
+                            _ => Some((s.stage, n)),
+                        };
                     }
+                    let open = self.menu_open == Some((s.stage, n));
                     // §7.7 dropdown standing alone: no fill, a line border,
                     // `line-dashed` while hovered or open.
-                    let edge = if resp.hovered() || self.menu_open {
+                    let edge = if resp.hovered() || open {
                         p.line_dashed
                     } else {
                         p.line
@@ -382,19 +542,20 @@ impl Bar {
                         Stroke::new(metrics::HAIRLINE, edge),
                         StrokeKind::Inside,
                     );
-                    let (_, icon, label) = target_entry(s.target);
-                    let icon_r = Rect::from_min_size(
-                        pos2(
-                            rect.left() + metrics::S2,
-                            rect.center().y - metrics::ICON / 2.0,
-                        ),
-                        vec2(metrics::ICON, metrics::ICON),
-                    );
-                    icon.paint(&painter, icon_r, p.text_strong);
+                    let entry = &m.entries[m.current];
+                    let mut text_x = rect.left() + metrics::S2;
+                    if let Some(icon) = entry.icon {
+                        let icon_r = Rect::from_min_size(
+                            pos2(text_x, rect.center().y - metrics::ICON / 2.0),
+                            vec2(metrics::ICON, metrics::ICON),
+                        );
+                        icon.paint(&painter, icon_r, p.text_strong);
+                        text_x = icon_r.right() + metrics::ICON_GAP;
+                    }
                     painter.text(
-                        pos2(icon_r.right() + metrics::ICON_GAP, rect.center().y),
+                        pos2(text_x, rect.center().y),
                         Align2::LEFT_CENTER,
-                        label,
+                        &entry.label,
                         label_font(),
                         p.text_strong,
                     );
@@ -406,12 +567,21 @@ impl Bar {
                         vec2(metrics::CHEVRON, metrics::CHEVRON),
                     );
                     // The chevron flips while the list is open (§7.7).
-                    let chevron = if self.menu_open {
+                    let chevron = if open {
                         Icon::ChevronUp
                     } else {
                         Icon::ChevronDown
                     };
                     chevron.paint(&painter, chev, p.text_dim);
+                    if resp.hovered()
+                        && !open
+                        && let Some(tip) = m.tip
+                    {
+                        hovered_tip = Some((item_id, rect, tip, None));
+                    }
+                    if open {
+                        open_menu = Some((rect, m));
+                    }
                 }
                 Item::Swatch => {
                     swatch_rect = Some(rect);
@@ -467,7 +637,7 @@ impl Bar {
                         out.command = Some(b.command);
                     }
                 }
-                Item::Copy => {
+                Item::Primary(b) => {
                     // §7.6 primary: accent fill, accent-ink 600 text. The one
                     // primary on the overlay.
                     let resp = ui.interact(rect, item_id, Sense::click());
@@ -489,19 +659,19 @@ impl Bar {
                         ),
                         vec2(metrics::ICON, metrics::ICON),
                     );
-                    Icon::Copy.paint(&painter, icon_r, p.accent_ink);
+                    b.icon.paint(&painter, icon_r, p.accent_ink);
                     painter.text(
                         pos2(icon_r.right() + metrics::ICON_GAP, rect.center().y),
                         Align2::LEFT_CENTER,
-                        "Copy",
+                        b.label,
                         strong(text::CONTROL),
                         p.accent_ink,
                     );
                     if resp.hovered() {
-                        hovered_tip = Some((item_id, rect, "Copy", Some(s.keys.copy.to_string())));
+                        hovered_tip = Some((item_id, rect, b.label, Some(b.key.clone())));
                     }
                     if resp.clicked() {
-                        out.command = Some(BarCommand::Copy);
+                        out.command = Some(b.command);
                     }
                 }
             }
@@ -514,21 +684,19 @@ impl Bar {
                 .flatten()
         });
 
-        if self.menu_open
-            && let Some(trigger) = target_rect
-        {
-            let (menu, choice) = self.target_menu(ui, p, theme, trigger, s.target, id);
-            out.owns.push(menu);
-            if let Some(kind) = choice {
-                self.menu_open = false;
-                if kind != s.target {
-                    out.command = Some(BarCommand::Target(kind));
+        if let Some((trigger, m)) = open_menu {
+            let (list, choice) = menu_list(ui, p, theme, trigger, m, id);
+            out.owns.push(list);
+            if let Some(k) = choice {
+                self.menu_open = None;
+                if k != m.current {
+                    out.command = Some(m.entries[k].command);
                 }
             } else if let Some(at) = pressed_at
-                && !menu.contains(at)
+                && !list.contains(at)
                 && !trigger.contains(at)
             {
-                self.menu_open = false;
+                self.menu_open = None;
             }
         }
 
@@ -569,73 +737,6 @@ impl Bar {
         }
 
         out
-    }
-
-    /// The target list: §7.7, opening 4 px below the trigger, exactly its
-    /// width, the current item in the selected-row look.
-    fn target_menu(
-        &mut self,
-        ui: &mut Ui,
-        p: &Palette,
-        theme: Mode,
-        trigger: Rect,
-        current: TargetKind,
-        id: Id,
-    ) -> (Rect, Option<TargetKind>) {
-        let painter = ui
-            .ctx()
-            .layer_painter(LayerId::new(Order::Foreground, id.with("menu")));
-        let item_h = metrics::ICON + 2.0 * metrics::MENU_ITEM_PAD_Y;
-        let n = TARGETS.len() as f32;
-        let menu = Rect::from_min_size(
-            pos2(trigger.left(), trigger.bottom() + metrics::POPOVER_GAP),
-            vec2(
-                trigger.width(),
-                n * item_h + (n - 1.0) * metrics::HAIRLINE + 2.0 * metrics::MENU_PAD,
-            ),
-        );
-        popover_box(&painter, p, theme, menu, metrics::RADIUS_CARD);
-        let mut choice = None;
-        for (k, &(kind, icon, label)) in TARGETS.iter().enumerate() {
-            let r = Rect::from_min_size(
-                pos2(
-                    menu.left() + metrics::MENU_PAD,
-                    menu.top() + metrics::MENU_PAD + k as f32 * (item_h + metrics::HAIRLINE),
-                ),
-                vec2(menu.width() - 2.0 * metrics::MENU_PAD, item_h),
-            );
-            let resp = ui.interact(r, id.with(("target", k)), Sense::click());
-            let on = kind == current;
-            if on {
-                painter.rect_filled(r, metrics::RADIUS_SEG, p.control);
-            } else if resp.hovered() {
-                painter.rect_filled(r, metrics::RADIUS_SEG, p.control_hover);
-            }
-            let ink = if on || resp.hovered() {
-                p.text_strong
-            } else {
-                p.text
-            };
-            let icon_r = Rect::from_min_size(
-                pos2(
-                    r.left() + metrics::MENU_ITEM_PAD_X - metrics::S1,
-                    r.center().y - metrics::ICON / 2.0,
-                ),
-                vec2(metrics::ICON, metrics::ICON),
-            );
-            icon.paint(&painter, icon_r, ink);
-            painter.text(
-                pos2(icon_r.right() + metrics::ICON_GAP, r.center().y),
-                Align2::LEFT_CENTER,
-                label,
-                label_font(),
-                ink,
-            );
-            if resp.clicked() {
-                choice = Some(kind);
-            }
-        }
-        (menu, choice)
     }
 
     /// The swatch's popover with Umber's colour wheel. The colour is sent
@@ -688,12 +789,109 @@ impl Bar {
     }
 }
 
-fn target_entry(kind: TargetKind) -> (TargetKind, Icon, &'static str) {
-    TARGETS
-        .iter()
-        .copied()
-        .find(|t| t.0 == kind)
-        .unwrap_or(TARGETS[0])
+/// A dropdown's list: §7.7, opening 4 px below the trigger, exactly its
+/// width, the current item in the selected-row look. Returns the list's rect
+/// and the entry clicked.
+fn menu_list(
+    ui: &mut Ui,
+    p: &Palette,
+    theme: Mode,
+    trigger: Rect,
+    m: &Menu,
+    id: Id,
+) -> (Rect, Option<usize>) {
+    let painter = ui
+        .ctx()
+        .layer_painter(LayerId::new(Order::Foreground, id.with("menu")));
+    let item_h = metrics::ICON + 2.0 * metrics::MENU_ITEM_PAD_Y;
+    let n = m.entries.len() as f32;
+    let list = Rect::from_min_size(
+        pos2(trigger.left(), trigger.bottom() + metrics::POPOVER_GAP),
+        vec2(
+            trigger.width(),
+            n * item_h + (n - 1.0) * metrics::HAIRLINE + 2.0 * metrics::MENU_PAD,
+        ),
+    );
+    popover_box(&painter, p, theme, list, metrics::RADIUS_CARD);
+    let mut choice = None;
+    for (k, entry) in m.entries.iter().enumerate() {
+        let r = Rect::from_min_size(
+            pos2(
+                list.left() + metrics::MENU_PAD,
+                list.top() + metrics::MENU_PAD + k as f32 * (item_h + metrics::HAIRLINE),
+            ),
+            vec2(list.width() - 2.0 * metrics::MENU_PAD, item_h),
+        );
+        let resp = ui.interact(r, id.with(("menu", k)), Sense::click());
+        let on = k == m.current;
+        if on {
+            painter.rect_filled(r, metrics::RADIUS_SEG, p.control);
+        } else if resp.hovered() {
+            painter.rect_filled(r, metrics::RADIUS_SEG, p.control_hover);
+        }
+        let ink = if on || resp.hovered() {
+            p.text_strong
+        } else {
+            p.text
+        };
+        let mut text_x = r.left() + metrics::MENU_ITEM_PAD_X - metrics::S1;
+        if let Some(icon) = entry.icon {
+            let icon_r = Rect::from_min_size(
+                pos2(text_x, r.center().y - metrics::ICON / 2.0),
+                vec2(metrics::ICON, metrics::ICON),
+            );
+            icon.paint(&painter, icon_r, ink);
+            text_x = icon_r.right() + metrics::ICON_GAP;
+        }
+        painter.text(
+            pos2(text_x, r.center().y),
+            Align2::LEFT_CENTER,
+            &entry.label,
+            label_font(),
+            ink,
+        );
+        if resp.clicked() {
+            choice = Some(k);
+        }
+    }
+    (list, choice)
+}
+
+/// A tool-look icon button (§7.6 tool, §2.4): the one that is on is
+/// control-active with its icon in accent, never an accent fill; a disabled
+/// one is faded and its tooltip says why. True when clicked while enabled.
+fn tool_button<'a>(
+    ui: &mut Ui,
+    painter: &Painter,
+    p: &Palette,
+    r: Rect,
+    id: Id,
+    seg: &'a Seg,
+    hovered_tip: &mut Option<(Id, Rect, &'a str, Option<String>)>,
+) -> bool {
+    let resp = ui.interact(r, id, Sense::click());
+    let hover = resp.hovered();
+    let (fill, ink) = if !seg.enabled {
+        (None, p.text_muted.gamma_multiply(metrics::DISABLED_ALPHA))
+    } else if seg.on {
+        (Some(p.control_active), p.accent)
+    } else if hover {
+        (Some(p.control_hover), p.text_strong)
+    } else {
+        (None, p.text_muted)
+    };
+    if let Some(fill) = fill {
+        painter.rect_filled(r, metrics::RADIUS_SEG, fill);
+    }
+    seg.icon.paint(
+        painter,
+        Rect::from_center_size(r.center(), vec2(metrics::ICON, metrics::ICON)),
+        ink,
+    );
+    if hover {
+        *hovered_tip = Some((id, r, seg.tip, None));
+    }
+    resp.clicked() && seg.enabled
 }
 
 /// A menu or popover's box (§5, §7.1): popover fill, line-popover edge,

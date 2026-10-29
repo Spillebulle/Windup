@@ -12,6 +12,11 @@
 //! an annotation being drawn (or the one a selected annotation is on, when
 //! the wheel resizes it). An annotation keeps its width in desktop units
 //! from then on, so moving it never changes its size.
+//!
+//! Video shares the choosing: once a selection is made it goes to `Ready`
+//! instead of `Editing`, where the selection stays adjustable, there are no
+//! annotation tools, and Record ends the session with the rectangle and the
+//! recording choices. Each mode keeps its own target.
 
 use image::RgbaImage;
 
@@ -20,7 +25,9 @@ use super::geometry::{DRect, DesktopShot, MonitorShot};
 use super::pick::{Tween, WindowRect, edge_rect, window_at};
 use super::raster::render;
 use super::selection::{Handle, MIN_DRAG, Selection};
-use crate::config::{ScreenshotConfig, TargetKind, ToolSizes};
+use crate::config::{ScreenshotConfig, TargetKind, ToolSizes, VideoConfig};
+use crate::video::pcm::GIF_HAS_NO_SOUND;
+use crate::video::{Bitrate, Container, frame_rates};
 
 /// How near the pointer must be to a handle or an outline, in screen points.
 pub const HANDLE_TOLERANCE: f32 = 6.0;
@@ -42,6 +49,8 @@ pub enum CaptureMode {
 pub enum Stage {
     Choosing,
     Editing,
+    /// Video's selection is made: the recording options and Record.
+    Ready,
 }
 
 #[derive(Debug)]
@@ -49,7 +58,41 @@ pub enum Outcome {
     Copy(RgbaImage),
     Save(RgbaImage),
     CopyAndSave(RgbaImage),
+    /// Record `rect` (desktop units) with these choices.
+    Record {
+        rect: DRect,
+        choice: VideoChoice,
+    },
     Cancel,
+}
+
+/// What a recording is asked to be, as picked on the bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoChoice {
+    pub fps: u32,
+    pub bitrate: Bitrate,
+    pub gif_colours: u16,
+    pub system_audio: bool,
+    pub mic: bool,
+}
+
+/// What works on this machine right now, and if not, why (rule 7: a control
+/// that cannot work is drawn disabled and says why). Plain data the desktop
+/// gathers before the overlay opens; see `crate::video::avail`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModeAvailability {
+    pub video: Result<(), &'static str>,
+    pub system_audio: Result<(), &'static str>,
+    pub mic: Result<(), &'static str>,
+}
+
+impl ModeAvailability {
+    /// Everything works.
+    pub const ALL: ModeAvailability = ModeAvailability {
+        video: Ok(()),
+        system_audio: Ok(()),
+        mic: Ok(()),
+    };
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -73,6 +116,12 @@ pub enum Action {
     SetTarget(TargetKind),
     SetMode(CaptureMode),
     SetColour([u8; 4]),
+    Record,
+    SetFps(u32),
+    SetBitrate(Bitrate),
+    SetGifColours(u16),
+    ToggleSystemAudio,
+    ToggleMic,
 }
 
 /// What the held mouse button is doing.
@@ -106,6 +155,14 @@ pub struct Session {
     pub draft: Option<Annotation>,
     /// A size to show by the pointer and the time it stops showing.
     pub size_flash: Option<(f32, f64)>,
+    /// Video's choices as picked: preferences, kept even where they cannot
+    /// apply right now. [`Session::video_choice`] is what would be recorded.
+    pub video: VideoChoice,
+    /// The configured container; a GIF has colours and no sound.
+    pub container: Container,
+    pub availability: ModeAvailability,
+    /// The target of the mode not shown, for when it comes back.
+    other_target: TargetKind,
     hover_target: Option<DRect>,
     also_save_on_copy: bool,
     grab: Grab,
@@ -115,7 +172,13 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(shot: DesktopShot, windows: Vec<WindowRect>, cfg: &ScreenshotConfig) -> Session {
+    pub fn new(
+        shot: DesktopShot,
+        windows: Vec<WindowRect>,
+        cfg: &ScreenshotConfig,
+        video: &VideoConfig,
+        availability: ModeAvailability,
+    ) -> Session {
         let mut selection = Selection::default();
         selection.kind = cfg.last_target;
         Session {
@@ -135,6 +198,16 @@ impl Session {
             pointer: None,
             draft: None,
             size_flash: None,
+            video: VideoChoice {
+                fps: video.fps,
+                bitrate: video.bitrate,
+                gif_colours: video.gif_colours,
+                system_audio: video.system_audio,
+                mic: video.mic,
+            },
+            container: video.container,
+            availability,
+            other_target: video.last_target,
             hover_target: None,
             also_save_on_copy: cfg.also_save_on_copy,
             grab: Grab::Nothing,
@@ -196,6 +269,7 @@ impl Session {
                 }
             }
             Stage::Editing => self.press_editing(at),
+            Stage::Ready => self.press_ready(at),
         }
     }
 
@@ -220,7 +294,7 @@ impl Session {
                 let min_drag = MIN_DRAG * self.units_per_point((p[0], p[1]));
                 self.selection.release(min_drag);
                 if self.stage == Stage::Choosing && self.has_selection(min_drag) {
-                    self.enter_editing();
+                    self.enter_selected();
                 }
             }
             Grab::Transform => self.doc.end_transform(),
@@ -231,7 +305,7 @@ impl Session {
                     && let Some(rect) = self.target_at((p[0], p[1]))
                 {
                     self.selection.set_rect(rect);
-                    self.enter_editing();
+                    self.enter_selected();
                 }
             }
         }
@@ -271,13 +345,85 @@ impl Session {
     /// editing: the one editing gesture the loupe helps aim, besides the
     /// pipette. Moving the whole selection is not one.
     pub fn adjusting_edge(&self) -> bool {
-        self.stage == Stage::Editing && self.grab == Grab::Selection && self.edge.is_some()
+        matches!(self.stage, Stage::Editing | Stage::Ready)
+            && self.grab == Grab::Selection
+            && self.edge.is_some()
+    }
+
+    // --- video -------------------------------------------------------------
+
+    /// The target `mode` has: the one shown for the current mode, the one
+    /// set aside for the other.
+    pub fn target_of(&self, mode: CaptureMode) -> TargetKind {
+        if mode == self.mode {
+            self.target
+        } else {
+            self.other_target
+        }
+    }
+
+    /// Whether computer sound can be recorded, and why not.
+    pub fn system_audio(&self) -> Result<(), &'static str> {
+        self.sound(self.availability.system_audio)
+    }
+
+    /// Whether the microphone can be recorded, and why not.
+    pub fn mic(&self) -> Result<(), &'static str> {
+        self.sound(self.availability.mic)
+    }
+
+    fn sound(&self, available: Result<(), &'static str>) -> Result<(), &'static str> {
+        if self.container == Container::Gif {
+            Err(GIF_HAS_NO_SOUND)
+        } else {
+            available
+        }
+    }
+
+    /// The frame rates to offer: the usual ones, plus the refresh rate of the
+    /// fastest monitor the selection touches when that is faster. Asked
+    /// afresh each time, so it follows the selection as it moves.
+    pub fn frame_rates(&self) -> Vec<u32> {
+        let max = self.selection.rect.map(|r| r.normalised()).and_then(|sel| {
+            self.shot
+                .monitors
+                .iter()
+                .filter(|m| m.layout.intersect(&sel).is_some())
+                .filter_map(|m| m.refresh_hz)
+                .max()
+        });
+        frame_rates(max)
+    }
+
+    /// What Record would ask for: the choices, with a frame rate the
+    /// selection's monitors offer (the fastest one not above the choice) and
+    /// no sound that cannot be recorded.
+    pub fn video_choice(&self) -> VideoChoice {
+        let rates = self.frame_rates();
+        let fps = if rates.contains(&self.video.fps) {
+            self.video.fps
+        } else {
+            rates
+                .iter()
+                .copied()
+                .filter(|r| *r <= self.video.fps)
+                .max()
+                .unwrap_or(rates[0])
+        };
+        VideoChoice {
+            fps,
+            system_audio: self.video.system_audio && self.system_audio().is_ok(),
+            mic: self.video.mic && self.mic().is_ok(),
+            ..self.video
+        }
     }
 
     // --- actions -----------------------------------------------------------
 
     pub fn act(&mut self, a: Action) -> Option<Outcome> {
         let editing = self.stage == Stage::Editing;
+        let ready = self.stage == Stage::Ready;
+        let choosing = self.stage == Stage::Choosing;
         match a {
             Action::Cancel => return Some(Outcome::Cancel),
             Action::Copy | Action::Save if !editing => {}
@@ -295,10 +441,10 @@ impl Session {
             Action::SelectAll => {
                 if self.target == TargetKind::Area && self.grab == Grab::Nothing {
                     self.selection.select_all(self.shot.bounds());
-                    self.enter_editing();
+                    self.enter_selected();
                 }
             }
-            Action::Nudge { dx, dy } if editing => {
+            Action::Nudge { dx, dy } if editing || ready => {
                 // A step is in points.
                 let k = self.units_per_point(self.here());
                 self.selection.nudge(dx * k, dy * k, self.edge);
@@ -339,20 +485,50 @@ impl Session {
                 }
                 self.tool = tool;
             }
-            Action::SetTarget(kind) if !editing => {
-                self.target = kind;
-                self.selection.kind = kind;
-                self.hover = None;
-                self.hover_target = None;
-            }
-            // Video and Steps arrive in a later version.
-            Action::SetMode(mode) => {
-                if mode == CaptureMode::Screenshot {
+            Action::SetTarget(kind) if choosing => self.set_target(kind),
+            // Steps arrives in a later version; Video when it can work here.
+            Action::SetMode(mode) if choosing && mode != self.mode => {
+                let allowed = match mode {
+                    CaptureMode::Screenshot => true,
+                    CaptureMode::Video => self.availability.video.is_ok(),
+                    CaptureMode::Steps => false,
+                };
+                if allowed && self.grab == Grab::Nothing {
+                    let shown = std::mem::replace(&mut self.other_target, self.target);
                     self.mode = mode;
+                    self.set_target(shown);
                 }
             }
             Action::SetColour(colour) => self.set_colour(colour),
-            Action::Nudge { .. } | Action::Delete | Action::SetTarget(_) => {}
+            Action::Record if ready => {
+                return self
+                    .selection
+                    .rect
+                    .map(|r| r.normalised())
+                    .filter(|r| r.w > 0.0 && r.h > 0.0)
+                    .map(|rect| Outcome::Record {
+                        rect,
+                        choice: self.video_choice(),
+                    });
+            }
+            Action::SetFps(fps) => self.video.fps = fps,
+            Action::SetBitrate(bitrate) => self.video.bitrate = bitrate,
+            Action::SetGifColours(n) => self.video.gif_colours = n,
+            Action::ToggleSystemAudio => {
+                if self.system_audio().is_ok() {
+                    self.video.system_audio = !self.video.system_audio;
+                }
+            }
+            Action::ToggleMic => {
+                if self.mic().is_ok() {
+                    self.video.mic = !self.video.mic;
+                }
+            }
+            Action::Nudge { .. }
+            | Action::Delete
+            | Action::SetTarget(_)
+            | Action::SetMode(_)
+            | Action::Record => {}
         }
         None
     }
@@ -403,8 +579,19 @@ impl Session {
             .is_some_and(|r| r.w >= min_drag && r.h >= min_drag)
     }
 
-    fn enter_editing(&mut self) {
-        self.stage = Stage::Editing;
+    /// A selection is made: the editor for a screenshot, Ready for video.
+    fn enter_selected(&mut self) {
+        self.stage = match self.mode {
+            CaptureMode::Video => Stage::Ready,
+            CaptureMode::Screenshot | CaptureMode::Steps => Stage::Editing,
+        };
+        self.hover = None;
+        self.hover_target = None;
+    }
+
+    fn set_target(&mut self, kind: TargetKind) {
+        self.target = kind;
+        self.selection.kind = kind;
         self.hover = None;
         self.hover_target = None;
     }
@@ -473,6 +660,17 @@ impl Session {
         let y = (((at.1 - m.layout.y) * ppu) as u32).min(m.image.height().saturating_sub(1));
         let [r, g, b, _] = m.image.get_pixel(x, y).0;
         Some([r, g, b, 255])
+    }
+
+    /// Ready has no tools: an edge or corner resizes the selection, inside
+    /// moves it.
+    fn press_ready(&mut self, at: (f32, f32)) {
+        let tolerance = self.handle_tolerance(at);
+        if let Some(h) = self.selection.handle_at(at, tolerance) {
+            self.edge = (h != Handle::Move).then_some(h);
+            self.selection.press(at, tolerance);
+            self.grab = Grab::Selection;
+        }
     }
 
     fn press_editing(&mut self, at: (f32, f32)) {
@@ -603,6 +801,8 @@ fn squared(start: (f32, f32), at: (f32, f32)) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::pcm::{GIF_HAS_NO_SOUND, SOUND_NEEDS_PIPEWIRE};
+    use crate::video::{Bitrate, Container};
     use image::Rgba;
 
     const NONE: Mods = Mods {
@@ -655,7 +855,13 @@ mod tests {
             last_target: target,
             ..ScreenshotConfig::default()
         };
-        Session::new(shot(), windows(), &cfg)
+        Session::new(
+            shot(),
+            windows(),
+            &cfg,
+            &VideoConfig::default(),
+            ModeAvailability::ALL,
+        )
     }
 
     /// An Area session already in the editor with (10,10)-(90,90) selected.
@@ -693,7 +899,13 @@ mod tests {
             also_save_on_copy: true,
             ..ScreenshotConfig::default()
         };
-        let mut s = Session::new(shot(), vec![], &cfg);
+        let mut s = Session::new(
+            shot(),
+            vec![],
+            &cfg,
+            &VideoConfig::default(),
+            ModeAvailability::ALL,
+        );
         drag_area(&mut s, [10.0, 10.0], [90.0, 90.0]);
         assert!(matches!(s.act(Action::Copy), Some(Outcome::CopyAndSave(_))));
         let mut plain = editing();
@@ -744,7 +956,13 @@ mod tests {
     fn editing_at_150() -> Session {
         let mut shot = shot();
         shot.monitors[0].scale = 1.5;
-        let mut s = Session::new(shot, vec![], &ScreenshotConfig::default());
+        let mut s = Session::new(
+            shot,
+            vec![],
+            &ScreenshotConfig::default(),
+            &VideoConfig::default(),
+            ModeAvailability::ALL,
+        );
         drag_area(&mut s, [10.0, 10.0], [90.0, 90.0]);
         assert_eq!(s.stage, Stage::Editing);
         s
@@ -800,7 +1018,13 @@ mod tests {
         assert_eq!(s.stage, Stage::Editing);
         let mut shot = shot();
         shot.monitors[0].scale = 1.5;
-        let mut s = Session::new(shot, vec![], &ScreenshotConfig::default());
+        let mut s = Session::new(
+            shot,
+            vec![],
+            &ScreenshotConfig::default(),
+            &VideoConfig::default(),
+            ModeAvailability::ALL,
+        );
         drag_area(&mut s, [10.0, 10.0], [14.0, 14.0]);
         assert_eq!(s.stage, Stage::Choosing);
     }
@@ -1008,6 +1232,221 @@ mod tests {
         let mut s = session(TargetKind::Area);
         s.act(Action::SelectAll);
         assert_eq!(s.selection.rect, Some(rect(0.0, 0.0, 200.0, 100.0)));
+    }
+
+    // --- video ---------------------------------------------------------------
+
+    const NO_FFMPEG: &str = "Video needs FFmpeg, which is missing from this installation.";
+
+    fn video_session(target: TargetKind, video: VideoConfig, avail: ModeAvailability) -> Session {
+        let cfg = ScreenshotConfig {
+            last_target: TargetKind::Area,
+            ..ScreenshotConfig::default()
+        };
+        let video = VideoConfig {
+            last_target: target,
+            ..video
+        };
+        let mut s = Session::new(shot(), windows(), &cfg, &video, avail);
+        s.act(Action::SetMode(CaptureMode::Video));
+        s
+    }
+
+    fn ready() -> Session {
+        let mut s = video_session(
+            TargetKind::Area,
+            VideoConfig::default(),
+            ModeAvailability::ALL,
+        );
+        drag_area(&mut s, [10.0, 10.0], [90.0, 90.0]);
+        s
+    }
+
+    #[test]
+    fn video_mode_goes_to_ready_not_editing() {
+        let s = ready();
+        assert_eq!(s.mode, CaptureMode::Video);
+        assert_eq!(s.stage, Stage::Ready);
+        // No annotation tools: a drag inside moves the selection, draws nothing.
+        let mut s = s;
+        s.act(Action::SetTool(Tool::Pen));
+        drag_area(&mut s, [50.0, 50.0], [60.0, 55.0]);
+        assert!(s.doc.items.is_empty());
+        assert_eq!(s.selection.rect, Some(rect(20.0, 15.0, 80.0, 80.0)));
+    }
+
+    #[test]
+    fn enter_in_ready_records_the_selection_with_the_choices() {
+        let video = VideoConfig {
+            fps: 24,
+            bitrate: Bitrate::Kbps(12000),
+            system_audio: true,
+            ..VideoConfig::default()
+        };
+        let mut s = video_session(TargetKind::Area, video, ModeAvailability::ALL);
+        drag_area(&mut s, [10.0, 10.0], [90.0, 90.0]);
+        s.act(Action::ToggleMic);
+        s.act(Action::SetFps(60));
+        // Copy and Save do nothing in Ready.
+        assert!(s.act(Action::Copy).is_none());
+        assert!(s.act(Action::Save).is_none());
+        match s.act(Action::Record) {
+            Some(Outcome::Record { rect: r, choice }) => {
+                assert_eq!(r, rect(10.0, 10.0, 80.0, 80.0));
+                assert_eq!(
+                    choice,
+                    VideoChoice {
+                        fps: 60,
+                        bitrate: Bitrate::Kbps(12000),
+                        gif_colours: 256,
+                        system_audio: true,
+                        mic: true,
+                    }
+                );
+            }
+            other => panic!("expected a recording, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_does_nothing_while_choosing_or_in_screenshot_mode() {
+        let mut s = video_session(
+            TargetKind::Area,
+            VideoConfig::default(),
+            ModeAvailability::ALL,
+        );
+        assert!(s.act(Action::Record).is_none());
+        let mut s = editing();
+        assert!(s.act(Action::Record).is_none());
+    }
+
+    #[test]
+    fn video_mode_is_refused_with_its_reason_when_unavailable() {
+        let avail = ModeAvailability {
+            video: Err(NO_FFMPEG),
+            ..ModeAvailability::ALL
+        };
+        let s = video_session(TargetKind::Area, VideoConfig::default(), avail);
+        assert_eq!(s.mode, CaptureMode::Screenshot);
+        assert_eq!(s.availability.video, Err(NO_FFMPEG));
+    }
+
+    #[test]
+    fn each_mode_keeps_its_own_target() {
+        let video = VideoConfig {
+            last_target: TargetKind::FullScreen,
+            ..VideoConfig::default()
+        };
+        let cfg = ScreenshotConfig {
+            last_target: TargetKind::Window,
+            ..ScreenshotConfig::default()
+        };
+        let mut s = Session::new(shot(), windows(), &cfg, &video, ModeAvailability::ALL);
+        assert_eq!(s.target, TargetKind::Window);
+        s.act(Action::SetMode(CaptureMode::Video));
+        assert_eq!(s.target, TargetKind::FullScreen);
+        s.act(Action::SetTarget(TargetKind::Area));
+        s.act(Action::SetMode(CaptureMode::Screenshot));
+        assert_eq!(s.target, TargetKind::Window);
+        assert_eq!(s.target_of(CaptureMode::Video), TargetKind::Area);
+        assert_eq!(s.target_of(CaptureMode::Screenshot), TargetKind::Window);
+    }
+
+    #[test]
+    fn a_window_target_in_video_records_its_rectangle_at_start() {
+        let mut s = video_session(
+            TargetKind::Window,
+            VideoConfig::default(),
+            ModeAvailability::ALL,
+        );
+        s.pointer_moved([20.0, 20.0], 0.0);
+        s.press([20.0, 20.0], NONE);
+        s.release([20.0, 20.0], NONE);
+        assert_eq!(s.stage, Stage::Ready);
+        // The window list changing later moves nothing.
+        s.windows.clear();
+        match s.act(Action::Record) {
+            Some(Outcome::Record { rect: r, .. }) => assert_eq!(r, rect(10.0, 10.0, 40.0, 40.0)),
+            other => panic!("expected a recording, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn audio_toggles_do_nothing_when_audio_is_unavailable() {
+        let avail = ModeAvailability {
+            system_audio: Err(SOUND_NEEDS_PIPEWIRE),
+            mic: Err(SOUND_NEEDS_PIPEWIRE),
+            ..ModeAvailability::ALL
+        };
+        // Wanted in settings, but there is no sound to record.
+        let video = VideoConfig {
+            mic: true,
+            ..VideoConfig::default()
+        };
+        let mut s = video_session(TargetKind::Area, video, avail);
+        drag_area(&mut s, [10.0, 10.0], [90.0, 90.0]);
+        s.act(Action::ToggleSystemAudio);
+        s.act(Action::ToggleMic);
+        assert_eq!(s.system_audio(), Err(SOUND_NEEDS_PIPEWIRE));
+        assert_eq!(s.mic(), Err(SOUND_NEEDS_PIPEWIRE));
+        assert!(!s.video.system_audio, "the toggle did nothing");
+        assert!(s.video.mic, "the preference is kept for later");
+        match s.act(Action::Record) {
+            Some(Outcome::Record { choice, .. }) => {
+                assert!(!choice.system_audio && !choice.mic, "{choice:?}");
+            }
+            other => panic!("expected a recording, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gif_disables_sound_with_its_reason() {
+        let video = VideoConfig {
+            container: Container::Gif,
+            system_audio: true,
+            ..VideoConfig::default()
+        };
+        let mut s = video_session(TargetKind::Area, video, ModeAvailability::ALL);
+        drag_area(&mut s, [10.0, 10.0], [90.0, 90.0]);
+        assert_eq!(s.system_audio(), Err(GIF_HAS_NO_SOUND));
+        assert_eq!(s.mic(), Err(GIF_HAS_NO_SOUND));
+        s.act(Action::ToggleMic);
+        s.act(Action::SetGifColours(64));
+        match s.act(Action::Record) {
+            Some(Outcome::Record { choice, .. }) => {
+                assert!(!choice.system_audio && !choice.mic);
+                assert_eq!(choice.gif_colours, 64);
+            }
+            other => panic!("expected a recording, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frame_rate_list_follows_the_selected_monitor() {
+        let mut shot = shot();
+        shot.monitors[0].refresh_hz = Some(60);
+        shot.monitors[1].refresh_hz = Some(144);
+        let video = VideoConfig {
+            fps: 144,
+            ..VideoConfig::default()
+        };
+        let mut s = Session::new(
+            shot,
+            vec![],
+            &ScreenshotConfig::default(),
+            &video,
+            ModeAvailability::ALL,
+        );
+        s.act(Action::SetMode(CaptureMode::Video));
+        assert_eq!(s.frame_rates(), vec![15, 24, 30, 60], "nothing selected");
+        // On the 60 Hz monitor alone: 144 is not offered, and not recorded.
+        drag_area(&mut s, [10.0, 10.0], [90.0, 90.0]);
+        assert_eq!(s.frame_rates(), vec![15, 24, 30, 60]);
+        assert_eq!(s.video_choice().fps, 60);
+        // Across the seam it touches the 144 Hz one too.
+        s.act(Action::Nudge { dx: 50.0, dy: 0.0 });
+        assert_eq!(s.frame_rates(), vec![15, 24, 30, 60, 144]);
+        assert_eq!(s.video_choice().fps, 144);
     }
 
     #[test]

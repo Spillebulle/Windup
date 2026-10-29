@@ -23,7 +23,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 use windup_core::capture::DesktopShot;
 use windup_core::capture::WindowRect;
-use windup_core::capture::session::{CaptureMode, Session};
+use windup_core::capture::session::{Action, CaptureMode, ModeAvailability, Outcome, Session};
 use windup_core::ipc::Command;
 use windup_core::{Config, ToolId};
 
@@ -35,6 +35,9 @@ pub(super) struct Grab {
     shot: DesktopShot,
     windows: Vec<WindowRect>,
     reduced_motion: bool,
+    /// What Video may offer, asked here: the ScreenCast portal and the
+    /// PipeWire device list can each take seconds.
+    availability: ModeAvailability,
 }
 
 pub(super) type Grabbed = Result<Grab, CaptureError>;
@@ -76,6 +79,7 @@ impl Background {
         }
         log::info!("capture: grabbing");
         self.capture.mode = mode;
+        let video = config.video.clone();
         // A worker that dies without a result (a panic), or never starts,
         // still reports, so the gate never stays `Grabbing`.
         let reply = Reply::new(
@@ -88,12 +92,18 @@ impl Background {
             .name("capture-grab".into())
             .spawn(move || {
                 let motion = portal::ask_reduced_motion();
+                let availability = crate::video::availability::ask(&video);
                 let grabbed = grab_all().map(|shot| {
                     let windows = window_rects(&shot);
+                    // Never lost: a check that died falls back to the last list.
+                    let availability = availability
+                        .recv()
+                        .unwrap_or_else(|_| crate::video::availability::cached(&video));
                     Grab {
                         shot,
                         windows,
                         reduced_motion: motion.recv_timeout(MOTION_WAIT).unwrap_or(false),
+                        availability,
                     }
                 });
                 reply.send(grabbed);
@@ -137,8 +147,15 @@ impl Background {
                 return;
             }
         };
-        let mut session = Session::new(grab.shot, grab.windows, &config.screenshot);
-        session.mode = self.capture.mode;
+        let mut session = Session::new(
+            grab.shot,
+            grab.windows,
+            &config.screenshot,
+            &config.video,
+            grab.availability,
+        );
+        // Refused, and left on Screenshot, when Video cannot work here.
+        session.act(Action::SetMode(self.capture.mode));
         let theme = popup_setup(config);
         let setup = CaptureSetup {
             session,
@@ -168,9 +185,17 @@ impl Background {
         commands: &Receiver<Command>,
     ) {
         self.capture.gate.end();
+        let record = matches!(end.outcome, Outcome::Record { .. });
         self.change_config(config, |c| {
-            finish::remember(&mut c.screenshot, &end.session)
+            finish::remember(&mut c.screenshot, &end.session);
+            if record {
+                finish::remember_video(&mut c.video, &end.session);
+            }
         });
+        if let Outcome::Record { rect, choice } = &end.outcome {
+            // Task 13 starts the recording here.
+            log::info!("Recording arrives in a later task ({rect:?}, {choice:?})");
+        }
         if end.open_settings {
             self.show_settings();
         }

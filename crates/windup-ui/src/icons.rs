@@ -47,10 +47,13 @@ pub enum Icon {
     ChevronDown,
     EyeOff,
     ChevronUp,
+    Pause,
+    Volume2,
+    Mic,
 }
 
 impl Icon {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 39] = [
         Self::Sliders,
         Self::Clipboard,
         Self::FileText,
@@ -87,6 +90,9 @@ impl Icon {
         Self::ChevronDown,
         Self::EyeOff,
         Self::ChevronUp,
+        Self::Pause,
+        Self::Volume2,
+        Self::Mic,
     ];
 
     pub fn nodes(self) -> &'static [Node] {
@@ -424,6 +430,43 @@ impl Icon {
                     "M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143",
                 ),
                 Node::Path("m2 2 20 20"),
+            ],
+            // Lucide pause
+            Self::Pause => &[
+                Node::Rect {
+                    x: 14.0,
+                    y: 3.0,
+                    w: 5.0,
+                    h: 18.0,
+                    r: 1.0,
+                },
+                Node::Rect {
+                    x: 5.0,
+                    y: 3.0,
+                    w: 5.0,
+                    h: 18.0,
+                    r: 1.0,
+                },
+            ],
+            // Lucide volume-2 (computer sound)
+            Self::Volume2 => &[
+                Node::Path(
+                    "M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z",
+                ),
+                Node::Path("M16 9a5 5 0 0 1 0 6"),
+                Node::Path("M19.364 18.364a9 9 0 0 0 0-12.728"),
+            ],
+            // Lucide mic
+            Self::Mic => &[
+                Node::Path("M12 19v3"),
+                Node::Path("M19 10v2a7 7 0 0 1-14 0v-2"),
+                Node::Rect {
+                    x: 9.0,
+                    y: 2.0,
+                    w: 6.0,
+                    h: 13.0,
+                    r: 3.0,
+                },
             ],
         }
     }

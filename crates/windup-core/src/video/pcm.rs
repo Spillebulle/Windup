@@ -7,6 +7,16 @@ use std::collections::VecDeque;
 /// Why the audio toggles are disabled on a Linux desktop without PipeWire.
 pub const SOUND_NEEDS_PIPEWIRE: &str = "Sound needs PipeWire.";
 
+/// Why a sound toggle is disabled when its kind of device is missing.
+pub const NO_SOUND_DEVICE: &str = "No sound device was found.";
+
+/// Why the sound toggles are disabled while recording a GIF.
+pub const GIF_HAS_NO_SOUND: &str = "GIF has no sound.";
+
+/// Why the sound toggles are disabled before the first look for devices is
+/// back (it can take seconds on Linux, so it never holds up the overlay).
+pub const SOUND_STILL_LOOKING: &str = "Windup is still looking for sound devices.";
+
 /// One 16-bit sample as f32, -32768 being exactly -1.
 pub fn i16_to_f32(s: i16) -> f32 {
     f32::from(s) / 32768.0

@@ -117,6 +117,7 @@ impl WindupApp {
         let mut hotkey_listener = None;
         if !startup.settings_only {
             video::ffmpeg::start_probe();
+            video::availability::refresh_sound();
             #[cfg(target_os = "linux")]
             {
                 let (events, _) = std::sync::mpsc::channel();
