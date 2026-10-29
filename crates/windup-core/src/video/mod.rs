@@ -1,8 +1,13 @@
 //! Screen recording that needs no platform: which formats go together and
 //! how fast the encoder should run.
 
+pub mod command;
 pub mod format;
 pub mod probe;
+pub mod recorder;
+
+pub use command::{AudioIn, SegmentJob, Source, join_args, segment_args, segment_ext};
+pub use recorder::{Finish, RecState, Recorder};
 
 pub use format::{
     AudioCodec, Bitrate, Codec, Container, FIXED_BITRATES, GIF_COLOURS, audio_for, auto_bitrate,
