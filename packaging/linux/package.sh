@@ -5,7 +5,9 @@
 #
 #   version   0.1.0
 #   arch      amd64 | arm64      (Debian's spelling; the others are derived)
-#   bin-dir   the directory holding the release `windup`
+#   bin-dir   the directory holding the release `windup`, and the ffmpeg,
+#             LICENSE.txt and FFMPEG-SOURCE.txt that
+#             tools/fetch-ffmpeg.sh linux64 <bin-dir> puts there
 #
 # Writes into <out-dir>:
 #
@@ -43,7 +45,8 @@ trap 'rm -rf "$work"' EXIT
 
 mkdir -p "$outdir"
 outdir=$(cd "$outdir" && pwd)
-binary=$(cd "$bindir" && pwd)/windup
+bindir=$(cd "$bindir" && pwd)
+binary=$bindir/windup
 
 case "$arch" in
     amd64) rpm_arch=x86_64;  pacman_arch=x86_64;  appimage_arch=x86_64  ;;
@@ -52,6 +55,12 @@ case "$arch" in
 esac
 
 [ -x "$binary" ] || { echo "no executable at '$binary'" >&2; exit 1; }
+for f in ffmpeg LICENSE.txt FFMPEG-SOURCE.txt; do
+    [ -f "$bindir/$f" ] || {
+        echo "no $f in '$bindir': run tools/fetch-ffmpeg.sh linux64 '$bindir' first" >&2
+        exit 1
+    }
+done
 
 APP_ID=io.github.spillebulle.windup
 
@@ -92,6 +101,12 @@ fi
 stage_tree() {
     local prefix=$1
     install -Dm755 "$binary" "$prefix/bin/windup"
+    # Windup looks for ffmpeg at <exe>/../lib/windup/ffmpeg. It is not on the
+    # PATH on purpose: a bundled build with the encoders the recorder needs
+    # must not be shadowed by a distribution's cut-down one.
+    install -Dm755 "$bindir/ffmpeg" "$prefix/lib/windup/ffmpeg"
+    install -Dm644 "$bindir/LICENSE.txt" "$prefix/share/licenses/windup/ffmpeg/LICENSE.txt"
+    install -Dm644 "$bindir/FFMPEG-SOURCE.txt" "$prefix/share/licenses/windup/ffmpeg/FFMPEG-SOURCE.txt"
     install -Dm644 "$root/packaging/$APP_ID.desktop" \
         "$prefix/share/applications/$APP_ID.desktop"
     # KWin matches the entry to the caller by the absolute path in Exec (it
@@ -235,6 +250,7 @@ rpm_key=/etc/pki/rpm-gpg/RPM-GPG-KEY-spillebulle
     echo "%files"
     [ -n "$archive_key" ] && echo "$rpm_key"
     echo "/usr/bin/windup"
+    echo "/usr/lib/windup/"
     echo "/usr/share/applications/$APP_ID.desktop"
     echo "/usr/share/metainfo/$APP_ID.metainfo.xml"
     echo "/usr/share/icons/hicolor/*/apps/$APP_ID.png"

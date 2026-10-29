@@ -74,6 +74,7 @@ jobs:
           sh packaging/linux/dependencies.sh
           sudo apt-get install -y rpm
           cargo build -p windup-desktop
+          sh tools/fetch-ffmpeg.sh linux64 target/debug
 
       - name: Package
         run: |
@@ -157,6 +158,15 @@ jobs:
         if: ${{ !matrix.test }}
         run: cargo build --release -p windup-desktop --target ${{ matrix.target }}
 
+      # The pinned FFmpeg must still download, match its checksum and offer
+      # the encoders the recorder needs.
+      - name: FFmpeg encoders
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        run: |
+          sh tools/fetch-ffmpeg.sh win64 target/ff
+          WINDUP_FFMPEG="$PWD/target/ff/ffmpeg.exe" cargo run -p windup-desktop --target ${{ matrix.target }} -- --encoders-test
+
   # Windup driven for real on Linux with no screen: a headless Sway for
   # Wayland (the protocols COSMIC, KDE and wlroots share) and Xvfb for X11.
   # tools/linux-e2e.sh says what each case checks. lavapipe stands in for a
@@ -181,6 +191,11 @@ jobs:
 
       - name: Build
         run: cargo build -p windup-desktop
+
+      # Next to the binary, where Windup looks first. ffprobe is only for
+      # the cases that inspect what they recorded.
+      - name: FFmpeg
+        run: sh tools/fetch-ffmpeg.sh linux64 target/debug --with-ffprobe
 
       - name: Run
         run: bash tools/linux-e2e.sh target/debug/windup all e2e-artefacts

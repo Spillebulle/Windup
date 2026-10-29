@@ -30,15 +30,18 @@ jobs:
         # packager's spelling of the architecture. Adding an OS is a row here,
         # the same row in ci.yml, and a packaging/<os>/package.sh; see
         # docs/packaging.md.
+        #
+        # `ffmpeg` is the platform name tools/fetch-ffmpeg.sh and
+        # packaging/ffmpeg.lock use for the build to bundle.
         include:
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,  arch: x64,   package: windows, test: true }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,  arch: x64,   package: windows, ffmpeg: win64,    test: true }
           # Cross-compiled: GitHub's ARM runners are not free for private repositories.
-          - { os: windows-latest, target: aarch64-pc-windows-msvc, arch: arm64, package: windows, test: false }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, arch: arm64, package: windows, ffmpeg: winarm64, test: false }
           # The oldest supported Ubuntu, deliberately: a binary built against an
           # older glibc runs on newer distributions, not the other way round.
           # No ARM64 Linux yet: it would be cross-compiled against arm64 system
           # libraries, and the Arch package is built in an x86-64-only image.
-          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, arch: amd64, package: linux,   test: true }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, arch: amd64, package: linux,   ffmpeg: linux64,  test: true }
 
     steps:
       - uses: actions/checkout@v5
@@ -82,6 +85,13 @@ jobs:
           version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
+      # Pinned in packaging/ffmpeg.lock and checked against its SHA-256. It
+      # goes beside the built program so the bare archive and the packagers
+      # all pick it up from there.
+      - name: FFmpeg
+        shell: bash
+        run: sh tools/fetch-ffmpeg.sh "${{ matrix.ffmpeg }}" "target/${{ matrix.target }}/release"
+
       # The bare program, for anybody who wants it without an installer.
       - name: Archive
         shell: bash
@@ -91,10 +101,12 @@ jobs:
           stage="windup-${VERSION}-${{ matrix.target }}"
           mkdir -p "staging/$stage" dist
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "$bin/windup.exe" "staging/$stage/"
+            cp "$bin/windup.exe" "$bin/ffmpeg.exe" "staging/$stage/"
           else
-            cp "$bin/windup" "staging/$stage/"
+            cp "$bin/windup" "$bin/ffmpeg" "staging/$stage/"
           fi
+          cp "$bin/LICENSE.txt" "staging/$stage/FFMPEG-LICENSE.txt"
+          cp "$bin/FFMPEG-SOURCE.txt" "staging/$stage/"
           cp README.md CHANGELOG.md LICENSE "staging/$stage/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd staging && 7z a "../dist/${stage}.zip" "$stage" > /dev/null)

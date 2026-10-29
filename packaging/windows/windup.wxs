@@ -6,7 +6,9 @@
   options can be written in this header.
 
   Windup is one executable with its fonts and icons compiled in, so this
-  places one file plus the readme, changelog and licence. WixUI_Minimal: the
+  places one file plus the readme, changelog and licence, and BtbN's FFmpeg
+  beside it (the screen recorder runs it as a separate program) with its
+  licence and source note under licenses\ffmpeg. WixUI_Minimal: the
   licence, Install, and a finish page. The setup executable installs this
   package silently behind Windup's own window, so these dialogs are only seen
   when somebody runs the .msi directly.
@@ -104,6 +106,7 @@
 
     <Feature Id="Main" Title="Windup" Level="1">
       <ComponentGroupRef Id="Files" />
+      <ComponentGroupRef Id="FfmpegLicenceFiles" />
       <ComponentGroupRef Id="StartMenu" />
     </Feature>
 
@@ -121,6 +124,24 @@
       </Component>
       <Component Id="Licence">
         <File Source="$(var.DocDir)\LICENSE" Name="LICENSE.txt" />
+      </Component>
+      <!-- Next to windup.exe, where Windup looks for it first. Not versioned
+           with the program, so it gets a stable GUID and a keypath. -->
+      <Component Id="Ffmpeg" Guid="67424759-2b1e-4242-951c-2573a3aa2da6">
+        <File Id="FfmpegExe" Source="$(var.BinDir)\ffmpeg.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- The GPL wants the licence and the source offer to travel with it. -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Directory Id="LicensesFolder" Name="licenses">
+        <Directory Id="FfmpegLicenceFolder" Name="ffmpeg" />
+      </Directory>
+    </DirectoryRef>
+    <ComponentGroup Id="FfmpegLicenceFiles" Directory="FfmpegLicenceFolder">
+      <Component Id="FfmpegLicence" Guid="67a3c020-8956-4ddb-ae5f-f227bfd93768">
+        <File Id="FfmpegLicenceTxt" Source="$(var.BinDir)\LICENSE.txt" KeyPath="yes" />
+        <File Id="FfmpegSourceTxt" Source="$(var.BinDir)\FFMPEG-SOURCE.txt" />
       </Component>
     </ComponentGroup>
 

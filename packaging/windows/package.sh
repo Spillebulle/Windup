@@ -17,6 +17,10 @@
 #   wix extension add -g WixToolset.UI.wixext/5.0.2
 #   wix extension add -g WixToolset.Util.wixext/5.0.2
 #
+# <bin-dir> must also hold ffmpeg.exe, LICENSE.txt and FFMPEG-SOURCE.txt, which
+# the workflow puts there with tools/fetch-ffmpeg.sh (win64, or winarm64 for
+# arm64). The MSI installs them beside windup.exe.
+#
 # Run from the repository root.
 
 set -eu
@@ -33,6 +37,12 @@ out=$4
 here=packaging/windows
 
 [ -f "$bin/windup.exe" ] || { echo "no windup.exe in $bin" >&2; exit 1; }
+for f in ffmpeg.exe LICENSE.txt FFMPEG-SOURCE.txt; do
+    [ -f "$bin/$f" ] || {
+        echo "no $f in $bin: run tools/fetch-ffmpeg.sh <win64|winarm64> $bin first" >&2
+        exit 1
+    }
+done
 mkdir -p "$out"
 
 # WiX wants its inputs in one folder, and its licence page wants RTF. Under

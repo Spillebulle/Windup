@@ -31,6 +31,7 @@ Each row of the `build` matrix is one target. Every row runs the same steps:
 1. install the platform's build dependencies,
 2. test (where the runner can run the target),
 3. `cargo build --release -p windup-desktop --target <target>`,
+   then `tools/fetch-ffmpeg.sh` into the same folder (see FFmpeg below),
 4. archive the bare binary with the readme, changelog and licence,
 5. `sh packaging/<package>/package.sh <version> <arch> <bin-dir> dist`.
 
@@ -41,6 +42,30 @@ writes to `dist/` is published.
 `ci.yml`'s `check` matrix must cover every target `release.yml` builds, so a
 green CI on the commit being tagged means the release will build.
 
+## FFmpeg
+
+The screen recorder drives an `ffmpeg` executable that every package carries;
+Windup never looks for the system's. `packaging/ffmpeg.lock` pins BtbN's GPL
+static builds (`FFmpeg-Builds`) by dated `autobuild-*` tag, URL and SHA-256 for
+`win64`, `winarm64` and `linux64`. `tools/fetch-ffmpeg.sh <platform> <dir>`
+downloads one (cached in `target/ff-dl`), refuses it with "checksum mismatch"
+if the sum differs, and leaves `ffmpeg[.exe]`, `LICENSE.txt` and
+`FFMPEG-SOURCE.txt` (the GPL source offer) in `<dir>`. `--with-ffprobe` also
+extracts ffprobe, for CI's end-to-end job only; packages never ship it.
+`FFMPEG_LOCK` points the script at another lock file.
+
+`release.yml` fetches into the build's bin dir before Archive and Package, and
+both package scripts fail with a pointer to the fetch script when the three
+files are missing. Where Windup finds it at run time is in `docs/linux.md` and
+the capture design: `WINDUP_FFMPEG`, next to the executable, then
+`<exe>/../lib/windup/ffmpeg`.
+
+To update FFmpeg: pick a newer `autobuild-*` release of
+`BtbN/FFmpeg-Builds` with version-named assets (the `latest` names move), put
+the three URLs and the tag in the lock, recompute the sums from the downloaded
+files, and run `--encoders-test` (CI does, on Windows). The Windows packages
+grow by about 60 MB compressed for it.
+
 ## Windows
 
 | File | What it is |
@@ -49,7 +74,9 @@ green CI on the commit being tagged means the release will build.
 | `windup-X.Y.Z-<arch>.msi` | The package itself, for deployment tools or `msiexec`. |
 | `windup-X.Y.Z-<target>.zip` | The bare program. |
 
-`packaging/windows/package.sh` builds the MSI with WiX 5 from `windup.wxs`,
+`packaging/windows/package.sh` builds the MSI with WiX 5 from `windup.wxs`
+(`ffmpeg.exe` beside `windup.exe`; its licence and source note in
+`licenses\ffmpeg\`, with their own pinned component GUIDs),
 then runs the `make-setup` example in `windup-core` to append it to the
 executable. The setup executable decides it is the installer by finding that
 payload on its own file (`windup_core::install::payload`): a double-clicked
@@ -73,6 +100,7 @@ dotnet tool install --global wix --version 5.0.2
 wix extension add -g WixToolset.UI.wixext/5.0.2
 wix extension add -g WixToolset.Util.wixext/5.0.2
 cargo build --release -p windup-desktop
+sh tools/fetch-ffmpeg.sh win64 target/release
 sh packaging/windows/package.sh 0.1.0 x64 target/release dist
 ```
 
@@ -86,7 +114,8 @@ sh packaging/windows/package.sh 0.1.0 x64 target/release dist
 | `Windup-X.Y.Z-x86_64.AppImage` | Anything else. |
 | `windup-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | The bare program. |
 
-`packaging/linux/package.sh` stages one tree (binary, desktop entry, AppStream
+`packaging/linux/package.sh` stages one tree (binary, `/usr/lib/windup/ffmpeg`
+with its licence under `/usr/share/licenses/windup/ffmpeg/`, desktop entry, AppStream
 file, hicolor icons from `assets/icons/hicolor/`, docs) and builds all four
 from it: `dpkg-deb`, `rpmbuild`, `makepkg` (in an `archlinux:base-devel`
 container when the host has none), and linuxdeploy. The dependency lists in
@@ -113,6 +142,7 @@ To build them locally on Debian or Ubuntu:
 sh packaging/linux/dependencies.sh
 sudo apt-get install -y rpm
 cargo build --release -p windup-desktop
+sh tools/fetch-ffmpeg.sh linux64 target/release
 sh packaging/linux/package.sh 0.1.0 amd64 target/release dist
 ```
 

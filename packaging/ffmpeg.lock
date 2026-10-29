@@ -1,0 +1,9 @@
+# The FFmpeg build every Windup package bundles, read by tools/fetch-ffmpeg.sh.
+# BtbN's GPL static builds: the dated autobuild tag keeps each URL immutable.
+# GPL, not LGPL, because the recorder needs libx264 and the hardware encoders.
+# To update: pick a newer autobuild-* release, replace the three lines and the
+# tag, and recompute each sum with sha256sum on the downloaded file.
+tag autobuild-2026-02-28-12-59
+win64 https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-02-28-12-59/ffmpeg-n8.0.1-66-g27b8d1a017-win64-gpl-8.0.zip e1f9fc491ef1969e666cfe36ec1d6c02b53baf49df800d5256eda10c942b1251
+winarm64 https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-02-28-12-59/ffmpeg-n8.0.1-66-g27b8d1a017-winarm64-gpl-8.0.zip 283b8d375423e86528d63a9b70e9bca3ea243872c3c1427db7088ea0690b253a
+linux64 https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-02-28-12-59/ffmpeg-n8.0.1-66-g27b8d1a017-linux64-gpl-8.0.tar.xz 26d2ecd0cefba99f9d1ea92252a3a4f743a58df4c1c3cf9f8bbaaa40b1fca5b0

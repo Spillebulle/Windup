@@ -348,6 +348,21 @@ mod tests {
         assert_eq!(guids.len(), before, "windup.wxs uses one GUID twice");
     }
 
+    /// The two FFmpeg components. A component's GUID is its identity across
+    /// upgrades: changing one makes Windows treat the file as a different
+    /// component, so it is pinned like the UpgradeCode.
+    #[test]
+    fn the_ffmpeg_components_keep_their_guids() {
+        let wxs = wxs();
+        for (id, guid) in [
+            ("Ffmpeg", "67424759-2b1e-4242-951c-2573a3aa2da6"),
+            ("FfmpegLicence", "67a3c020-8956-4ddb-ae5f-f227bfd93768"),
+        ] {
+            let wanted = format!("<Component Id=\"{id}\" Guid=\"{guid}\">");
+            assert!(wxs.contains(&wanted), "windup.wxs lacks {wanted}");
+        }
+    }
+
     #[test]
     fn the_install_folder_is_the_one_the_package_uses() {
         let wanted = format!("<Directory Id=\"INSTALLFOLDER\" Name=\"{INSTALL_FOLDER}\" />");
