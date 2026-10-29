@@ -366,7 +366,9 @@ fn start_windows_hook(
     recording: Arc<AtomicBool>,
 ) {
     *EVENT_SENDER.lock().unwrap() = Some(tx);
-    let _ = RECORDING.set(recording);
+    let set = RECORDING.set(recording);
+    // One hook per process: a second would read the first's flag.
+    debug_assert!(set.is_ok(), "the Windows hook was started twice");
 
     thread::spawn(move || {
         use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};

@@ -204,6 +204,10 @@ pub fn recording_shortcuts(bindings: Vec<(Shortcut, Action)>) -> RecordingShortc
 
 async fn recording_session(bindings: &[(Shortcut, Action)], ending: &Ending) -> ashpd::Result<()> {
     let portal = GlobalShortcuts::new().await?;
+    // Over already: no session to open, and none to close.
+    if ending.done.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let Some(session) = ending.or(portal.create_session()).await.transpose()? else {
         return Ok(());
     };

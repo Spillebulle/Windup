@@ -74,6 +74,18 @@ pub fn recording_bindings(config: &Config) -> Vec<(Shortcut, Action)> {
     ]
 }
 
+/// The recording's keys that no enabled tool holds, for desktops where the
+/// tools' keys stay bound through the recording (the GlobalShortcuts portal's
+/// first session): asking for a held key again would clash, and the tool's
+/// binding does the job already (the Video key is stop while recording).
+pub fn recording_keys_untaken(config: &Config) -> Vec<(Shortcut, Action)> {
+    let tools = bindings(config);
+    recording_bindings(config)
+        .into_iter()
+        .filter(|(s, _)| tools.iter().all(|(t, _)| t != s))
+        .collect()
+}
+
 /// What is bound right now: the tools' keys, plus while `recording` the
 /// recording's own, which come first and take a key a tool shares with them
 /// (the Video key is stop for as long as the recording runs).
@@ -273,6 +285,32 @@ mod tests {
         // The other tools keep their keys.
         assert!(live.contains(&(Shortcut::ctrl_shift_s(), Action::Screenshot)));
         assert_eq!(live.len(), bindings(&c).len() - 1 + 3);
+    }
+
+    #[test]
+    fn the_recording_keys_a_tool_holds_are_left_to_it() {
+        let c = Config::default();
+        let free = recording_keys_untaken(&c);
+        // The Video key is the tools' already (`record`, stop while recording).
+        assert!(free.iter().all(|(s, _)| *s != c.video.shortcut));
+        assert_eq!(
+            free.iter().map(|(_, a)| *a).collect::<Vec<_>>(),
+            [Action::RecordPause, Action::RecordCancel]
+        );
+        // A pause key some tool has is left out too.
+        let mut c = Config::default();
+        c.video.pause_shortcut = Shortcut::ctrl_shift_s();
+        let free = recording_keys_untaken(&c);
+        assert_eq!(
+            free.iter().map(|(_, a)| *a).collect::<Vec<_>>(),
+            [Action::RecordCancel]
+        );
+        // With Video off, its key is free for stop.
+        let mut c = Config::default();
+        c.video.enabled = false;
+        assert!(
+            recording_keys_untaken(&c).contains(&(c.video.shortcut.clone(), Action::RecordStop))
+        );
     }
 
     #[test]

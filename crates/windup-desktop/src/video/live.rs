@@ -227,6 +227,15 @@ impl Live {
         self.stoppable()
     }
 
+    /// `keys_wanted`, but only once the recording has started: for keys bound
+    /// through the desktop (COSMIC's shortcuts, the GlobalShortcuts portal),
+    /// which must not take Esc from the ScreenCast picker while it is up.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn started_keys_wanted(&self) -> bool {
+        // A stop or cancel moves a running recording on at once.
+        matches!(self.phase, Phase::Running(_))
+    }
+
     pub(crate) fn running(&self) -> Option<&Running> {
         match &self.phase {
             Phase::Running(r) => Some(r),
@@ -720,6 +729,27 @@ mod tests {
         assert!(
             matches!(events.last(), Some(LiveEvent::Over(e)) if e.message != outcome::CANCELLED)
         );
+    }
+
+    #[test]
+    fn desktop_shortcuts_wait_for_the_start_and_grabs_do_not() {
+        let mut live = Live::default();
+        let (_tx, rx) = channel();
+        live.phase = Phase::Starting {
+            rx,
+            stop: false,
+            cancel: false,
+            fps: 30,
+            label: String::new(),
+        };
+        // The hook and X grabs take the keys at once; the desktop's own
+        // shortcuts wait, so the ScreenCast picker keeps Esc.
+        assert!(live.keys_wanted());
+        assert!(!live.started_keys_wanted());
+        let mut live = running(|| Ok(PathBuf::from("a.mp4")));
+        assert!(live.keys_wanted() && live.started_keys_wanted());
+        live.cancel();
+        assert!(!live.keys_wanted() && !live.started_keys_wanted());
     }
 
     #[test]

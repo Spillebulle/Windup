@@ -356,10 +356,10 @@ impl Background {
         self.close_recbar();
     }
 
-    /// Binds the recording's keys when it starts and lets them go when it is
-    /// stopped or cancelled; every tick.
+    /// Binds the recording's keys once it has started and lets them go when
+    /// it is stopped or cancelled; every tick.
     fn sync_recording_keys(&mut self, config: &Config) {
-        let wanted = self.capture.live.keys_wanted();
+        let wanted = self.capture.live.started_keys_wanted();
         if wanted == self.capture.keys.is_some() {
             return;
         }
@@ -370,15 +370,15 @@ impl Background {
             // A portal session closes as it is dropped.
             return;
         }
-        let bindings = windup_core::hotkeys::recording_bindings(config);
         // The portal is simply tried: where it is missing it says so.
         let how = recording_keys(self.runtime.plan.hotkeys, cosmic::is_cosmic(), true);
         self.capture.keys = Some(match how {
             RecordingKeys::Cosmic => {
-                let keys: Vec<(windup_core::Shortcut, String)> = bindings
-                    .into_iter()
-                    .map(|(s, a)| (s, format!("--{}", Command::for_action(a).as_str())))
-                    .collect();
+                let keys: Vec<(windup_core::Shortcut, String)> =
+                    windup_core::hotkeys::recording_bindings(config)
+                        .into_iter()
+                        .map(|(s, a)| (s, format!("--{}", Command::for_action(a).as_str())))
+                        .collect();
                 let keys: Vec<(windup_core::Shortcut, &str)> =
                     keys.iter().map(|(s, a)| (s.clone(), a.as_str())).collect();
                 cosmic::add_temporary(&keys);
@@ -386,8 +386,12 @@ impl Background {
                 // stale entry may have been.
                 BoundKeys::Cosmic
             }
+            // Only keys the first session does not hold: asking for one again
+            // can bring GNOME's dialog back at every recording.
             RecordingKeys::Portal => BoundKeys::Portal {
-                _session: portal::recording_shortcuts(bindings),
+                _session: portal::recording_shortcuts(
+                    windup_core::hotkeys::recording_keys_untaken(config),
+                ),
             },
             RecordingKeys::Hook | RecordingKeys::XGrab | RecordingKeys::BarOnly => {
                 BoundKeys::Nothing
@@ -427,6 +431,9 @@ impl Background {
                     self.capture.gate.end();
                     self.capture.rec_rect = None;
                     self.capture.motion = None;
+                    // Let Esc go before the notice: on the window host it
+                    // blocks until it closes.
+                    self.sync_recording_keys(config);
                     self.notice_with(&ended.message, ended.saved, config, shared, commands);
                 }
                 LiveEvent::Token(t) => {
