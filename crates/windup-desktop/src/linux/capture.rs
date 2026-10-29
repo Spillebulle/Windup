@@ -436,9 +436,7 @@ impl Background {
                     self.sync_recording_keys(config);
                     self.notice_with(&ended.message, ended.saved, config, shared, commands);
                 }
-                LiveEvent::Token(t) => {
-                    self.change_config(config, |c| c.video.screencast_token = Some(t));
-                }
+                LiveEvent::Token(t) => Config::save_screencast_token(t.as_deref()),
             }
         }
         self.sync_recording_keys(config);

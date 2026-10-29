@@ -31,11 +31,12 @@ use windup_core::capture::geometry::DRect;
 use windup_core::video::Composer;
 use windup_core::video::compose::Buffer;
 use windup_core::video::screencast::{
-    ShmVideoFormat, frame_view, layout_from_streams, stream_scale,
+    ShmVideoFormat, covered_by, frame_view, layout_from_streams, stream_scale,
 };
 
 use super::screencast::{PortalStream, STOPPED};
 use super::stream::Latest;
+use crate::video::outcome::SCREENS_NOT_SHARED;
 
 /// Longest the streams may take to agree a format and say their size.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -265,8 +266,9 @@ impl Feed {
             })
             .collect();
         let layouts = layout_from_streams(&described);
-        if !layouts.iter().any(|l| l.intersect(&self.rect).is_some()) {
-            self.fail("The area is not on any shared screen.".into());
+        // Partly on a screen the grant leaves out would record black there.
+        if !covered_by(self.rect, &layouts) {
+            self.fail(SCREENS_NOT_SHARED.into());
             return;
         }
         let monitors: Vec<(DRect, f32, (u32, u32))> = layouts

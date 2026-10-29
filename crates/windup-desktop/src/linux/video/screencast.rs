@@ -35,7 +35,8 @@ use windup_core::video::{Source, even_size};
 use super::pw_stream::{self, PwStream};
 use super::stream::Latest;
 use crate::capture::CaptureError;
-use crate::video::run::{FrameSource, SourceFactory};
+use crate::video::outcome::SCREENS_NOT_SHARED;
+use crate::video::run::{FrameSource, SourceFactory, UNREADABLE};
 
 /// How long the portal may take, including the user answering its dialog
 /// the first time: long enough to read it, short enough that a portal that
@@ -79,8 +80,8 @@ impl ScreenCastFactory {
         })
     }
 
-    /// Where the next token lands, for saving to
-    /// `VideoConfig.screencast_token` once the recording has started (and
+    /// Where the next token lands, for saving to its own file
+    /// (`Config::save_screencast_token`) once the recording has started (and
     /// again at its end: a pause starts a new session, which spends it).
     /// `--record-test` never saves it.
     pub(crate) fn token_slot(&self) -> Arc<Mutex<Option<String>>> {
@@ -99,12 +100,12 @@ impl SourceFactory for ScreenCastFactory {
 
     /// A session per segment: after a pause the token restores the grant,
     /// so the user is not asked again.
-    fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
+    fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
         match open_screencast(self.rect, &self.token) {
-            Ok(stream) => Some(Box::new(stream)),
+            Ok(stream) => Ok(Box::new(stream)),
             Err(e) => {
                 log::warn!("ScreenCast: {e:?}");
-                None
+                Err(after_failure(&self.token, &e))
             }
         }
     }
@@ -180,6 +181,22 @@ fn apply_token(slot: &Mutex<Option<String>>, saved: Option<&str>, returned: Opti
             TokenChange::Set(new) => *t = Some(new),
             TokenChange::Clear => *t = None,
         }
+    }
+}
+
+/// What a session that failed leaves: the reason for the notice, and the
+/// token slot emptied when the grant shares too few screens for the area,
+/// so the next recording asks which to share instead of restoring the same
+/// grant and failing again.
+fn after_failure(slot: &Mutex<Option<String>>, e: &CaptureError) -> String {
+    match e {
+        CaptureError::Failed(why) if why == SCREENS_NOT_SHARED => {
+            if let Ok(mut t) = slot.lock() {
+                *t = None;
+            }
+            SCREENS_NOT_SHARED.into()
+        }
+        _ => UNREADABLE.into(),
     }
 }
 
@@ -349,6 +366,21 @@ mod tests {
         // No token back: the spent one is not kept.
         apply_token(&slot, Some("b"), None);
         assert_eq!(*slot.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn too_few_shared_screens_forget_the_grant() {
+        let slot = Mutex::new(Some("next".to_owned()));
+        let why = after_failure(&slot, &CaptureError::Failed(SCREENS_NOT_SHARED.into()));
+        assert_eq!(why, SCREENS_NOT_SHARED);
+        assert_eq!(*slot.lock().unwrap(), None, "the next recording asks");
+        // Any other failure keeps the token.
+        let slot = Mutex::new(Some("next".to_owned()));
+        let why = after_failure(&slot, &CaptureError::Failed("PipeWire: gone".into()));
+        assert_eq!(why, UNREADABLE);
+        assert_eq!(slot.lock().unwrap().as_deref(), Some("next"));
+        let _ = after_failure(&slot, &CaptureError::Denied);
+        assert_eq!(slot.lock().unwrap().as_deref(), Some("next"));
     }
 
     #[test]

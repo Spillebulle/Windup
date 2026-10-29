@@ -181,8 +181,8 @@ impl SourceFactory for WindowsFactory {
         self.primary.clone()
     }
 
-    fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
-        None
+    fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
+        Err(crate::video::run::UNREADABLE.into())
     }
 
     fn fallback(&self) -> Option<Source> {

@@ -50,6 +50,16 @@ pub(crate) struct Rec {
     pending: Option<(Ask, BarPlan)>,
     plan: Option<BarPlan>,
     bar: Option<Bar>,
+    /// The window was closed while recording: the recording was stopped,
+    /// and the app closes once it is saved.
+    quit_when_over: bool,
+}
+
+/// Whether a close of the main window waits for the recording: one that
+/// would end the app (not just hide the window) while a recording is under
+/// way. The app would otherwise drop it, and with it what was recorded.
+pub(crate) fn hold_close(requested: bool, hides: bool, busy: bool) -> bool {
+    requested && !hides && busy
 }
 
 /// What the bar is placed from, kept from the launcher.
@@ -176,6 +186,23 @@ impl WindupApp {
         self.close_bar();
     }
 
+    /// Holds a close of the main window while a recording is under way:
+    /// the recording is stopped (a join already under way goes on), and
+    /// the app closes when it is over. `hides` is a close that only hides
+    /// the window (Linux with "close to tray"), which the recording outlives.
+    pub(crate) fn hold_close_while_recording(&mut self, ctx: &egui::Context, hides: bool) {
+        let requested = ctx.input(|i| i.viewport().close_requested());
+        if !hold_close(requested, hides, self.rec.live.busy()) {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if !self.rec.quit_when_over {
+            log::info!("recording: the window was closed, stopping first");
+        }
+        self.rec.quit_when_over = true;
+        self.stop_recording();
+    }
+
     /// The pause key: pauses a running recording, or resumes it.
     pub(crate) fn pause_recording(&mut self) {
         if let Some(paused) = self.rec.live.toggle_pause() {
@@ -207,10 +234,16 @@ impl WindupApp {
                     self.close_bar();
                     self.rec.plan = None;
                     self.open_notice(ctx, &ended.message, ended.saved);
+                    if std::mem::take(&mut self.rec.quit_when_over) {
+                        log::info!("recording: over, closing as asked");
+                        ctx.send_viewport_cmd_to(
+                            egui::ViewportId::ROOT,
+                            egui::ViewportCommand::Close,
+                        );
+                    }
                 }
                 LiveEvent::Token(t) => {
-                    self.config.video.screencast_token = Some(t);
-                    self.config.save();
+                    windup_core::config::Config::save_screencast_token(t.as_deref())
                 }
             }
         }
@@ -463,6 +496,14 @@ mod tests {
         DRect { x, y, w, h }
     }
     const BAR: (f32, f32) = (300.0, 80.0);
+
+    #[test]
+    fn a_close_waits_only_for_a_recording_it_would_end() {
+        assert!(hold_close(true, false, true), "quitting mid-recording");
+        assert!(!hold_close(true, true, true), "the window only hides");
+        assert!(!hold_close(true, false, false), "nothing recording");
+        assert!(!hold_close(false, false, true), "no close asked");
+    }
 
     #[test]
     fn the_region_is_the_bar_until_a_tooltip_is_due() {

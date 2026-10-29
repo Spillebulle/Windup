@@ -43,6 +43,45 @@ pub fn layout_from_streams(streams: &[StreamFacts]) -> Vec<DRect> {
         .collect()
 }
 
+/// Seams narrower than this (in desktop units) between shared screens are
+/// rounding in a scaled layout, not a gap.
+const SEAM: f32 = 1.0;
+
+/// Whether the shared `screens` hold all of `area` (desktop units). An area
+/// partly off them would record black there, so the recording refuses it.
+pub fn covered_by(area: DRect, screens: &[DRect]) -> bool {
+    let area = area.normalised();
+    // Cut the area along every screen edge that crosses it; each cell is
+    // then wholly on a screen or wholly off all of them.
+    let cuts = |lo: f32, hi: f32, edges: &mut dyn Iterator<Item = f32>| {
+        let mut v: Vec<f32> = edges.filter(|e| *e > lo && *e < hi).collect();
+        v.push(lo);
+        v.push(hi);
+        v.sort_by(f32::total_cmp);
+        v.dedup();
+        v
+    };
+    let xs = cuts(
+        area.x,
+        area.right(),
+        &mut screens.iter().flat_map(|s| [s.x, s.right()]),
+    );
+    let ys = cuts(
+        area.y,
+        area.bottom(),
+        &mut screens.iter().flat_map(|s| [s.y, s.bottom()]),
+    );
+    !screens.is_empty()
+        && xs.windows(2).all(|x| {
+            ys.windows(2).all(|y| {
+                let (cx, cy) = ((x[0] + x[1]) / 2.0, (y[0] + y[1]) / 2.0);
+                x[1] - x[0] < SEAM
+                    || y[1] - y[0] < SEAM
+                    || screens.iter().any(|s| s.contains(cx, cy))
+            })
+        })
+}
+
 /// The shared-memory pixel formats a recording accepts from PipeWire, each
 /// four bytes a pixel with the fourth ignored. Named in memory order, as
 /// PipeWire's (SPA's) formats are. No DMA-BUF: without modifiers on offer
@@ -141,6 +180,32 @@ mod tests {
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> DRect {
         DRect { x, y, w, h }
+    }
+
+    #[test]
+    fn an_area_is_covered_only_when_shared_screens_hold_all_of_it() {
+        let left = rect(0.0, 0.0, 1920.0, 1080.0);
+        let right = rect(1920.0, 0.0, 1280.0, 1024.0);
+        // Inside one screen, and across two that touch.
+        assert!(covered_by(rect(100.0, 100.0, 400.0, 300.0), &[left]));
+        assert!(covered_by(
+            rect(1800.0, 100.0, 400.0, 300.0),
+            &[left, right]
+        ));
+        // Half on a screen that was not shared.
+        assert!(!covered_by(rect(1800.0, 100.0, 400.0, 300.0), &[left]));
+        // On none, and on the gap below the shorter screen.
+        assert!(!covered_by(rect(4000.0, 0.0, 100.0, 100.0), &[left, right]));
+        assert!(!covered_by(
+            rect(1900.0, 1000.0, 100.0, 60.0),
+            &[left, right]
+        ));
+        // No screens at all.
+        assert!(!covered_by(rect(0.0, 0.0, 10.0, 10.0), &[]));
+        // Rounding in scaled layouts (a 0.4 unit seam) is not a gap.
+        let scaled = rect(0.0, 0.0, 1535.6, 864.0);
+        let next = rect(1536.0, 0.0, 1920.0, 1080.0);
+        assert!(covered_by(rect(1500.0, 0.0, 100.0, 100.0), &[scaled, next]));
     }
 
     #[test]

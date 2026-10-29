@@ -99,10 +99,14 @@ version=${url##*/}
 version=${version#ffmpeg-}
 version=${version%%-"$platform"-*}
 cat >"$dest/FFMPEG-SOURCE.txt" <<TXT
-This FFmpeg is BtbN's GPL static build, unmodified, from release $tag.
+This FFmpeg is BtbN's GPL static build as published, from release $tag.
 
+The corresponding source and the build recipe are BtbN's build scripts
+(https://github.com/BtbN/FFmpeg-Builds) at that tag: they name every
+library's source and how the build was made.
+
+  Build scripts at $tag: https://github.com/BtbN/FFmpeg-Builds/tree/$tag
   Build: https://github.com/BtbN/FFmpeg-Builds/releases/tag/$tag
-  Build scripts: https://github.com/BtbN/FFmpeg-Builds
   FFmpeg source: https://git.ffmpeg.org/ffmpeg.git (revision: $version)
   Archive: $url
   SHA-256: $want

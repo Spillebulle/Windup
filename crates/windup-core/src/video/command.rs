@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::format::{AudioCodec, Container, audio_for};
+use super::format::{AudioCodec, Codec, Container, audio_for};
 
 /// Where the picture comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -217,32 +217,76 @@ pub fn segment_args(job: &SegmentJob, container: Container) -> Vec<String> {
     a
 }
 
-/// Joins the segments listed in a concat file into the final file.
-pub fn join_args(
+/// The fastest a GIF plays: its frame delays are whole hundredths of a
+/// second, and browsers slow anything under 2/100 s down to 1/10 s.
+pub const GIF_MAX_FPS: u32 = 50;
+
+/// The frame rate a GIF is written at for a recording at `fps`.
+pub fn gif_fps(fps: u32) -> u32 {
+    fps.clamp(1, GIF_MAX_FPS)
+}
+
+/// Where a GIF join keeps its palette: beside the list, in the segment
+/// folder, so it goes with the segments.
+pub fn palette_path(list_file: &Path) -> PathBuf {
+    list_file.with_file_name("palette.png")
+}
+
+/// The ffmpeg runs that join the segments listed in a concat file into the
+/// final file, in order; every one has to succeed.
+///
+/// A GIF takes two: the palette first, then the frames through it. One
+/// graph doing both (`split` into `palettegen` and `paletteuse`) holds
+/// every frame in memory until the palette is done at the end.
+pub fn join_passes(
     list_file: &Path,
     out: &Path,
     container: Container,
+    codec: Codec,
     gif_colours: u16,
     fps: u32,
-) -> Vec<String> {
+) -> Vec<Vec<String>> {
+    let concat = |a: &mut Vec<String>| {
+        push(a, &["-hide_banner", "-loglevel", "error", "-y"]);
+        push(a, &["-f", "concat", "-safe", "0", "-i"]);
+        a.push(path_arg(list_file));
+    };
     let mut a = Vec::new();
-    push(&mut a, &["-hide_banner", "-loglevel", "error", "-y"]);
-    push(&mut a, &["-f", "concat", "-safe", "0", "-i"]);
-    a.push(path_arg(list_file));
+    concat(&mut a);
     match container {
-        Container::Gif => a.extend([
-            "-filter_complex".into(),
-            format!(
-                "[0:v]fps={fps},split[a][b];[a]palettegen=max_colors={gif_colours}[p];[b][p]paletteuse"
-            ),
-        ]),
+        Container::Gif => {
+            let fps = gif_fps(fps);
+            let palette = palette_path(list_file);
+            let mut first = a;
+            first.extend([
+                "-vf".into(),
+                format!("fps={fps},palettegen=max_colors={gif_colours}"),
+            ]);
+            push(&mut first, &["-frames:v", "1", "-update", "1"]);
+            first.push(path_arg(&palette));
+
+            let mut second = Vec::new();
+            concat(&mut second);
+            second.extend(["-i".into(), path_arg(&palette)]);
+            second.extend([
+                "-filter_complex".into(),
+                format!("[0:v]fps={fps}[x];[x][1:v]paletteuse"),
+            ]);
+            second.push(path_arg(out));
+            return vec![first, second];
+        }
         Container::Mp4 | Container::Mov => {
             push(&mut a, &["-c", "copy", "-movflags", "+faststart"]);
+            // ffmpeg tags H.265 `hev1` by default, which Apple's players
+            // refuse; `hvc1` plays everywhere.
+            if codec == Codec::H265 {
+                push(&mut a, &["-tag:v", "hvc1"]);
+            }
         }
         Container::WebM | Container::Mkv => push(&mut a, &["-c", "copy"]),
     }
     a.push(path_arg(out));
-    a
+    vec![a]
 }
 
 #[cfg(test)]
@@ -433,34 +477,78 @@ mod tests {
         assert_eq!(segment_ext(Container::Gif), "mkv");
     }
 
-    #[test]
-    fn join_mp4_copies_with_faststart() {
-        let a = join_args(
-            Path::new("list.txt"),
-            Path::new("out.mp4"),
-            Container::Mp4,
-            256,
-            30,
-        );
-        assert!(has(&a, "-f concat -safe 0 -i list.txt"));
-        assert!(has(&a, "-c copy -movflags +faststart"));
-        assert_eq!(a.last().unwrap(), "out.mp4");
-        let m = join_args(Path::new("l"), Path::new("o.mkv"), Container::Mkv, 256, 30);
-        assert!(has(&m, "-c copy") && !has(&m, "-movflags +faststart"));
+    fn passes(container: Container, codec: Codec, colours: u16, fps: u32) -> Vec<Vec<String>> {
+        let dir = Path::new("work");
+        join_passes(
+            &dir.join("list.txt"),
+            Path::new(&format!("out.{}", container.ext())),
+            container,
+            codec,
+            colours,
+            fps,
+        )
     }
 
     #[test]
-    fn join_gif_builds_a_palette() {
-        let a = join_args(
-            Path::new("list.txt"),
-            Path::new("out.gif"),
-            Container::Gif,
-            128,
-            15,
-        );
-        let g = graph(&a);
-        assert!(g.contains("palettegen=max_colors=128") && g.contains("paletteuse"));
-        assert!(g.contains("fps=15"));
-        assert!(!has(&a, "-c copy"));
+    fn join_mp4_copies_with_faststart() {
+        let p = passes(Container::Mp4, Codec::H264, 256, 30);
+        assert_eq!(p.len(), 1, "one pass");
+        let a = &p[0];
+        let list = Path::new("work").join("list.txt");
+        assert!(has(a, &format!("-f concat -safe 0 -i {}", list.display())));
+        assert!(has(a, "-c copy -movflags +faststart"));
+        assert!(!a.iter().any(|x| x == "-tag:v"));
+        assert_eq!(a.last().unwrap(), "out.mp4");
+        let m = &passes(Container::Mkv, Codec::H264, 256, 30)[0];
+        assert!(has(m, "-c copy") && !has(m, "-movflags +faststart"));
+    }
+
+    #[test]
+    fn h265_in_mp4_and_mov_is_tagged_for_apple_players() {
+        for container in [Container::Mp4, Container::Mov] {
+            let a = &passes(container, Codec::H265, 256, 30)[0];
+            assert!(has(a, "-c copy"), "{a:?}");
+            assert!(has(a, "-tag:v hvc1"), "{a:?}");
+        }
+        // Matroska has no such tag, and H.264 needs none.
+        assert!(!has(
+            &passes(Container::Mkv, Codec::H265, 256, 30)[0],
+            "-tag:v hvc1"
+        ));
+        assert!(!has(
+            &passes(Container::Mov, Codec::H264, 256, 30)[0],
+            "-tag:v hvc1"
+        ));
+    }
+
+    #[test]
+    fn join_gif_makes_the_palette_first_then_uses_it() {
+        let p = passes(Container::Gif, Codec::H264, 128, 15);
+        assert_eq!(p.len(), 2, "two passes, so no frame is held in memory");
+        let palette = Path::new("work").join("palette.png");
+        let palette = palette.to_string_lossy();
+        let (one, two) = (&p[0], &p[1]);
+        assert!(has(one, "-vf fps=15,palettegen=max_colors=128"), "{one:?}");
+        assert_eq!(one.last().unwrap(), &*palette);
+        assert!(!one.iter().any(|x| x.contains("paletteuse")));
+        let list = Path::new("work").join("list.txt");
+        assert!(has(two, &format!("-i {} -i {palette}", list.display())));
+        assert_eq!(graph(two), "[0:v]fps=15[x];[x][1:v]paletteuse");
+        assert!(!two.iter().any(|x| x.contains("palettegen")));
+        assert_eq!(two.last().unwrap(), "out.gif");
+        assert!(!has(two, "-c copy"));
+    }
+
+    #[test]
+    fn a_gif_runs_at_fifty_frames_a_second_at_most() {
+        // GIF delays are in hundredths: 60 fps would be 1/100 s frames,
+        // which browsers slow down.
+        assert_eq!(gif_fps(15), 15);
+        assert_eq!(gif_fps(50), 50);
+        assert_eq!(gif_fps(60), 50);
+        assert_eq!(gif_fps(144), 50);
+        let p = passes(Container::Gif, Codec::H264, 256, 60);
+        assert!(p[0].iter().any(|x| x.starts_with("fps=50,")));
+        assert!(graph(&p[1]).starts_with("[0:v]fps=50["));
     }
 }

@@ -55,8 +55,8 @@ impl SourceFactory for PatternFactory {
         }
     }
 
-    fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
-        Some(Box::new(Pattern {
+    fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
+        Ok(Box::new(Pattern {
             w: self.w,
             h: self.h,
             t0: Instant::now(),

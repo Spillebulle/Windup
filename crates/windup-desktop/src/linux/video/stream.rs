@@ -104,12 +104,12 @@ impl SourceFactory for WaylandFactory {
         }
     }
 
-    fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
+    fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
         match ScreencopyStream::open(self.method, self.rect) {
-            Ok(s) => Some(Box::new(s)),
+            Ok(s) => Ok(Box::new(s)),
             Err(e) => {
                 log::warn!("screencopy stream: {e}");
-                None
+                Err(crate::video::run::UNREADABLE.into())
             }
         }
     }

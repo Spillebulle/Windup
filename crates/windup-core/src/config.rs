@@ -4,7 +4,7 @@ use crate::video::{Bitrate, Codec, Container};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ThemeMode {
@@ -221,8 +221,13 @@ pub struct VideoConfig {
     pub system_device: Option<String>,
     pub mic_device: Option<String>,
     pub last_target: TargetKind,
-    /// The ScreenCast portal's restore token, so Wayland asks once.
-    pub screencast_token: Option<String>,
+    /// The ScreenCast restore token as config.json once held it. Only read,
+    /// to move it to its own file (`Config::load_screencast_token`): the
+    /// settings window is a process of its own that never reloads this
+    /// file, so a token here could be written back after it was spent.
+    #[doc(hidden)]
+    #[serde(rename = "screencast_token", skip_serializing)]
+    pub legacy_screencast_token: Option<String>,
 }
 
 impl Default for VideoConfig {
@@ -244,7 +249,7 @@ impl Default for VideoConfig {
             system_device: None,
             mic_device: None,
             last_target: TargetKind::default(),
-            screencast_token: None,
+            legacy_screencast_token: None,
         }
     }
 }
@@ -318,14 +323,22 @@ impl Config {
         }
 
         match fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-                log::warn!(
-                    "Failed to parse config at {}: {}, using defaults",
-                    path.display(),
-                    e
-                );
-                Self::default()
-            }),
+            Ok(content) => {
+                let mut config: Self = serde_json::from_str(&content).unwrap_or_else(|e| {
+                    log::warn!(
+                        "Failed to parse config at {}: {}, using defaults",
+                        path.display(),
+                        e
+                    );
+                    Self::default()
+                });
+                if let Some(token) = Self::screencast_token_path()
+                    && config.migrate_screencast_token(&token)
+                {
+                    config.save();
+                }
+                config
+            }
             Err(e) => {
                 log::warn!(
                     "Failed to read config at {}: {}, using defaults",
@@ -335,6 +348,45 @@ impl Config {
                 Self::default()
             }
         }
+    }
+
+    /// Where the ScreenCast portal's restore token is kept (Linux), so
+    /// Wayland asks which screens to share once. A file of its own, as the
+    /// RemoteDesktop token is: only the process that records writes it.
+    pub fn screencast_token_path() -> Option<PathBuf> {
+        Self::config_dir().map(|dir| dir.join("screencast-token"))
+    }
+
+    pub fn load_screencast_token() -> Option<String> {
+        Self::screencast_token_path().and_then(|p| read_token(&p))
+    }
+
+    /// Saves the next token, or forgets the grant with `None`.
+    pub fn save_screencast_token(token: Option<&str>) {
+        if let Some(path) = Self::screencast_token_path()
+            && let Err(e) = write_token(&path, token)
+        {
+            log::error!("Failed to save {}: {}", path.display(), e);
+        }
+    }
+
+    /// Moves a token config.json still holds to `path`, unless a file is
+    /// there already (it is newer). True when config.json wants saving
+    /// without it.
+    fn migrate_screencast_token(&mut self, path: &Path) -> bool {
+        let Some(token) = self.video.legacy_screencast_token.take() else {
+            return false;
+        };
+        if !path.exists()
+            && let Err(e) = write_token(path, Some(&token))
+        {
+            log::warn!(
+                "Failed to move the ScreenCast token to {}: {}",
+                path.display(),
+                e
+            );
+        }
+        true
     }
 
     pub fn save(&self) {
@@ -402,9 +454,103 @@ impl Config {
     }
 }
 
+/// A token file's contents, trimmed; `None` when absent or blank.
+fn read_token(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let token = text.trim();
+    (!token.is_empty()).then(|| token.to_owned())
+}
+
+/// Writes `token` to `path`, or removes the file for `None`.
+fn write_token(path: &Path, token: Option<&str>) -> std::io::Result<()> {
+    match token {
+        Some(t) => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, t)
+        }
+        None => match fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder under the system temp dir, removed at the end.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("windup-cfg-{}-{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&p);
+            fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_screencast_token_is_never_written_to_config_json() {
+        let mut c = Config::default();
+        c.video.legacy_screencast_token = Some("t".into());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(!json.contains("screencast_token"), "{json}");
+        // An old config.json's token is still read, to be moved.
+        let old = json.replace(
+            "\"last_target\"",
+            "\"screencast_token\":\"old\",\"last_target\"",
+        );
+        let back: Config = serde_json::from_str(&old).unwrap();
+        assert_eq!(back.video.legacy_screencast_token.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn the_screencast_token_file_reads_writes_and_clears() {
+        let dir = Scratch::new("token");
+        let path = dir.0.join("sub").join("screencast-token");
+        assert_eq!(read_token(&path), None);
+        write_token(&path, Some("abc")).unwrap();
+        assert_eq!(read_token(&path).as_deref(), Some("abc"));
+        write_token(&path, None).unwrap();
+        assert!(!path.exists());
+        assert_eq!(read_token(&path), None);
+        // Clearing what is not there is fine.
+        write_token(&path, None).unwrap();
+        fs::write(
+            &path, "  
+",
+        )
+        .unwrap();
+        assert_eq!(read_token(&path), None, "blank is no token");
+    }
+
+    #[test]
+    fn an_old_screencast_token_moves_to_its_file_once() {
+        let dir = Scratch::new("migrate");
+        let path = dir.0.join("screencast-token");
+        let mut c = Config::default();
+        c.video.legacy_screencast_token = Some("old".into());
+        assert!(c.migrate_screencast_token(&path), "config.json to rewrite");
+        assert_eq!(read_token(&path).as_deref(), Some("old"));
+        assert_eq!(c.video.legacy_screencast_token, None);
+        assert!(!c.migrate_screencast_token(&path), "nothing more to do");
+
+        // A file already there is newer than config.json's copy.
+        write_token(&path, Some("newer")).unwrap();
+        c.video.legacy_screencast_token = Some("stale".into());
+        assert!(c.migrate_screencast_token(&path));
+        assert_eq!(read_token(&path).as_deref(), Some("newer"));
+    }
 
     // config.json exactly as 0.1.2 writes it, with accent_hue and max_items changed.
     const OLD_CONFIG: &str = r#"{

@@ -333,6 +333,10 @@ impl eframe::App for WindupApp {
             }
         }
 
+        // A close that would end the app waits for a recording to be
+        // saved; one that only hides the window (Linux) lets it run on.
+        let hides = cfg!(target_os = "linux") && !self.settings_only && self.config.close_to_tray;
+        self.hold_close_while_recording(ctx, hides);
         #[cfg(target_os = "linux")]
         self.keep_running_when_closed(ctx);
 
@@ -805,6 +809,9 @@ fn main() -> eframe::Result<()> {
     let Some(startup) = linux_startup() else {
         return Ok(());
     };
+    // Segment folders a Windup that died while recording left behind.
+    #[cfg(not(target_os = "linux"))]
+    video::run::remove_stale_segments();
     #[cfg(not(target_os = "linux"))]
     let startup = Startup {
         plan: if cfg!(target_os = "windows") {
@@ -955,6 +962,10 @@ fn linux_startup() -> Option<Startup> {
             std::process::exit(1);
         }
     };
+
+    // The one Windup on this display: segment folders a Windup that died
+    // while recording left behind are removed.
+    video::run::remove_stale_segments();
 
     let plan = linux::detect();
     let listener = if plan.host != platform::Host::Viewport {

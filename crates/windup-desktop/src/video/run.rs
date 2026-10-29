@@ -20,10 +20,11 @@ use windup_core::config::{Config, VideoConfig};
 use windup_core::video::pcm::put_f32le;
 use windup_core::video::{
     AudioIn, Codec, Container, Finish, Pacer, RecState, Recorder, SegmentJob, Source, candidates,
-    job_rate, join_args, pick_encoder, segment_args, segment_ext,
+    job_rate, join_passes, pick_encoder, segment_args, segment_ext,
 };
 
 use super::ffmpeg::{self, PROBE, ProbeState};
+use super::outcome::SIZE_CHANGED;
 use super::pipe::{self, PipeServer};
 
 /// Frames we capture ourselves, written to ffmpeg as BGRA.
@@ -39,7 +40,9 @@ pub(crate) trait FrameSource: Send {
 /// `FrameSource` per segment, and the pipe's path is filled in here.
 pub(crate) trait SourceFactory: Send {
     fn source(&self) -> Source;
-    fn open_pipe(&self) -> Option<Box<dyn FrameSource>>;
+    /// The frames for one segment. Err says why not, in words the notice
+    /// may show (`outcome::start_text`, `outcome::failure_text`).
+    fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String>;
     /// What to try instead when `source` makes ffmpeg exit within a second
     /// of starting (ddagrab on a machine it does not suit).
     fn fallback(&self) -> Option<Source> {
@@ -89,6 +92,9 @@ pub(crate) fn out_dir(cfg: &VideoConfig) -> Option<PathBuf> {
         .or_else(windup_core::capture::output::default_video_dir)
 }
 
+/// Why a factory's frames did not open, when it has nothing better to say.
+pub(crate) const UNREADABLE: &str = "The screen could not be read.";
+
 /// How long ffmpeg gets to finish a segment before it is killed.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// A hardware encoder that dies this soon did not work at all.
@@ -99,6 +105,8 @@ const SOUND_FLUSH: Duration = Duration::from_millis(500);
 
 /// Numbers the segment folders of this process.
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
+/// The start of every segment folder's name: `recording-<pid>-<n>`.
+const DIR_PREFIX: &str = "recording-";
 
 enum Ctl {
     Pause(f64),
@@ -116,6 +124,8 @@ struct Shared {
     failed: Mutex<Option<String>>,
     /// Each sound source's `lost` flag.
     sound_lost: Vec<Arc<AtomicBool>>,
+    /// The app is going: a join under way kills its ffmpeg and gives up.
+    abort: AtomicBool,
     /// Whether the last failure was noticed with a writer error in hand.
     #[cfg(test)]
     writer_error_seen: AtomicBool,
@@ -166,7 +176,7 @@ impl Recording {
             None => choose_encoder(codec, cfg.encoder.as_deref())?,
         };
         let n = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-        let dir = base.join(format!("recording-{}-{n}", std::process::id()));
+        let dir = base.join(format!("{DIR_PREFIX}{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Could not make {}: {e}", dir.display()))?;
 
@@ -175,6 +185,7 @@ impl Recording {
             recorder: Mutex::new(Recorder::start(0.0)),
             failed: Mutex::new(None),
             sound_lost: job.audio.iter().filter_map(|a| a.lost()).collect(),
+            abort: AtomicBool::new(false),
             #[cfg(test)]
             writer_error_seen: AtomicBool::new(false),
         });
@@ -190,6 +201,7 @@ impl Recording {
             hardware,
             fell_back: false,
             source_fell_back: false,
+            first_size: None,
             bitrate,
             seg: None,
             shared: Arc::clone(&shared),
@@ -257,6 +269,12 @@ impl Recording {
         RecClock(Arc::clone(&self.shared))
     }
 
+    /// What ends a join under way, for whoever holds the recording while it
+    /// joins on another thread.
+    pub(crate) fn abort_handle(&self) -> Abort {
+        Abort(Arc::clone(&self.shared))
+    }
+
     /// Set when a segment died; what was recorded before it is still kept.
     pub(crate) fn failed(&self) -> Option<String> {
         self.shared.failed.lock().ok().and_then(|f| f.clone())
@@ -269,21 +287,25 @@ impl Recording {
     }
 
     /// A recording whose supervisor is `body`, for tests of its handling.
+    /// The body is handed the recording's abort, to watch.
     #[cfg(test)]
     pub(crate) fn with_supervisor(
-        body: impl FnOnce() -> Result<PathBuf, String> + Send + 'static,
+        body: impl FnOnce(Abort) -> Result<PathBuf, String> + Send + 'static,
     ) -> Recording {
         let (tx, _rx) = mpsc::channel();
+        let shared = Arc::new(Shared {
+            t0: Instant::now(),
+            recorder: Mutex::new(Recorder::start(0.0)),
+            failed: Mutex::new(None),
+            sound_lost: Vec::new(),
+            abort: AtomicBool::new(false),
+            writer_error_seen: AtomicBool::new(false),
+        });
+        let abort = Abort(Arc::clone(&shared));
         Recording {
-            shared: Arc::new(Shared {
-                t0: Instant::now(),
-                recorder: Mutex::new(Recorder::start(0.0)),
-                failed: Mutex::new(None),
-                sound_lost: Vec::new(),
-                writer_error_seen: AtomicBool::new(false),
-            }),
+            shared,
             tx,
-            thread: Some(std::thread::spawn(body)),
+            thread: Some(std::thread::spawn(move || body(abort))),
         }
     }
 
@@ -319,6 +341,22 @@ impl RecClock {
             .recorder
             .lock()
             .is_ok_and(|r| r.state() == RecState::Paused)
+    }
+}
+
+/// Ends a recording's join early: its ffmpeg is killed, the half-written
+/// file and the segment folder removed. For an app that is quitting.
+#[derive(Clone)]
+pub(crate) struct Abort(Arc<Shared>);
+
+impl Abort {
+    pub(crate) fn abort(&self) {
+        self.0.abort.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_set(&self) -> bool {
+        self.0.abort.load(Ordering::Relaxed)
     }
 }
 
@@ -395,6 +433,9 @@ struct Run {
     fell_back: bool,
     /// The factory's `fallback` source is in use from here on.
     source_fell_back: bool,
+    /// Segment 0's picture size. The join copies the segments into one
+    /// stream, which cannot change size part way.
+    first_size: Option<(u32, u32)>,
     bitrate: Option<u32>,
     seg: Option<Segment>,
     shared: Arc<Shared>,
@@ -420,10 +461,7 @@ impl Run {
         };
         let source = match wanted {
             Source::RawPipe { .. } => {
-                let frames = self
-                    .factory
-                    .open_pipe()
-                    .ok_or("The screen could not be read.")?;
+                let frames = self.factory.open_pipe()?;
                 let (w, h) = frames.size();
                 let server = PipeServer::create(&self.dir, "video")
                     .map_err(|e| format!("Could not make a pipe: {e}"))?;
@@ -434,6 +472,14 @@ impl Run {
             }
             other => other,
         };
+        let size = source_size(&source);
+        match self.first_size {
+            Some(first) if index > 0 && first != size => {
+                log::warn!("segment {index}: {size:?}, not {first:?} as segment 0");
+                return Err(SIZE_CHANGED.into());
+            }
+            _ => self.first_size = Some(size),
+        }
         let piped = video_pipe.is_some();
 
         // A GIF has no sound, so its audio pipes would never be opened.
@@ -779,25 +825,25 @@ impl Run {
             &self.out_dir,
             &recording_name_now(&self.cfg.name_pattern, container.ext()),
         );
-        let args = join_args(
+        let passes = join_passes(
             &list_file,
             &out,
             container,
+            self.codec,
             self.cfg.gif_colours,
             self.cfg.fps,
         );
-        let output = ffmpeg::command(&self.ffmpeg)
-            .args(&args)
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| format!("Could not start ffmpeg: {e}"))?;
-        let written = std::fs::metadata(&out).is_ok_and(|m| m.len() > 0);
-        if output.status.success() && written {
+        for args in &passes {
+            if let Err(e) = run_to_end(&self.ffmpeg, args, &self.shared.abort) {
+                let _ = std::fs::remove_file(&out);
+                return Err(format!("The recording could not be saved: {e}"));
+            }
+        }
+        if std::fs::metadata(&out).is_ok_and(|m| m.len() > 0) {
             Ok(out)
         } else {
             let _ = std::fs::remove_file(&out);
-            let text = String::from_utf8_lossy(&output.stderr);
-            Err(format!("The recording could not be saved: {}", text.trim()))
+            Err("The recording could not be saved: the file is empty.".into())
         }
     }
 
@@ -808,6 +854,131 @@ impl Run {
             log::warn!("could not remove {}: {e}", self.dir.display());
         }
     }
+}
+
+/// The size of the picture `source` gives.
+fn source_size(source: &Source) -> (u32, u32) {
+    match source {
+        Source::Ddagrab { w, h, .. }
+        | Source::Gdigrab { w, h, .. }
+        | Source::X11grab { w, h, .. }
+        | Source::RawPipe { w, h, .. } => (*w, *h),
+    }
+}
+
+/// Runs ffmpeg with `args` to its end. Killed when `abort` is set, so a
+/// quitting app does not leave it writing. Err holds what ffmpeg said.
+fn run_to_end(ffmpeg: &Path, args: &[String], abort: &AtomicBool) -> Result<(), String> {
+    let mut child = ffmpeg::command(ffmpeg)
+        .args(args)
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not start ffmpeg: {e}"))?;
+    let stderr = child.stderr.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = std::io::Read::read_to_string(&mut s, &mut text);
+            text
+        })
+    });
+    let status = loop {
+        if abort.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("the app quit".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(TICK),
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let text = stderr.and_then(|h| h.join().ok()).unwrap_or_default();
+    if status.success() {
+        Ok(())
+    } else {
+        Err(text.trim().to_owned())
+    }
+}
+
+/// The process id in a segment folder's name, `recording-<pid>-<n>`; `None`
+/// for any other name.
+fn segment_dir_pid(name: &str) -> Option<u32> {
+    let (pid, n) = name.strip_prefix(DIR_PREFIX)?.split_once('-')?;
+    let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+    if digits(pid) && digits(n) {
+        pid.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Removes the segment folders left in `base` by a Windup that died while
+/// recording (killed, a crash, a logoff): those whose process no longer
+/// runs. Nothing else in the folder is touched.
+fn remove_stale_in(base: &Path, running: impl Fn(u32) -> bool) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(segment_dir_pid) else {
+            continue;
+        };
+        if pid == std::process::id() || running(pid) || !entry.file_type().is_ok_and(|t| t.is_dir())
+        {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => log::info!(
+                "removed {}, left by a recording that never ended",
+                path.display()
+            ),
+            Err(e) => log::warn!("could not remove {}: {e}", path.display()),
+        }
+    }
+}
+
+/// `remove_stale_in` for Windup's own cache folder. Called once at startup.
+pub(crate) fn remove_stale_segments() {
+    if let Some(base) = Config::cache_dir() {
+        remove_stale_in(&base, process_running);
+    }
+}
+
+/// Whether process `pid` runs. Where that cannot be told it is taken to,
+/// so its folder is kept.
+#[cfg(target_os = "windows")]
+fn process_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: plain calls; the handle is closed before returning.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            // Another user's (or an elevated) process still exists.
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0;
+        CloseHandle(h);
+        !ok || code == STILL_ACTIVE as u32
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_running(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn process_running(_pid: u32) -> bool {
+    true
 }
 
 /// What a writer thread watches: `stop` ends its writing, `gone` (ffmpeg
@@ -1048,8 +1219,8 @@ mod tests {
         fn source(&self) -> Source {
             PatternFactory { w: 64, h: 64 }.source()
         }
-        fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
-            Some(Box::new(Stalling {
+        fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
+            Ok(Box::new(Stalling {
                 inner: Pattern {
                     w: 64,
                     h: 64,
@@ -1207,7 +1378,7 @@ mod tests {
                 h: 64,
             }
         }
-        fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
+        fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
             PatternFactory { w: 64, h: 64 }.open_pipe()
         }
         fn fallback(&self) -> Option<Source> {
@@ -1252,7 +1423,7 @@ mod tests {
         fn source(&self) -> Source {
             PatternFactory { w: 64, h: 64 }.source()
         }
-        fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
+        fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
             self.opened.fetch_add(1, Ordering::Relaxed);
             PatternFactory { w: 64, h: 64 }.open_pipe()
         }
@@ -1407,8 +1578,8 @@ mod tests {
         fn source(&self) -> Source {
             PatternFactory { w: 64, h: 64 }.source()
         }
-        fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
-            Some(Box::new(Flash { epoch: self.epoch }))
+        fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
+            Ok(Box::new(Flash { epoch: self.epoch }))
         }
     }
 
@@ -1569,12 +1740,156 @@ clicks  {clicks:?}"
         let dir = TempDir::new("gif");
         let mut j = job(&dir, vec![]);
         j.cfg.container = Container::Gif;
-        j.cfg.fps = 15;
+        j.cfg.fps = 60;
         let mut rec = start(&dir, j, ("libx264", false));
+        sleep(0.8);
+        rec.pause();
+        sleep(0.2);
+        rec.resume();
         sleep(0.8);
         let out = rec.stop().join().unwrap().unwrap();
         assert_eq!(out.extension().unwrap(), "gif");
         let info = info(&ff, &out);
         assert!(info.contains("gif") && info.contains("64x64"), "{info}");
+        // Recorded at 60, written at 50: browsers slow 1/100 s delays.
+        assert!(info.contains("50 fps"), "{info}");
+        assert_eq!(files_in(&dir.0.join("work")), 0, "palette removed too");
+    }
+
+    #[test]
+    fn h265_in_mp4_is_tagged_hvc1() {
+        let Some(ff) = ffmpeg_or_skip("h265_in_mp4_is_tagged_hvc1") else {
+            return;
+        };
+        let dir = TempDir::new("hvc1");
+        let mut j = job(&dir, vec![]);
+        j.cfg.codec = Codec::H265;
+        let mut rec = start(&dir, j, ("libx265", false));
+        sleep(0.8);
+        let out = rec.stop().join().unwrap().unwrap();
+        let info = info(&ff, &out);
+        assert!(info.contains("hevc") && info.contains("(hvc1 /"), "{info}");
+    }
+
+    /// The pattern at 64x64 for the first segment and 32x32 after: a
+    /// Wayland scale change during a pause.
+    struct Shrinks {
+        opened: AtomicU32,
+    }
+
+    impl SourceFactory for Shrinks {
+        fn source(&self) -> Source {
+            PatternFactory { w: 64, h: 64 }.source()
+        }
+        fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
+            let side = if self.opened.fetch_add(1, Ordering::Relaxed) == 0 {
+                64
+            } else {
+                32
+            };
+            PatternFactory { w: side, h: side }.open_pipe()
+        }
+    }
+
+    #[test]
+    fn a_segment_of_another_size_ends_the_recording_and_keeps_the_rest() {
+        let Some(ff) = ffmpeg_or_skip("a_segment_of_another_size_ends_the_recording") else {
+            return;
+        };
+        let dir = TempDir::new("resized");
+        let mut j = job(&dir, vec![]);
+        j.factory = Box::new(Shrinks {
+            opened: AtomicU32::new(0),
+        });
+        let mut rec = start(&dir, j, ("libx264", false));
+        sleep(1.0);
+        rec.pause();
+        rec.resume();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rec.failed().is_none() && Instant::now() < deadline {
+            sleep(0.05);
+        }
+        assert_eq!(
+            rec.failed().as_deref(),
+            Some(format!("Recording stopped: {SIZE_CHANGED}").as_str())
+        );
+        let out = rec.stop().join().unwrap().unwrap();
+        let info = info(&ff, &out);
+        assert!(info.contains("64x64") && !info.contains("32x32"), "{info}");
+        assert_eq!(files_in(&dir.0.join("work")), 0);
+    }
+
+    #[test]
+    fn an_abort_kills_a_join_under_way() {
+        let Some(ff) = ffmpeg_or_skip("an_abort_kills_a_join_under_way") else {
+            return;
+        };
+        let args: Vec<String> = [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=30",
+            "-f",
+            "null",
+            "-",
+        ]
+        .map(String::from)
+        .to_vec();
+        let abort = Arc::new(AtomicBool::new(false));
+        let t0 = Instant::now();
+        let flag = Arc::clone(&abort);
+        let worker = std::thread::spawn(move || run_to_end(&ff, &args, &flag));
+        sleep(0.3);
+        abort.store(true, Ordering::Relaxed);
+        let result = worker.join().unwrap();
+        assert!(result.is_err());
+        assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn only_segment_folders_are_named_as_such() {
+        assert_eq!(segment_dir_pid("recording-1234-0"), Some(1234));
+        assert_eq!(segment_dir_pid("recording-1-17"), Some(1));
+        for other in [
+            "recording-",
+            "recording-12",
+            "recording-12-",
+            "recording--3",
+            "recording-ab-3",
+            "recording-12-3x",
+            "recording-12-3-4",
+            "Recording-12-3",
+            "probe.json",
+            "xrecording-12-3",
+        ] {
+            assert_eq!(segment_dir_pid(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn segment_folders_of_processes_gone_are_removed_at_startup() {
+        let dir = TempDir::new("stale");
+        let own = std::process::id();
+        let names = [
+            "recording-4000000001-0".to_owned(),
+            "recording-123-1".to_owned(),
+            format!("recording-{own}-0"),
+            "recording-abc-1".to_owned(),
+            "themes".to_owned(),
+        ];
+        for n in &names {
+            std::fs::create_dir_all(dir.0.join(n).join("inner")).unwrap();
+        }
+        // A file of that name is not a segment folder.
+        std::fs::write(dir.0.join("recording-4000000002-0"), b"x").unwrap();
+        remove_stale_in(&dir.0, |pid| pid == 123);
+        assert!(!dir.0.join(&names[0]).exists(), "its process is gone");
+        for kept in &names[1..] {
+            assert!(dir.0.join(kept).exists(), "{kept}");
+        }
+        assert!(dir.0.join("recording-4000000002-0").exists());
     }
 }

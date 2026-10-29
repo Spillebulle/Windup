@@ -21,6 +21,14 @@ pub(crate) const NOT_STARTED: &str = "The recording could not start.";
 pub(crate) const CANCELLED: &str = "The recording was cancelled.";
 pub(crate) const TOO_SMALL: &str = "The area is too small to record.";
 pub(crate) const NO_FOLDER: &str = "There is no Videos folder to save the recording in.";
+/// The area is not wholly on the screens the ScreenCast grant shares. The
+/// grant is forgotten, so the next recording asks again.
+pub(crate) const SCREENS_NOT_SHARED: &str =
+    "Windup can only record the screens you shared. Record again to choose them.";
+/// Why a segment would not start: its picture is not segment 0's size (a
+/// Wayland scale or layout change during a pause). For the log; the notice
+/// only says what was kept.
+pub(crate) const SIZE_CHANGED: &str = "The recorded area changed size.";
 /// The notice's button when there is a file to show.
 pub(crate) const OPEN_FOLDER: &str = "Open folder";
 
@@ -29,12 +37,18 @@ const STOPPED_PREFIX: &str = "Recording stopped: ";
 
 /// What the user is told about `Recording::failed`'s text: a stream's own
 /// reason verbatim, anything else (ffmpeg's last line) as the encoder.
-pub(crate) fn failure_text(raw: &str) -> &'static str {
+/// `None` when the line about what was kept says enough.
+pub(crate) fn failure_text(raw: &str) -> Option<&'static str> {
     let why = raw.strip_prefix(STOPPED_PREFIX).unwrap_or(raw).trim();
-    [MONITOR_GONE, SHARING_STOPPED]
-        .into_iter()
-        .find(|known| why == *known)
-        .unwrap_or(ENCODER_FAILED)
+    if why == SIZE_CHANGED {
+        return None;
+    }
+    Some(
+        [MONITOR_GONE, SHARING_STOPPED, SCREENS_NOT_SHARED]
+            .into_iter()
+            .find(|known| why == *known)
+            .unwrap_or(ENCODER_FAILED),
+    )
 }
 
 /// What a recording that could not start says. The size is the user's to
@@ -43,6 +57,7 @@ pub(crate) fn start_text(raw: &str) -> &'static str {
     match raw.trim() {
         TOO_SMALL => TOO_SMALL,
         NO_FOLDER => NO_FOLDER,
+        SCREENS_NOT_SHARED => SCREENS_NOT_SHARED,
         _ => NOT_STARTED,
     }
 }
@@ -80,8 +95,8 @@ pub(crate) fn ended(
     unopened: Unopened,
 ) -> Ended {
     let mut lines: Vec<String> = Vec::new();
-    if let Some(raw) = failed {
-        lines.push(failure_text(raw).to_owned());
+    if let Some(line) = failed.and_then(failure_text) {
+        lines.push(line.to_owned());
     }
     match (result, failed.is_some()) {
         (Ok(path), false) => lines.push(format!("Saved to {}", name_of(path))),
@@ -163,7 +178,7 @@ mod tests {
     #[test]
     fn an_encoder_failure_keeps_ffmpegs_line_out_of_the_notice() {
         let raw = "Recording stopped: [h264_nvenc @ 0x1] OpenEncodeSessionEx failed: out of memory";
-        assert_eq!(failure_text(raw), ENCODER_FAILED);
+        assert_eq!(failure_text(raw), Some(ENCODER_FAILED));
         let e = ended(&saved(), Some(raw), false, Unopened::default());
         assert_eq!(
             e.message,
@@ -178,8 +193,8 @@ mod tests {
     fn a_stream_says_its_own_reason() {
         for why in [MONITOR_GONE, SHARING_STOPPED] {
             let raw = format!("Recording stopped: {why}");
-            assert_eq!(failure_text(&raw), why);
-            assert_eq!(failure_text(why), why);
+            assert_eq!(failure_text(&raw), Some(why));
+            assert_eq!(failure_text(why), Some(why));
         }
     }
 
@@ -250,6 +265,28 @@ mod tests {
     }
 
     #[test]
+    fn screens_not_shared_says_how_to_choose_them() {
+        assert_eq!(
+            SCREENS_NOT_SHARED,
+            "Windup can only record the screens you shared. Record again to choose them."
+        );
+        assert_eq!(start_text(SCREENS_NOT_SHARED), SCREENS_NOT_SHARED);
+        let raw = format!("Recording stopped: {SCREENS_NOT_SHARED}");
+        assert_eq!(failure_text(&raw), Some(SCREENS_NOT_SHARED));
+    }
+
+    #[test]
+    fn a_size_change_only_says_what_was_kept() {
+        let raw = format!("Recording stopped: {SIZE_CHANGED}");
+        assert_eq!(failure_text(&raw), None);
+        let e = ended(&saved(), Some(&raw), false, Unopened::default());
+        assert_eq!(
+            e.message,
+            "Saved what was recorded before the error to Recording 2026-10-29 101500.mp4."
+        );
+    }
+
+    #[test]
     fn a_start_failure_says_the_size_or_that_it_could_not_start() {
         assert_eq!(start_text("The area is too small to record."), TOO_SMALL);
         assert_eq!(start_text("Could not start ffmpeg: denied"), NOT_STARTED);
@@ -269,6 +306,7 @@ mod tests {
             TOO_SMALL,
             NO_FOLDER,
             OPEN_FOLDER,
+            SCREENS_NOT_SHARED,
         ] {
             assert!(!s.contains('\u{2014}') && !s.contains(" - "), "{s}");
             assert!(s.chars().next().is_some_and(char::is_uppercase), "{s}");

@@ -9,6 +9,7 @@
 //! `--record-test` alike ([`screen_factory`]).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,18 +19,25 @@ use windup_core::capture::backend::Moving;
 use windup_core::capture::backend::video_order;
 use windup_core::capture::geometry::DRect;
 use windup_core::capture::session::VideoChoice;
-use windup_core::config::VideoConfig;
+use windup_core::config::{Config, VideoConfig};
 use windup_core::video::{Bitrate, even_size, job_rate};
 use windup_ui::capture::bar::{bitrate_label, colours_label};
 
 use super::outcome::{self, Ended, Unopened};
-use super::run::{AudioSource, RecClock, RecordJob, Recording, SourceFactory, out_dir};
+use super::run::{Abort, AudioSource, RecClock, RecordJob, Recording, SourceFactory, out_dir};
 use crate::capture::gate::Reply;
 
 /// How long after the overlay closed the first frame is taken: the overlay
 /// was hidden a frame before, and this lets the compositor or window manager
 /// put the desktop back on the screen before anything is read off it.
 const START_SETTLE: Duration = Duration::from_millis(100);
+/// How long an app that quits waits for a recording still starting: long
+/// enough for ffmpeg to start (so it can be stopped again), not for the
+/// ScreenCast dialog, which the start gives up on by itself.
+const QUIT_START_WAIT: Duration = Duration::from_secs(3);
+/// How long an app that quits waits for an aborted join to kill its ffmpeg
+/// and remove the segment folder; ending the last segment comes first.
+const QUIT_JOIN_WAIT: Duration = Duration::from_secs(8);
 
 /// Where the ScreenCast factory leaves the next restore token.
 pub(crate) type TokenSlot = Arc<Mutex<Option<String>>>;
@@ -175,11 +183,19 @@ enum Phase {
         stop: bool,
         /// Cancel came before the start did; it wins over a stop.
         cancel: bool,
+        /// Set when the app quits: a start not yet past the portal starts
+        /// no ffmpeg.
+        abandon: Arc<AtomicBool>,
         fps: u32,
         label: String,
     },
     Running(Running),
-    Joining(Receiver<Ended>),
+    Joining {
+        rx: Receiver<Ended>,
+        /// Ends the join early when the app quits; `None` for a cancel,
+        /// which has nothing to join.
+        abort: Option<Abort>,
+    },
 }
 
 /// What a host does after [`Live::poll`].
@@ -192,8 +208,9 @@ pub(crate) enum LiveEvent {
     /// Over, with this to say. The host shows the notice and reopens its
     /// gate.
     Over(Ended),
-    /// The ScreenCast portal handed a new restore token, to save.
-    Token(String),
+    /// The ScreenCast restore token changed: the portal handed the next
+    /// one, or `None` when the grant is spent or forgotten. To save.
+    Token(Option<String>),
 }
 
 /// One recording at a time, from its start to its notice.
@@ -216,7 +233,7 @@ impl Live {
         match &self.phase {
             Phase::Starting { stop, cancel, .. } => !stop && !cancel,
             Phase::Running(_) => true,
-            Phase::Idle | Phase::Joining(_) => false,
+            Phase::Idle | Phase::Joining { .. } => false,
         }
     }
 
@@ -253,13 +270,16 @@ impl Live {
         let cfg = job_config(&cfg, &choice);
         let size = size_of(rect);
         let (fps, label) = chips(&cfg, size);
-        self.saved_token = cfg.screencast_token.clone();
+        let token = Config::load_screencast_token();
+        self.saved_token = token.clone();
         self.token = None;
+        let abandon: Arc<AtomicBool> = Arc::default();
         let (tx, rx) = channel();
         let reply = Reply::new(tx, Err(("the recording's start thread ended".into(), None)));
+        let quit = Arc::clone(&abandon);
         let spawned = std::thread::Builder::new()
             .name("recording-start".into())
-            .spawn(move || reply.send(begin(rect, size, cfg)));
+            .spawn(move || reply.send(begin(rect, size, cfg, token, &quit)));
         if let Err(e) = spawned {
             // The closure, and with it `reply`, is dropped: that reports.
             log::error!("recording: no thread to start it: {e}");
@@ -268,6 +288,7 @@ impl Live {
             rx,
             stop: false,
             cancel: false,
+            abandon,
             fps,
             label,
         };
@@ -297,10 +318,10 @@ impl Live {
             Phase::Running(_) => {
                 if let Phase::Running(running) = std::mem::take(&mut self.phase) {
                     log::info!("recording: cancelled");
-                    self.phase = Phase::Joining(discard(running.rec));
+                    self.phase = discard(running.rec);
                 }
             }
-            Phase::Idle | Phase::Joining(_) => {}
+            Phase::Idle | Phase::Joining { .. } => {}
         }
     }
 
@@ -311,10 +332,10 @@ impl Live {
             Phase::Starting { stop, .. } => *stop = true,
             Phase::Running(_) => {
                 if let Phase::Running(running) = std::mem::take(&mut self.phase) {
-                    self.phase = Phase::Joining(join(running.rec, running.unopened));
+                    self.phase = join(running.rec, running.unopened);
                 }
             }
-            Phase::Idle | Phase::Joining(_) => {}
+            Phase::Idle | Phase::Joining { .. } => {}
         }
     }
 
@@ -330,6 +351,7 @@ impl Live {
                 cancel,
                 fps,
                 label,
+                ..
             } => match rx.try_recv() {
                 Ok(Ok((rec, token, unopened))) => {
                     log::info!("recording: started");
@@ -343,10 +365,10 @@ impl Live {
                     };
                     if *cancel {
                         log::info!("recording: cancelled");
-                        self.phase = Phase::Joining(discard(running.rec));
+                        self.phase = discard(running.rec);
                         events.push(LiveEvent::Stopping);
                     } else if *stop {
-                        self.phase = Phase::Joining(join(running.rec, running.unopened));
+                        self.phase = join(running.rec, running.unopened);
                         events.push(LiveEvent::Stopping);
                     } else {
                         self.phase = Phase::Running(running);
@@ -384,7 +406,7 @@ impl Live {
                     failed = true;
                 }
             }
-            Phase::Joining(rx) => match rx.try_recv() {
+            Phase::Joining { rx, .. } => match rx.try_recv() {
                 Ok(ended) => {
                     log::info!("recording: over ({:?})", ended.saved);
                     self.phase = Phase::Idle;
@@ -407,10 +429,10 @@ impl Live {
         // The token is spent by each session (a pause starts a new one), so
         // it is looked at for as long as the slot is held.
         if let Some(slot) = &self.token
-            && let Some(t) = slot.lock().ok().and_then(|t| t.clone())
-            && self.saved_token.as_ref() != Some(&t)
+            && let Ok(t) = slot.lock().map(|t| t.clone())
+            && self.saved_token != t
         {
-            self.saved_token = Some(t.clone());
+            self.saved_token = t.clone();
             events.push(LiveEvent::Token(t));
         }
         // An over event (put last, after any token) ends the slot.
@@ -425,14 +447,52 @@ impl Live {
     }
 }
 
-/// The worker's half of `Live::start`.
-fn begin(rect: DRect, size: (u32, u32), cfg: VideoConfig) -> Result<Started, NotStarted> {
+impl Drop for Live {
+    /// The app is quitting. Nothing it started may outlive it: a recording
+    /// still starting is cancelled once ffmpeg runs (ddagrab would record
+    /// for good), and a join under way is killed with its segment folder
+    /// removed. Hosts hold a close until the recording is over, so this is
+    /// for the ways out that do not wait.
+    fn drop(&mut self) {
+        match std::mem::take(&mut self.phase) {
+            Phase::Idle | Phase::Running(_) => {}
+            Phase::Starting { rx, abandon, .. } => {
+                abandon.store(true, Ordering::Relaxed);
+                // Dropped here: its own drop cancels it and waits.
+                if let Ok(Ok((rec, _, _))) = rx.recv_timeout(QUIT_START_WAIT) {
+                    log::info!("recording: cancelled, the app is quitting");
+                    drop(rec);
+                }
+            }
+            Phase::Joining { rx, abort } => {
+                if let Some(abort) = abort {
+                    log::info!("recording: join aborted, the app is quitting");
+                    abort.abort();
+                }
+                let _ = rx.recv_timeout(QUIT_JOIN_WAIT);
+            }
+        }
+    }
+}
+
+/// The worker's half of `Live::start`. `token` is the saved ScreenCast
+/// restore token; `abandon` is set when the app quits meanwhile.
+fn begin(
+    rect: DRect,
+    size: (u32, u32),
+    cfg: VideoConfig,
+    token: Option<String>,
+    abandon: &AtomicBool,
+) -> Result<Started, NotStarted> {
     std::thread::sleep(START_SETTLE);
     if even_size(size.0, size.1).is_none() {
         return Err((outcome::TOO_SMALL.into(), None));
     }
     let out_dir = out_dir(&cfg).ok_or((outcome::NO_FOLDER.to_owned(), None))?;
-    let picked = screen_factory(rect, cfg.screencast_token.clone()).map_err(|e| (e, None))?;
+    let picked = screen_factory(rect, token).map_err(|e| (e, None))?;
+    if abandon.load(Ordering::Relaxed) {
+        return Err((outcome::NOT_STARTED.into(), picked.token));
+    }
     let (audio, unopened) = open_audio(&cfg);
     let job = RecordJob {
         factory: picked.factory,
@@ -487,8 +547,8 @@ fn open_audio(cfg: &VideoConfig) -> (Vec<Box<dyn AudioSource>>, Unopened) {
 }
 
 /// Cancels `rec` on a worker (it waits for ffmpeg to go and the segments
-/// to be removed); the receiver gets the notice.
-fn discard(mut rec: Recording) -> Receiver<Ended> {
+/// to be removed); the phase's receiver gets the notice.
+fn discard(mut rec: Recording) -> Phase {
     let (tx, rx) = channel();
     let cancelled = Ended {
         message: outcome::CANCELLED.to_owned(),
@@ -506,11 +566,12 @@ fn discard(mut rec: Recording) -> Receiver<Ended> {
         // it there and then; `reply` says so.
         log::error!("recording: no thread for the cancel: {e}");
     }
-    rx
+    Phase::Joining { rx, abort: None }
 }
 
-/// Stops `rec` and joins it on a worker; the receiver gets the notice.
-fn join(mut rec: Recording, unopened: Unopened) -> Receiver<Ended> {
+/// Stops `rec` and joins it on a worker; the phase's receiver gets the
+/// notice.
+fn join(mut rec: Recording, unopened: Unopened) -> Phase {
     let (tx, rx) = channel();
     let reply = Reply::new(
         tx,
@@ -519,6 +580,7 @@ fn join(mut rec: Recording, unopened: Unopened) -> Receiver<Ended> {
             saved: None,
         },
     );
+    let abort = rec.abort_handle();
     let handle = rec.stop();
     let spawned = std::thread::Builder::new()
         .name("recording-join".into())
@@ -540,13 +602,23 @@ fn join(mut rec: Recording, unopened: Unopened) -> Receiver<Ended> {
     if let Err(e) = spawned {
         log::error!("recording: no thread for the join: {e}");
     }
-    rx
+    Phase::Joining {
+        rx,
+        abort: Some(abort),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use windup_core::video::{Codec, Container};
+
+    fn with_phase(phase: Phase) -> Live {
+        let mut live = Live::default();
+        live.phase = phase;
+        live
+    }
 
     fn choice() -> VideoChoice {
         VideoChoice {
@@ -561,7 +633,7 @@ mod tests {
     #[test]
     fn the_bars_picks_override_the_saved_settings() {
         let saved = VideoConfig {
-            screencast_token: Some("t".into()),
+            name_pattern: "Mine".into(),
             mic: true,
             ..VideoConfig::default()
         };
@@ -572,7 +644,7 @@ mod tests {
         assert!(c.system_audio);
         assert!(!c.mic, "the bar turned it off");
         // The rest is the saved configuration's.
-        assert_eq!(c.screencast_token.as_deref(), Some("t"));
+        assert_eq!(c.name_pattern, "Mine");
         assert_eq!(c.container, saved.container);
     }
 
@@ -617,17 +689,14 @@ mod tests {
 
     #[test]
     fn a_recording_thread_that_dies_stops_the_recording() {
-        let rec = Recording::with_supervisor(|| panic!("in the supervisor"));
-        let mut live = Live {
-            phase: Phase::Running(Running {
-                clock: rec.clock(),
-                rec,
-                unopened: Unopened::default(),
-                fps: 30,
-                label: String::new(),
-            }),
-            ..Live::default()
-        };
+        let rec = Recording::with_supervisor(|_| panic!("in the supervisor"));
+        let mut live = with_phase(Phase::Running(Running {
+            clock: rec.clock(),
+            rec,
+            unopened: Unopened::default(),
+            fps: 30,
+            label: String::new(),
+        }));
         let mut events = Vec::new();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !events.iter().any(|e| matches!(e, LiveEvent::Over(_)))
@@ -645,18 +714,15 @@ mod tests {
     }
 
     /// A recording whose supervisor waits to be told, then says so.
-    fn running(body: impl FnOnce() -> Result<PathBuf, String> + Send + 'static) -> Live {
+    fn running(body: impl FnOnce(Abort) -> Result<PathBuf, String> + Send + 'static) -> Live {
         let rec = Recording::with_supervisor(body);
-        Live {
-            phase: Phase::Running(Running {
-                clock: rec.clock(),
-                rec,
-                unopened: Unopened::default(),
-                fps: 30,
-                label: String::new(),
-            }),
-            ..Live::default()
-        }
+        with_phase(Phase::Running(Running {
+            clock: rec.clock(),
+            rec,
+            unopened: Unopened::default(),
+            fps: 30,
+            label: String::new(),
+        }))
     }
 
     fn until_over(live: &mut Live) -> Vec<LiveEvent> {
@@ -673,7 +739,7 @@ mod tests {
 
     #[test]
     fn cancel_discards_a_running_recording_and_says_so() {
-        let mut live = running(|| {
+        let mut live = running(|_| {
             std::thread::sleep(Duration::from_millis(50));
             Ok(PathBuf::from("must-not-be-kept.mp4"))
         });
@@ -704,12 +770,13 @@ mod tests {
             rx,
             stop: false,
             cancel: false,
+            abandon: Arc::default(),
             fps: 30,
             label: String::new(),
         };
         live.cancel();
         assert!(!live.keys_wanted());
-        let rec = Recording::with_supervisor(|| Ok(PathBuf::from("kept.mp4")));
+        let rec = Recording::with_supervisor(|_| Ok(PathBuf::from("kept.mp4")));
         tx.send(Ok((rec, None, Unopened::default()))).unwrap();
         let events = until_over(&mut live);
         assert!(!events.contains(&LiveEvent::Started), "{events:?}");
@@ -722,7 +789,7 @@ mod tests {
     #[test]
     fn a_cancel_after_the_stop_leaves_the_join_alone() {
         // Esc after the stop key: the join is under way, and keeps its file.
-        let mut live = running(|| Ok(PathBuf::from("a.mp4")));
+        let mut live = running(|_| Ok(PathBuf::from("a.mp4")));
         live.stop();
         live.cancel();
         let events = until_over(&mut live);
@@ -739,6 +806,7 @@ mod tests {
             rx,
             stop: false,
             cancel: false,
+            abandon: Arc::default(),
             fps: 30,
             label: String::new(),
         };
@@ -746,7 +814,7 @@ mod tests {
         // shortcuts wait, so the ScreenCast picker keeps Esc.
         assert!(live.keys_wanted());
         assert!(!live.started_keys_wanted());
-        let mut live = running(|| Ok(PathBuf::from("a.mp4")));
+        let mut live = running(|_| Ok(PathBuf::from("a.mp4")));
         assert!(live.keys_wanted() && live.started_keys_wanted());
         live.cancel();
         assert!(!live.keys_wanted() && !live.started_keys_wanted());
@@ -758,7 +826,7 @@ mod tests {
         assert_eq!(Live::default().toggle_pause(), None);
         // A running recording that is not paused is paused. (This fake one
         // has no supervisor to take the pause, so it never reads as paused.)
-        let mut live = running(|| Ok(PathBuf::from("a.mp4")));
+        let mut live = running(|_| Ok(PathBuf::from("a.mp4")));
         assert_eq!(live.toggle_pause(), Some(true));
         live.cancel();
     }
@@ -781,6 +849,7 @@ mod tests {
             rx,
             stop: false,
             cancel: false,
+            abandon: Arc::default(),
             fps: 30,
             label: String::new(),
         };
@@ -804,6 +873,7 @@ mod tests {
             rx,
             stop: false,
             cancel: false,
+            abandon: Arc::default(),
             fps: 30,
             label: String::new(),
         };
@@ -815,10 +885,8 @@ mod tests {
 
     #[test]
     fn a_start_that_failed_after_the_portal_answered_still_saves_its_token() {
-        let mut live = Live {
-            saved_token: Some("spent".into()),
-            ..Live::default()
-        };
+        let mut live = Live::default();
+        live.saved_token = Some("spent".into());
         let slot: TokenSlot = Arc::new(Mutex::new(Some("next".into())));
         let (tx, rx) = channel();
         tx.send(Err(("ffmpeg was not found.".to_owned(), Some(slot))))
@@ -827,11 +895,12 @@ mod tests {
             rx,
             stop: false,
             cancel: false,
+            abandon: Arc::default(),
             fps: 30,
             label: String::new(),
         };
         let events = live.poll();
-        assert_eq!(events[0], LiveEvent::Token("next".into()));
+        assert_eq!(events[0], LiveEvent::Token(Some("next".into())));
         assert!(matches!(&events[1], LiveEvent::Over(e) if e.message == outcome::NOT_STARTED));
     }
 
@@ -842,7 +911,7 @@ mod tests {
         live.saved_token = Some("old".into());
         live.token = Some(Arc::clone(&slot));
         let (tx, rx) = channel();
-        live.phase = Phase::Joining(rx);
+        live.phase = Phase::Joining { rx, abort: None };
         assert!(live.poll().is_empty(), "the saved one is not saved again");
         *slot.lock().unwrap() = Some("new".into());
         tx.send(Ended {
@@ -852,8 +921,90 @@ mod tests {
         .unwrap();
         let events = live.poll();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0], LiveEvent::Token("new".into()));
+        assert_eq!(events[0], LiveEvent::Token(Some("new".into())));
         assert!(matches!(events[1], LiveEvent::Over(_)));
         assert!(live.poll().is_empty());
+    }
+
+    #[test]
+    fn a_grant_that_was_forgotten_is_saved_as_none() {
+        let mut live = Live::default();
+        live.saved_token = Some("spent".into());
+        let slot: TokenSlot = Arc::new(Mutex::new(None));
+        let (tx, rx) = channel();
+        tx.send(Err((outcome::SCREENS_NOT_SHARED.to_owned(), Some(slot))))
+            .unwrap();
+        live.phase = Phase::Starting {
+            rx,
+            stop: false,
+            cancel: false,
+            abandon: Arc::default(),
+            fps: 30,
+            label: String::new(),
+        };
+        let events = live.poll();
+        assert_eq!(events[0], LiveEvent::Token(None));
+        assert!(
+            matches!(&events[1], LiveEvent::Over(e) if e.message == outcome::SCREENS_NOT_SHARED)
+        );
+    }
+
+    #[test]
+    fn quitting_while_it_starts_cancels_what_started() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let abandon: Arc<AtomicBool> = Arc::default();
+        let live = with_phase(Phase::Starting {
+            rx,
+            stop: false,
+            cancel: false,
+            abandon: Arc::clone(&abandon),
+            fps: 30,
+            label: String::new(),
+        });
+        // ffmpeg is being started on the worker as the app quits.
+        let worker = {
+            let cancelled = Arc::clone(&cancelled);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                let rec = Recording::with_supervisor(move |_| {
+                    // Ends when the recording is cancelled, which joins it.
+                    std::thread::sleep(Duration::from_millis(100));
+                    cancelled.store(true, Ordering::Relaxed);
+                    Err("cancelled".into())
+                });
+                let _ = tx.send(Ok((rec, None, Unopened::default())));
+            })
+        };
+        drop(live);
+        assert!(abandon.load(Ordering::Relaxed), "the start is told");
+        assert!(
+            cancelled.load(Ordering::Relaxed),
+            "the recording that started was cancelled before the app went"
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn quitting_while_it_joins_aborts_the_join_and_waits_for_it() {
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let mut live = {
+            let cleaned = Arc::clone(&cleaned);
+            running(move |abort| {
+                // A long join that only an abort ends; the folder goes after.
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while !abort.is_set() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+                cleaned.store(true, Ordering::Relaxed);
+                Err("aborted".into())
+            })
+        };
+        live.stop();
+        let t0 = std::time::Instant::now();
+        drop(live);
+        assert!(cleaned.load(Ordering::Relaxed), "waited for the clean-up");
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
     }
 }

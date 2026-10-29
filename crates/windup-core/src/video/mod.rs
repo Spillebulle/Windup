@@ -12,7 +12,10 @@ pub mod probe;
 pub mod recorder;
 pub mod screencast;
 
-pub use command::{AudioIn, SegmentJob, Source, join_args, segment_args, segment_ext};
+pub use command::{
+    AudioIn, GIF_MAX_FPS, SegmentJob, Source, gif_fps, join_passes, palette_path, segment_args,
+    segment_ext,
+};
 pub use compose::Composer;
 pub use pacing::Pacer;
 pub use place::{place_bar, top_centre};
