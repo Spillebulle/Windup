@@ -93,7 +93,7 @@ impl Recorder {
         match self.state {
             RecState::Recording => self.close(now),
             RecState::Paused => {}
-            RecState::Done => return Finish::Join(Vec::new()),
+            RecState::Done => return Finish::Join(self.segments.clone()),
         }
         self.state = RecState::Done;
         Finish::Join(self.segments.clone())
@@ -150,7 +150,7 @@ mod tests {
         r.segment_failed(6.0);
         assert_eq!(r.state(), RecState::Done);
         assert_eq!(r.segments(), &[0, 1]);
-        assert_eq!(r.stop(7.0), Finish::Join(vec![]));
+        assert_eq!(r.stop(7.0), Finish::Join(vec![0, 1]));
     }
 
     #[test]
