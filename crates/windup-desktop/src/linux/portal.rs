@@ -222,9 +222,43 @@ pub fn screenshot() -> Result<DesktopShot, CaptureError> {
     Ok(split_desktop(img.to_rgba8(), &layout))
 }
 
+/// How long `screencast_available` waits for the portal: a property read,
+/// so anything slower means it is not there to record with.
+const SCREENCAST_PROBE_WAIT: Duration = Duration::from_millis(500);
+
+/// Whether the ScreenCast portal is there and can share a monitor (its
+/// `AvailableSourceTypes` has the Monitor bit). Asks nothing of the user.
+pub fn screencast_available() -> bool {
+    use ashpd::desktop::screencast::{Screencast, SourceType};
+    let (tx, rx) = channel();
+    let spawned = std::thread::Builder::new()
+        .name("portal-screencast-probe".into())
+        .spawn(move || {
+            let types = pollster::block_on(async {
+                Screencast::new().await?.available_source_types().await
+            });
+            let _ = tx.send(types);
+        });
+    if let Err(e) = spawned {
+        log::debug!("could not start the screencast probe: {e}");
+        return false;
+    }
+    match rx.recv_timeout(SCREENCAST_PROBE_WAIT) {
+        Ok(Ok(types)) => types.contains(SourceType::Monitor),
+        Ok(Err(e)) => {
+            log::debug!("no ScreenCast portal: {e}");
+            false
+        }
+        Err(_) => {
+            log::debug!("the ScreenCast portal did not answer");
+            false
+        }
+    }
+}
+
 /// Whether the error means there is no portal to ask: no session bus, no
 /// portal service, or a portal without the interface.
-fn absent(e: &ashpd::Error) -> bool {
+pub(crate) fn absent(e: &ashpd::Error) -> bool {
     match e {
         ashpd::Error::PortalNotFound(_) => true,
         ashpd::Error::Zbus(z) | ashpd::Error::Portal(ashpd::PortalError::ZBus(z)) => zbus_absent(z),

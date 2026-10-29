@@ -45,14 +45,19 @@ pub struct Facts {
     pub hyprland: bool,
     /// The screenshot portal answers.
     pub portal_screenshot: bool,
-    /// The screencast portal answers. Like the screenshot one it is assumed
-    /// present; where it is not, starting the stream fails with Unsupported.
+    /// The ScreenCast portal answers and can share a monitor. Unlike the
+    /// screenshot one it is asked, because without it a recording has
+    /// nothing to fall back to and the tool should say so before it starts.
     pub portal_screencast: bool,
 }
 
 impl Facts {
     /// Read the environment. Trivial on purpose; not unit-tested.
-    pub fn from_env(globals: Vec<String>, portal_screenshot: bool) -> Facts {
+    pub fn from_env(
+        globals: Vec<String>,
+        portal_screenshot: bool,
+        portal_screencast: bool,
+    ) -> Facts {
         let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
         Facts {
             windows: cfg!(windows),
@@ -62,7 +67,7 @@ impl Facts {
             swaysock: set("SWAYSOCK"),
             hyprland: set("HYPRLAND_INSTANCE_SIGNATURE"),
             portal_screenshot,
-            portal_screencast: true,
+            portal_screencast,
         }
     }
 

@@ -25,7 +25,7 @@ pub(crate) mod x11;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaptureError {
     /// The system said no (a permission dialog was refused).
-    #[allow(dead_code)] // the Wayland portal back end (a later task) refuses this way
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Denied,
     /// No way of reading the screen exists here.
     Unsupported,
@@ -94,11 +94,29 @@ pub(crate) fn facts() -> Facts {
         let globals = crate::linux::wayland::probe().unwrap_or_default();
         // The screenshot portal is always tried last; where it is missing the
         // call fails with `Unsupported`, which is what asking first would say.
-        Facts::from_env(globals, true)
+        // Stills never look at the ScreenCast portal; `video_facts` asks it.
+        Facts::from_env(globals, true, false)
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         Facts::default()
+    }
+}
+
+/// `facts` for recording: the same, plus whether the ScreenCast portal can
+/// share a monitor, which is asked only on Wayland (X11 and Windows record
+/// without it).
+pub(crate) fn video_facts() -> Facts {
+    #[cfg(target_os = "linux")]
+    {
+        let mut f = facts();
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+        f.portal_screencast = wayland && crate::linux::portal::screencast_available();
+        f
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        facts()
     }
 }
 

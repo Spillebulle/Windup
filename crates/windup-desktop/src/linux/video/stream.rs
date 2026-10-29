@@ -115,12 +115,46 @@ impl SourceFactory for WaylandFactory {
     }
 }
 
-/// The newest picture, handed from the stream thread to `next_frame`.
+/// The newest picture, handed from a stream thread to `next_frame`: a
+/// one-slot mailbox, so a slow reader only ever skips pictures.
 #[derive(Default)]
-struct Latest {
-    frame: Vec<u8>,
-    fresh: bool,
-    error: Option<String>,
+pub(super) struct Latest {
+    pub(super) frame: Vec<u8>,
+    pub(super) fresh: bool,
+    pub(super) error: Option<String>,
+}
+
+impl Latest {
+    /// `FrameSource::next_frame` over the mailbox.
+    pub(super) fn take(&mut self, buf: &mut Vec<u8>) -> Result<bool, String> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        if !self.fresh {
+            return Ok(false);
+        }
+        self.fresh = false;
+        // The stream thread overwrites all of `frame` next time, so whatever
+        // `buf` held can go there instead of being copied.
+        if buf.len() == self.frame.len() {
+            std::mem::swap(buf, &mut self.frame);
+        } else {
+            buf.clone_from(&self.frame);
+        }
+        Ok(true)
+    }
+
+    /// Publishes `canvas` as the newest picture.
+    pub(super) fn publish(&mut self, canvas: &[u8]) {
+        self.frame.clear();
+        self.frame.extend_from_slice(canvas);
+        self.fresh = true;
+    }
+
+    /// Records why the stream ended; the first reason stands.
+    pub(super) fn fail(&mut self, why: String) {
+        self.error.get_or_insert(why);
+    }
 }
 
 pub(crate) struct ScreencopyStream {
@@ -167,22 +201,10 @@ impl FrameSource for ScreencopyStream {
     }
 
     fn next_frame(&mut self, buf: &mut Vec<u8>) -> Result<bool, String> {
-        let mut latest = self.latest.lock().map_err(|_| "The screen copy stopped.")?;
-        if let Some(e) = &latest.error {
-            return Err(e.clone());
-        }
-        if !latest.fresh {
-            return Ok(false);
-        }
-        latest.fresh = false;
-        // The stream thread overwrites all of `frame` next time, so whatever
-        // `buf` held can go there instead of being copied.
-        if buf.len() == latest.frame.len() {
-            std::mem::swap(buf, &mut latest.frame);
-        } else {
-            buf.clone_from(&latest.frame);
-        }
-        Ok(true)
+        self.latest
+            .lock()
+            .map_err(|_| "The screen copy stopped.")?
+            .take(buf)
     }
 }
 
@@ -217,7 +239,7 @@ fn run(
     if let Err(e) = stream.pump(latest, stop)
         && let Ok(mut l) = latest.lock()
     {
-        l.error = Some(e);
+        l.fail(e);
     }
 }
 
@@ -437,9 +459,7 @@ impl Stream {
                 }
             }
             if fresh && let Ok(mut l) = latest.lock() {
-                l.frame.clear();
-                l.frame.extend_from_slice(&self.canvas);
-                l.fresh = true;
+                l.publish(&self.canvas);
             }
             let waiting = self.state.outs.iter().any(|o| o.due);
             read_events(&self.queue, if waiting { POLL_TAKING } else { POLL }).map_err(reason)?;

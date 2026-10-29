@@ -131,6 +131,13 @@ desktop may need the old one removed in its own settings. On COSMIC, Windup
 writes its defaults into Custom shortcuts once and never moves them again, so
 change the key in COSMIC Settings, Keyboard, Custom shortcuts as well.
 
+## Recording the screen
+
+KDE and GNOME keep screen copying to themselves, so there Windup records
+through the screen sharing portal: the first time, the desktop asks once
+whether Windup may share every screen, and the answer is remembered. Stopping
+the sharing from the desktop's own indicator ends the recording.
+
 ## Starting at login
 
 Turn on **Launch at login** in Windup's General settings. It writes
@@ -194,3 +201,6 @@ the order things depend on each other:
 8. Close the settings window; the popup and history keep working.
 9. Turn on Launch at login, log out and in: Super+V works straight away.
 10. At a fractional scale (125 %, 150 %) the popup is sharp, not blurred.
+11. On KDE and GNOME: `RUST_LOG=windup=info windup --record-test out.mp4
+    --seconds 5` asks to share the screens, says the portal gave a restore
+    token, and leaves a five-second `out.mp4`.

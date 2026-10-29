@@ -65,15 +65,17 @@ done
 APP_ID=io.github.spillebulle.windup
 
 # Linked, so in the ELF's NEEDED list: libxkbcommon (keyboard input on the
-# popup) and libxdo (X11 paste, through enigo). Dlopened, so invisible to any
+# popup), libxdo (X11 paste, through enigo) and libpipewire (recording on KDE
+# and GNOME; Debian 13 and Ubuntu 24.04 name its package -0t64, older ones
+# -0). Dlopened, so invisible to any
 # scan: the Wayland and X11 client libraries winit opens, and the Vulkan
 # loader wgpu opens. A package missing the dlopened ones would install
 # cleanly and then fail to open a window.
-DEB_DEPENDS="libc6, libgcc-s1, libxkbcommon0, libxdo3, libwayland-client0, libx11-6, libxcursor1, libxrandr2, libxi6, libvulkan1"
+DEB_DEPENDS="libc6, libgcc-s1, libxkbcommon0, libxdo3, libpipewire-0.3-0t64 | libpipewire-0.3-0, libwayland-client0, libx11-6, libxcursor1, libxrandr2, libxi6, libvulkan1"
 # By soname, not package name, so one .rpm installs on Fedora and openSUSE
 # alike (they name the same libraries differently).
-RPM_SONAMES="libxkbcommon.so.0 libxdo.so.3 libwayland-client.so.0 libX11.so.6 libXcursor.so.1 libXrandr.so.2 libXi.so.6 libvulkan.so.1"
-PACMAN_DEPENDS="'glibc' 'gcc-libs' 'libxkbcommon' 'xdotool' 'wayland' 'libx11' 'libxcursor' 'libxrandr' 'libxi' 'vulkan-icd-loader'"
+RPM_SONAMES="libxkbcommon.so.0 libxdo.so.3 libpipewire-0.3.so.0 libwayland-client.so.0 libX11.so.6 libXcursor.so.1 libXrandr.so.2 libXi.so.6 libvulkan.so.1"
+PACMAN_DEPENDS="'glibc' 'gcc-libs' 'libxkbcommon' 'xdotool' 'libpipewire' 'wayland' 'libx11' 'libxcursor' 'libxrandr' 'libxi' 'vulkan-icd-loader'"
 
 DESCRIPTION_SHORT="Clipboard history and plain-text paste behind a hotkey"
 
@@ -324,7 +326,9 @@ fi
 #
 # The one format that runs on a distribution nobody chose, so it carries its
 # linked libraries. The dlopened display and Vulkan libraries are the host's,
-# deliberately: bundled ones would talk to the wrong driver.
+# deliberately: bundled ones would talk to the wrong driver. So is
+# libpipewire: it loads its modules from the host's PipeWire, which must be
+# the version it was built with.
 
 appimage_name="Windup-${version}-${appimage_arch}.AppImage"
 echo "==> $appimage_name"
@@ -344,6 +348,7 @@ OUTPUT="$outdir/$appimage_name" "$tools/linuxdeploy" \
     --appdir "$appdir" \
     --desktop-file "$appdir/$APP_ID.desktop" \
     --icon-file "$appdir/$APP_ID.png" \
+    --exclude-library 'libpipewire-0.3.so*' \
     --output appimage >/dev/null
 
 echo

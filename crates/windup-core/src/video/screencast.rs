@@ -1,0 +1,262 @@
+//! The decisions behind recording through the ScreenCast portal (KDE,
+//! GNOME), kept apart from PipeWire so they are tested everywhere: where
+//! each shared monitor sits, which pixel formats to ask for and how each is
+//! read, which part of a buffer holds the picture, and what becomes of the
+//! restore token.
+
+use crate::capture::geometry::DRect;
+use crate::video::compose::Order;
+
+/// What the portal says about a stream: its PipeWire node, and its
+/// monitor's position and size in desktop units, each when known.
+pub type StreamFacts = (u32, Option<(i32, i32)>, Option<(i32, i32)>);
+
+/// Where each stream's monitor sits in desktop (logical) units, from what
+/// the portal said about it: `(node id, position, size)`.
+///
+/// When every stream has a position, those are the layout. GNOME before 46
+/// gives none, and then the monitors are laid out left to right in the
+/// order given, tops aligned, which is the most a recording can assume. A
+/// stream with no size takes no room; callers fill a missing size from the
+/// stream's buffer first.
+pub fn layout_from_streams(streams: &[StreamFacts]) -> Vec<DRect> {
+    let size = |s: Option<(i32, i32)>| {
+        let (w, h) = s.unwrap_or((0, 0));
+        (w.max(0) as f32, h.max(0) as f32)
+    };
+    let placed = streams.iter().all(|(_, pos, _)| pos.is_some());
+    let mut x = 0.0;
+    streams
+        .iter()
+        .map(|&(_, pos, s)| {
+            let (w, h) = size(s);
+            let (px, py) = match pos {
+                Some((px, py)) if placed => (px as f32, py as f32),
+                _ => {
+                    let at = x;
+                    x += w;
+                    (at, 0.0)
+                }
+            };
+            DRect { x: px, y: py, w, h }
+        })
+        .collect()
+}
+
+/// The shared-memory pixel formats a recording accepts from PipeWire, each
+/// four bytes a pixel with the fourth ignored. Named in memory order, as
+/// PipeWire's (SPA's) formats are. No DMA-BUF: without modifiers on offer
+/// the compositor hands over plain memory, which is what the Composer reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShmVideoFormat {
+    Bgrx,
+    Bgra,
+    Rgbx,
+    Rgba,
+}
+
+impl ShmVideoFormat {
+    /// What to offer, most wanted first: BGR order is what the encoder
+    /// takes, so those frames are copied without swapping.
+    pub const OFFERED: [ShmVideoFormat; 4] = [
+        ShmVideoFormat::Bgrx,
+        ShmVideoFormat::Bgra,
+        ShmVideoFormat::Rgbx,
+        ShmVideoFormat::Rgba,
+    ];
+
+    /// How the Composer reads it.
+    pub fn order(self) -> Order {
+        match self {
+            ShmVideoFormat::Bgrx | ShmVideoFormat::Bgra => Order::Bgra,
+            ShmVideoFormat::Rgbx | ShmVideoFormat::Rgba => Order::Rgba,
+        }
+    }
+}
+
+/// Frame pixels per desktop unit for a monitor whose buffer is `px_w` wide
+/// and whose logical width is `logical_w`. 1 when either is unusable.
+pub fn stream_scale(px_w: u32, logical_w: f32) -> f32 {
+    let s = px_w as f32 / logical_w;
+    if px_w > 0 && s.is_finite() && s > 0.0 {
+        s
+    } else {
+        1.0
+    }
+}
+
+/// Where the picture starts in a buffer of `len` bytes and how long its
+/// rows are, from the buffer's chunk (`offset`, `stride`, `size`) for a
+/// `w` x `h` frame. `None` means there is no new picture in it: an empty
+/// or corrupted chunk (a compositor sends those when only the cursor moved
+/// or nothing changed), or one too short for the frame, which is skipped
+/// rather than read past.
+pub fn frame_view(
+    offset: u32,
+    stride: i32,
+    size: u32,
+    corrupted: bool,
+    len: usize,
+    w: u32,
+    h: u32,
+) -> Option<(usize, usize)> {
+    if corrupted || size == 0 || w == 0 || h == 0 {
+        return None;
+    }
+    let row = w as usize * 4;
+    let stride = if stride > 0 { stride as usize } else { row };
+    if stride < row {
+        return None;
+    }
+    let start = offset as usize;
+    let needed = stride.checked_mul(h as usize - 1)?.checked_add(row)?;
+    (start.checked_add(needed)? <= len).then_some((start, stride))
+}
+
+/// What to do with the saved restore token once a session has started.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TokenChange {
+    Keep,
+    Set(String),
+    Clear,
+}
+
+/// A token is good for one session: the one sent is spent, and the portal
+/// returns the next. So a new one replaces the saved one, and none at all
+/// (the user did not let it remember, or the desktop cannot) clears it, so
+/// a spent token is not sent again. Only for a session that started: a
+/// refusal or a missing portal leaves the saved token as it was.
+pub fn token_change(saved: Option<&str>, returned: Option<&str>) -> TokenChange {
+    match (saved, returned) {
+        (Some(s), Some(r)) if s == r => TokenChange::Keep,
+        (_, Some(r)) => TokenChange::Set(r.to_owned()),
+        (Some(_), None) => TokenChange::Clear,
+        (None, None) => TokenChange::Keep,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> DRect {
+        DRect { x, y, w, h }
+    }
+
+    #[test]
+    fn real_positions_are_the_layout() {
+        let streams = [
+            (40, Some((1920, -200)), Some((1280, 1024))),
+            (41, Some((0, 0)), Some((1920, 1080))),
+        ];
+        assert_eq!(
+            layout_from_streams(&streams),
+            [
+                rect(1920.0, -200.0, 1280.0, 1024.0),
+                rect(0.0, 0.0, 1920.0, 1080.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn without_positions_the_streams_go_left_to_right() {
+        let streams = [
+            (40, None, Some((1920, 1080))),
+            (41, None, Some((1280, 1024))),
+            (42, None, Some((800, 600))),
+        ];
+        assert_eq!(
+            layout_from_streams(&streams),
+            [
+                rect(0.0, 0.0, 1920.0, 1080.0),
+                rect(1920.0, 0.0, 1280.0, 1024.0),
+                rect(3200.0, 0.0, 800.0, 600.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn one_missing_position_lays_them_all_out() {
+        // Mixing given and made-up positions could overlap them.
+        let streams = [
+            (40, Some((500, 500)), Some((100, 100))),
+            (41, None, Some((200, 100))),
+        ];
+        assert_eq!(
+            layout_from_streams(&streams),
+            [rect(0.0, 0.0, 100.0, 100.0), rect(100.0, 0.0, 200.0, 100.0)]
+        );
+    }
+
+    #[test]
+    fn a_stream_without_a_size_takes_no_room() {
+        let streams = [(40, None, None), (41, None, Some((100, 50)))];
+        assert_eq!(
+            layout_from_streams(&streams),
+            [rect(0.0, 0.0, 0.0, 0.0), rect(0.0, 0.0, 100.0, 50.0)]
+        );
+        assert!(layout_from_streams(&[]).is_empty());
+    }
+
+    #[test]
+    fn bgr_formats_come_first_and_read_without_swapping() {
+        assert_eq!(ShmVideoFormat::OFFERED[0], ShmVideoFormat::Bgrx);
+        assert_eq!(ShmVideoFormat::Bgrx.order(), Order::Bgra);
+        assert_eq!(ShmVideoFormat::Bgra.order(), Order::Bgra);
+        assert_eq!(ShmVideoFormat::Rgbx.order(), Order::Rgba);
+        assert_eq!(ShmVideoFormat::Rgba.order(), Order::Rgba);
+        // Every offered format is distinct.
+        for (i, a) in ShmVideoFormat::OFFERED.iter().enumerate() {
+            assert!(!ShmVideoFormat::OFFERED[i + 1..].contains(a));
+        }
+    }
+
+    #[test]
+    fn the_scale_is_buffer_pixels_over_logical_width() {
+        assert_eq!(stream_scale(3840, 1920.0), 2.0);
+        assert_eq!(stream_scale(2880, 1920.0), 1.5);
+        assert_eq!(stream_scale(1920, 1920.0), 1.0);
+        assert_eq!(stream_scale(1920, 0.0), 1.0);
+        assert_eq!(stream_scale(0, 1920.0), 1.0);
+    }
+
+    #[test]
+    fn the_frame_view_follows_the_chunk() {
+        // 4x2, padded rows of 20 bytes, starting 8 bytes in.
+        assert_eq!(
+            frame_view(8, 20, 40, false, 8 + 20 + 16, 4, 2),
+            Some((8, 20))
+        );
+        // No stride given: tightly packed.
+        assert_eq!(frame_view(0, 0, 32, false, 32, 4, 2), Some((0, 16)));
+        assert_eq!(frame_view(0, -16, 32, false, 32, 4, 2), Some((0, 16)));
+    }
+
+    #[test]
+    fn an_empty_corrupt_or_short_chunk_is_no_new_picture() {
+        assert_eq!(frame_view(0, 16, 0, false, 32, 4, 2), None);
+        assert_eq!(frame_view(0, 16, 32, true, 32, 4, 2), None);
+        assert_eq!(frame_view(0, 16, 32, false, 31, 4, 2), None);
+        assert_eq!(frame_view(4, 16, 32, false, 32, 4, 2), None);
+        // A stride shorter than a row cannot be this frame.
+        assert_eq!(frame_view(0, 8, 32, false, 32, 4, 2), None);
+        assert_eq!(frame_view(0, 16, 32, false, 32, 0, 2), None);
+        assert_eq!(frame_view(u32::MAX, 16, 32, false, 32, 4, 2), None);
+    }
+
+    #[test]
+    fn a_new_token_replaces_the_spent_one() {
+        assert_eq!(token_change(None, Some("b")), TokenChange::Set("b".into()));
+        assert_eq!(
+            token_change(Some("a"), Some("b")),
+            TokenChange::Set("b".into())
+        );
+        assert_eq!(token_change(Some("a"), Some("a")), TokenChange::Keep);
+    }
+
+    #[test]
+    fn no_token_back_clears_the_saved_one() {
+        assert_eq!(token_change(Some("a"), None), TokenChange::Clear);
+        assert_eq!(token_change(None, None), TokenChange::Keep);
+    }
+}

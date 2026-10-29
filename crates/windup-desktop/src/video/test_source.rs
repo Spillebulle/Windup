@@ -68,7 +68,7 @@ impl SourceFactory for PatternFactory {
 /// units; the primary monitor's top-left 320x240 without one).
 fn screen_factory(area: Option<(i32, i32, u32, u32)>) -> Result<Box<dyn SourceFactory>, String> {
     use windup_core::capture::backend::{Moving, video_order};
-    let order = video_order(&crate::capture::facts());
+    let order = video_order(&crate::capture::video_facts());
     let default = |x: f32, y: f32| DRect {
         x,
         y,
@@ -117,6 +117,15 @@ fn screen_factory(area: Option<(i32, i32, u32, u32)>) -> Result<Box<dyn SourceFa
             };
             let rect = area.map_or_else(|| default(0.0, 0.0), rect);
             let f = crate::linux::video::WaylandFactory::new(method, rect)
+                .ok_or("the area is too small to record")?;
+            Ok(Box::new(f))
+        }
+        #[cfg(target_os = "linux")]
+        Some(Moving::ScreenCast) => {
+            // No saved token: a test must neither spend the owner's grant
+            // (each token is good once) nor save a new one. The portal asks.
+            let rect = area.map_or_else(|| default(0.0, 0.0), rect);
+            let f = crate::linux::video::ScreenCastFactory::new(rect, None)
                 .ok_or("the area is too small to record")?;
             Ok(Box::new(f))
         }

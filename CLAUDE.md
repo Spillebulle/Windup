@@ -40,7 +40,7 @@ Rust edition 2024, MSRV 1.90. `let`-chains (`if let Some(x) = a && let Some(y) =
 
 Win32 code (`windows-sys`) lives in `windup-desktop` (plus a small amount in core's Cargo manifest). Every Win32 block is `#[cfg(target_os = "windows")]` with a no-op `#[cfg(not(...))]` twin — keep that pairing when adding platform code; the crates are expected to still compile on macOS (fallbacks use `global-hotkey`, `enigo`, `clipboard-rs`). Linux code is all under `windup-desktop/src/linux/` (`#[cfg(target_os = "linux")] mod linux`).
 
-To type-check or clippy the Linux build from Windows: `cargo clippy --target x86_64-unknown-linux-gnu` works once `PKG_CONFIG` points at a script that prints `-lxkbcommon` (a `.cmd` containing `@echo -lxkbcommon`; a `.sh` cannot be run by the build script) and `PKG_CONFIG_ALLOW_CROSS=1` is set (sctk's build script insists on pkg-config). Tests still need Linux: CI, or WSL.
+To type-check or clippy the Linux build from Windows: `cargo clippy --target x86_64-unknown-linux-gnu --no-default-features` works once `PKG_CONFIG` points at a script that prints `-lxkbcommon` (a `.cmd` containing `@echo -lxkbcommon`; a `.sh` cannot be run by the build script) and `PKG_CONFIG_ALLOW_CROSS=1` is set (sctk's build script insists on pkg-config). `--no-default-features` leaves out the `pipewire` feature (ScreenCast recording on KDE and GNOME), whose bindings need libclang and the PipeWire headers; CI and releases build it. Tests still need Linux: CI, or WSL.
 
 ## Architecture notes worth knowing before editing
 

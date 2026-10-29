@@ -11,6 +11,10 @@ repository.workspace = true
 name = "windup"
 path = "src/main.rs"
 
+[features]
+default = ["pipewire"]
+pipewire = ["dep:pipewire"]
+
 [dependencies]
 windup-core = { workspace = true }
 windup-ui = { workspace = true }
@@ -47,6 +51,10 @@ futures-util = "0.3"
 # The very zbus ashpd uses (one version in Cargo.lock); the `interface` macro
 # names the crate, so it cannot go through ashpd::zbus.
 zbus = { version = "5.19", default-features = false, features = ["async-io"] }
+# Screen recording on KDE and GNOME: the ScreenCast portal hands over PipeWire
+# streams. Behind the `pipewire` feature because its bindings need libclang
+# and libpipewire headers, which a cross build from Windows does not have.
+pipewire = { version = "0.8", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
