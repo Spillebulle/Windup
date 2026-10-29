@@ -77,7 +77,7 @@ jobs:
           sh tools/fetch-ffmpeg.sh linux64 target/debug
           # This runner is the oldest glibc we support: fails if the bundled
           # build needs a newer one.
-          target/debug/ffmpeg -version | head -n 1
+          target/debug/ffmpeg -version >/dev/null
 
       - name: Package
         run: |
@@ -201,7 +201,7 @@ jobs:
         run: sh tools/fetch-ffmpeg.sh linux64 target/debug --with-ffprobe
 
       - name: FFmpeg starts
-        run: target/debug/ffmpeg -version | head -n 1
+        run: target/debug/ffmpeg -version >/dev/null
 
       - name: Run
         run: bash tools/linux-e2e.sh target/debug/windup all e2e-artefacts
