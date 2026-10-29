@@ -53,11 +53,17 @@ fn failed(what: impl std::fmt::Display) -> CaptureError {
     CaptureError::Failed(what.to_string())
 }
 
-/// Connect to the compositor and take the picture by `method`.
-pub fn grab_from_env(method: Method) -> Result<DesktopShot, CaptureError> {
+/// A Wayland connection of our own and the globals on it.
+pub(crate) fn connect() -> Result<(Connection, GlobalList), CaptureError> {
     let conn = Connection::connect_to_env().map_err(|_| CaptureError::Unsupported)?;
     let (globals, _queue) =
         registry_queue_init::<super::Probe>(&conn).map_err(|_| CaptureError::Unsupported)?;
+    Ok((conn, globals))
+}
+
+/// Connect to the compositor and take the picture by `method`.
+pub fn grab_from_env(method: Method) -> Result<DesktopShot, CaptureError> {
+    let (conn, globals) = connect()?;
     grab_by(&conn, &globals, method)
 }
 
@@ -133,9 +139,7 @@ fn learn_outputs(
 /// portal) take their monitors' places from this.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn output_layout_from_env() -> Result<Vec<(String, DRect)>, CaptureError> {
-    let conn = Connection::connect_to_env().map_err(|_| CaptureError::Unsupported)?;
-    let (globals, _queue) =
-        registry_queue_init::<super::Probe>(&conn).map_err(|_| CaptureError::Unsupported)?;
+    let (conn, globals) = connect()?;
     let (_queue, state) = learn_outputs(&conn, &globals)?;
     let layout: Vec<_> = outputs_of(&state.output_state)
         .into_iter()
@@ -149,12 +153,12 @@ pub fn output_layout_from_env() -> Result<Vec<(String, DRect)>, CaptureError> {
 
 /// An output as the picture needs it, and as the capture overlay finds the
 /// output to cover for each monitor of the picture.
-pub(super) struct OutputFacts {
-    pub(super) output: wl_output::WlOutput,
-    pub(super) name: String,
+pub(crate) struct OutputFacts {
+    pub(crate) output: wl_output::WlOutput,
+    pub(crate) name: String,
     /// Logical: the desktop units of every Wayland back end.
-    pub(super) layout: DRect,
-    transform: Transform,
+    pub(crate) layout: DRect,
+    pub(crate) transform: Transform,
 }
 
 impl OutputFacts {
@@ -169,7 +173,7 @@ impl OutputFacts {
     }
 }
 
-pub(super) fn outputs_of(output_state: &OutputState) -> Vec<OutputFacts> {
+pub(crate) fn outputs_of(output_state: &OutputState) -> Vec<OutputFacts> {
     let mut found = Vec::new();
     for output in output_state.outputs() {
         let Some(info) = output_state.info(&output) else {
@@ -205,7 +209,7 @@ pub(super) fn outputs_of(output_state: &OutputState) -> Vec<OutputFacts> {
     found
 }
 
-fn map_transform(t: wl_output::Transform) -> Transform {
+pub(crate) fn map_transform(t: wl_output::Transform) -> Transform {
     use wl_output::Transform as W;
     match t {
         W::_90 => Transform::Rot90,
@@ -219,7 +223,7 @@ fn map_transform(t: wl_output::Transform) -> Transform {
     }
 }
 
-fn map_format(f: WEnum<wl_shm::Format>) -> Option<ShmFormat> {
+pub(crate) fn map_format(f: WEnum<wl_shm::Format>) -> Option<ShmFormat> {
     match f.into_result().ok()? {
         wl_shm::Format::Argb8888 => Some(ShmFormat::Argb8888),
         wl_shm::Format::Xrgb8888 => Some(ShmFormat::Xrgb8888),
@@ -272,72 +276,36 @@ struct Cx {
 impl Cx {
     /// Dispatch until `done` holds, with `deadline` as the limit.
     fn wait(&mut self, deadline: Instant, done: fn(&Job) -> bool) -> Result<(), CaptureError> {
-        use rustix::event::{PollFd, PollFlags, Timespec, poll};
-        loop {
-            self.queue
-                .dispatch_pending(&mut self.state)
-                .map_err(failed)?;
-            if done(&self.state.job) {
-                return Ok(());
-            }
-            let left = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or_else(|| failed("the compositor did not answer in time"))?;
-            self.queue.flush().map_err(failed)?;
-            // None means events arrived since the dispatch: go round again.
-            let Some(guard) = self.queue.prepare_read() else {
-                continue;
-            };
-            let timeout = Timespec::try_from(left).map_err(failed)?;
-            let conn_fd = guard.connection_fd();
-            let mut fds = [PollFd::new(&conn_fd, PollFlags::IN)];
-            if poll(&mut fds, Some(&timeout)).map_err(failed)? > 0 {
-                guard.read().map_err(failed)?;
-            }
-        }
+        wait_until(&mut self.queue, &mut self.state, deadline, |s| done(&s.job))
     }
 
-    /// An anonymous file of `stride * height` bytes, a pool over it and a
-    /// buffer in it.
     fn buffer(
         &self,
         format: ShmFormat,
         width: u32,
         height: u32,
         stride: u32,
-    ) -> Result<(File, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer), CaptureError> {
-        use rustix::fs::{MemfdFlags, ftruncate, memfd_create};
-        let len = u64::from(stride) * u64::from(height);
-        let size = i32::try_from(len).map_err(|_| failed("the screen is too large to copy"))?;
-        let (Ok(w), Ok(h), Ok(s)) = (
-            i32::try_from(width),
-            i32::try_from(height),
-            i32::try_from(stride),
-        ) else {
-            return Err(failed("the screen is too large to copy"));
-        };
-        if w <= 0 || h <= 0 || s <= 0 {
-            return Err(failed("the compositor asked for an empty buffer"));
-        }
-        let fd = memfd_create("windup-capture", MemfdFlags::CLOEXEC).map_err(failed)?;
-        ftruncate(&fd, len).map_err(failed)?;
-        let file = File::from(fd);
-        let qh = self.queue.handle();
-        let pool = self.shm.create_pool(file.as_fd(), size, &qh, ());
-        let buffer = pool.create_buffer(0, w, h, s, wl_format(format), &qh, ());
-        Ok((file, pool, buffer))
+    ) -> Result<ShmBuffer, CaptureError> {
+        ShmBuffer::new(
+            &self.shm,
+            &self.queue.handle(),
+            format,
+            width,
+            height,
+            stride,
+        )
     }
 
-    fn read_back(
-        file: &File,
-        format: ShmFormat,
-        width: u32,
-        height: u32,
-        stride: u32,
-    ) -> Result<image::RgbaImage, CaptureError> {
-        let mut bytes = vec![0u8; stride as usize * height as usize];
-        file.read_exact_at(&mut bytes, 0).map_err(failed)?;
-        to_rgba(format, width, height, stride as usize, &bytes)
+    fn read_back(buf: &ShmBuffer) -> Result<image::RgbaImage, CaptureError> {
+        let mut bytes = Vec::new();
+        buf.read(&mut bytes)?;
+        to_rgba(
+            buf.format,
+            buf.width,
+            buf.height,
+            buf.stride as usize,
+            &bytes,
+        )
     }
 
     fn grab_ext(
@@ -373,22 +341,21 @@ impl Cx {
             return Err(failed("the compositor offers no shared-memory buffer"));
         };
         let stride = w.saturating_mul(4);
-        let (file, pool, buffer) = self.buffer(format, w, h, stride)?;
+        let buf = self.buffer(format, w, h, stride)?;
         let frame = session.create_frame(&qh, ());
-        frame.attach_buffer(&buffer);
+        frame.attach_buffer(&buf.buffer);
         frame.damage_buffer(0, 0, w as i32, h as i32);
         frame.capture();
         let waited = self.wait(deadline, |j| j.outcome.is_some() || j.stopped);
         frame.destroy();
-        buffer.destroy();
-        pool.destroy();
+        buf.destroy();
         waited?;
         match self.state.job.outcome.take() {
             Some(Ok(())) => {}
             Some(Err(reason)) => return Err(failed(reason)),
             None => return Err(failed("the capture session was stopped")),
         }
-        let img = Self::read_back(&file, format, w, h, stride)?;
+        let img = Self::read_back(&buf)?;
         let transform = self.state.job.transform.unwrap_or(out.transform);
         Ok(untransform(img, transform))
     }
@@ -428,21 +395,123 @@ impl Cx {
         let Some((format, w, h, stride)) = self.state.job.wlr_buffer else {
             return Err(failed("the compositor offers no shared-memory buffer"));
         };
-        let (file, pool, buffer) = self.buffer(format, w, h, stride)?;
-        frame.copy(&buffer);
+        let buf = self.buffer(format, w, h, stride)?;
+        frame.copy(&buf.buffer);
         let waited = self.wait(deadline, |j| j.outcome.is_some());
-        buffer.destroy();
-        pool.destroy();
+        buf.destroy();
         waited?;
         if let Some(Err(reason)) = self.state.job.outcome.take() {
             return Err(failed(reason));
         }
-        let mut img = Self::read_back(&file, format, w, h, stride)?;
+        let mut img = Self::read_back(&buf)?;
         if self.state.job.wlr_y_invert {
             img = image::imageops::flip_vertical(&img);
         }
         // The buffer is in the output's own orientation.
         Ok(untransform(img, out.transform))
+    }
+}
+
+/// Dispatch on `queue` until `done` holds, with `deadline` as the limit.
+pub(crate) fn wait_until<D>(
+    queue: &mut EventQueue<D>,
+    state: &mut D,
+    deadline: Instant,
+    done: impl Fn(&D) -> bool,
+) -> Result<(), CaptureError> {
+    loop {
+        queue.dispatch_pending(state).map_err(failed)?;
+        if done(state) {
+            return Ok(());
+        }
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| failed("the compositor did not answer in time"))?;
+        read_events(queue, left)?;
+    }
+}
+
+/// Flush, then read whatever arrives within `timeout`, without dispatching
+/// it. Returns at once when events are already queued.
+pub(crate) fn read_events<D>(queue: &EventQueue<D>, timeout: Duration) -> Result<(), CaptureError> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    queue.flush().map_err(failed)?;
+    // None means events arrived since the last dispatch.
+    let Some(guard) = queue.prepare_read() else {
+        return Ok(());
+    };
+    let timeout = Timespec::try_from(timeout).map_err(failed)?;
+    let conn_fd = guard.connection_fd();
+    let mut fds = [PollFd::new(&conn_fd, PollFlags::IN)];
+    if poll(&mut fds, Some(&timeout)).map_err(failed)? > 0 {
+        guard.read().map_err(failed)?;
+    }
+    Ok(())
+}
+
+/// An anonymous file of `stride * height` bytes, a pool over it and a
+/// buffer in it, for the compositor to copy a screen into.
+pub(crate) struct ShmBuffer {
+    file: File,
+    pool: wl_shm_pool::WlShmPool,
+    pub(crate) buffer: wl_buffer::WlBuffer,
+    pub(crate) format: ShmFormat,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) stride: u32,
+}
+
+impl ShmBuffer {
+    pub(crate) fn new<D>(
+        shm: &wl_shm::WlShm,
+        qh: &QueueHandle<D>,
+        format: ShmFormat,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> Result<ShmBuffer, CaptureError>
+    where
+        D: Dispatch<wl_shm_pool::WlShmPool, ()> + Dispatch<wl_buffer::WlBuffer, ()> + 'static,
+    {
+        use rustix::fs::{MemfdFlags, ftruncate, memfd_create};
+        let len = u64::from(stride) * u64::from(height);
+        let size = i32::try_from(len).map_err(|_| failed("the screen is too large to copy"))?;
+        let (Ok(w), Ok(h), Ok(s)) = (
+            i32::try_from(width),
+            i32::try_from(height),
+            i32::try_from(stride),
+        ) else {
+            return Err(failed("the screen is too large to copy"));
+        };
+        if w <= 0 || h <= 0 || s <= 0 {
+            return Err(failed("the compositor asked for an empty buffer"));
+        }
+        let fd = memfd_create("windup-capture", MemfdFlags::CLOEXEC).map_err(failed)?;
+        ftruncate(&fd, len).map_err(failed)?;
+        let file = File::from(fd);
+        let pool = shm.create_pool(file.as_fd(), size, qh, ());
+        let buffer = pool.create_buffer(0, w, h, s, wl_format(format), qh, ());
+        Ok(ShmBuffer {
+            file,
+            pool,
+            buffer,
+            format,
+            width,
+            height,
+            stride,
+        })
+    }
+
+    /// The pixels as the compositor left them, `stride * height` bytes, into
+    /// `bytes` (resized to fit, so a reused vector is not reallocated).
+    pub(crate) fn read(&self, bytes: &mut Vec<u8>) -> Result<(), CaptureError> {
+        bytes.resize(self.stride as usize * self.height as usize, 0);
+        self.file.read_exact_at(bytes, 0).map_err(failed)
+    }
+
+    pub(crate) fn destroy(&self) {
+        self.buffer.destroy();
+        self.pool.destroy();
     }
 }
 
@@ -531,24 +600,26 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for CopyState {
     }
 }
 
-/// Objects that never send an event we use.
+/// Objects that never send an event we use, for state `$state`.
 macro_rules! silent {
-    ($($proxy:ty),* $(,)?) => {$(
-        impl Dispatch<$proxy, ()> for CopyState {
+    ($state:ty; $($proxy:ty),* $(,)?) => {$(
+        impl wayland_client::Dispatch<$proxy, ()> for $state {
             fn event(
                 _: &mut Self,
                 _: &$proxy,
-                _: <$proxy as Proxy>::Event,
+                _: <$proxy as wayland_client::Proxy>::Event,
                 _: &(),
-                _: &Connection,
-                _: &QueueHandle<Self>,
+                _: &wayland_client::Connection,
+                _: &wayland_client::QueueHandle<Self>,
             ) {
             }
         }
     )*};
 }
+pub(crate) use silent;
 
 silent!(
+    CopyState;
     wl_shm::WlShm,
     wl_shm_pool::WlShmPool,
     wl_buffer::WlBuffer,

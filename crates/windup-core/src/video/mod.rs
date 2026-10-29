@@ -2,12 +2,14 @@
 //! how fast the encoder should run.
 
 pub mod command;
+pub mod compose;
 pub mod format;
 pub mod pacing;
 pub mod probe;
 pub mod recorder;
 
 pub use command::{AudioIn, SegmentJob, Source, join_args, segment_args, segment_ext};
+pub use compose::Composer;
 pub use pacing::Pacer;
 pub use recorder::{Finish, RecState, Recorder};
 

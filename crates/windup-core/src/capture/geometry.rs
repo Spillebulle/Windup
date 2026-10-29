@@ -72,6 +72,50 @@ impl DRect {
     }
 }
 
+/// `wl_output.transform`, in the protocol's order: what the compositor did
+/// to a monitor's content to suit the panel (90 is counter-clockwise, flips
+/// are about the vertical axis and come first). A copied buffer arrives
+/// transformed; undoing it gives the picture as it appears on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transform {
+    Normal,
+    Rot90,
+    Rot180,
+    Rot270,
+    Flipped,
+    Flipped90,
+    Flipped180,
+    Flipped270,
+}
+
+impl Transform {
+    /// Whether the buffer is the screen on its side (width and height swap).
+    pub fn swaps_axes(self) -> bool {
+        matches!(
+            self,
+            Transform::Rot90 | Transform::Rot270 | Transform::Flipped90 | Transform::Flipped270
+        )
+    }
+
+    /// Where on-screen pixel `(x, y)` of a `w` x `h` screen lies in the
+    /// transformed buffer. Each buffer coordinate depends on one screen
+    /// coordinate only, which is what lets a per-frame copy use one table
+    /// per axis.
+    pub fn buffer_point(self, x: u32, y: u32, w: u32, h: u32) -> (u32, u32) {
+        let (rx, ry) = (w - 1 - x, h - 1 - y);
+        match self {
+            Transform::Normal => (x, y),
+            Transform::Rot90 => (y, rx),
+            Transform::Rot180 => (rx, ry),
+            Transform::Rot270 => (ry, x),
+            Transform::Flipped => (rx, y),
+            Transform::Flipped90 => (y, x),
+            Transform::Flipped180 => (x, ry),
+            Transform::Flipped270 => (ry, rx),
+        }
+    }
+}
+
 pub struct MonitorShot {
     pub layout: DRect,
     pub image: RgbaImage,

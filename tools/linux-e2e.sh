@@ -15,7 +15,10 @@
 # shortcut runs `windup --popup`, keys pick an entry), and checks what landed
 # in a real GTK text field or in the history file. The capture cases check
 # `windup --capture-test` pictures (sizes, and a marker window on a rotated
-# output) and that `windup --screenshot` opens an overlay Escape closes.
+# output) and that `windup --screenshot` opens an overlay Escape closes. The
+# recording case checks a `windup --record-test` file's size and length with
+# ffprobe, which (like ffmpeg) must sit next to the binary:
+# `tools/fetch-ffmpeg.sh linux64 <bin-dir> --with-ffprobe`.
 # Screenshots and logs go to the artefact directory.
 
 set -uo pipefail
@@ -292,6 +295,33 @@ sway_capture() {
     sleep 0.5
 }
 
+# A recording through the Wayland frame stream (wlr-screencopy on Sway): the
+# file must have the area's size and about the time asked for. The output is
+# scale 1, so the area's logical size is its pixel size.
+sway_record() {
+    local log=$art/wayland-record.log out=/tmp/windup-e2e-record-$$.mp4 probe info size dur
+    probe=$(dirname "$bin")/ffprobe
+    if timeout 30 "$bin" --record-test "$out" --seconds 2 --area 0,0,320,240 >"$log" 2>&1; then
+        info=$("$probe" -v error -select_streams v:0 -show_entries stream=width,height:format=duration \
+            -of csv=p=0 "$out" 2>>"$log")
+        size=$(echo "$info" | grep , | head -1 | tr , x)
+        dur=$(echo "$info" | grep -v , | head -1)
+        if [ "$size" = 320x240 ]; then
+            ok "wayland: --record-test recorded the area at its size ($size)"
+        else
+            bad "wayland: --record-test recorded $size, wanted 320x240 ($info)"
+        fi
+        if awk -v d="$dur" 'BEGIN { exit !(d >= 1.5 && d <= 2.5) }'; then
+            ok "wayland: the recording lasts about two seconds (${dur}s)"
+        else
+            bad "wayland: the recording lasts '${dur}'s, wanted 1.5 to 2.5"
+        fi
+    else
+        bad "wayland: --record-test failed (see wayland-record.log)"
+    fi
+    rm -f "$out"
+}
+
 wayland_session() {
     echo "== Wayland (headless sway)"
     fresh_home
@@ -326,6 +356,7 @@ EOF
     fi
 
     sway_capture
+    sway_record
 
     # A copy is recorded without Windup having focus or a window.
     wl-copy "alpha-$$"

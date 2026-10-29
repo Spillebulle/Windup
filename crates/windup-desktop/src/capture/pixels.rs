@@ -3,6 +3,7 @@
 
 use super::CaptureError;
 use image::RgbaImage;
+use windup_core::video::compose::Order;
 
 /// The `wl_shm` formats a compositor may offer for a screen copy, and that we
 /// can read. Byte order is as in memory: the protocol names them as
@@ -16,18 +17,18 @@ pub(crate) enum ShmFormat {
     Xbgr8888,
 }
 
-/// `wl_output.transform`, in the protocol's order.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Transform {
-    Normal,
-    Rot90,
-    Rot180,
-    Rot270,
-    Flipped,
-    Flipped90,
-    Flipped180,
-    Flipped270,
+pub(crate) use windup_core::capture::geometry::Transform;
+
+impl ShmFormat {
+    /// The byte order as the video compositor reads it. Alpha is never
+    /// read: a screen is opaque.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn order(self) -> Order {
+        match self {
+            ShmFormat::Argb8888 | ShmFormat::Xrgb8888 => Order::Bgra,
+            ShmFormat::Abgr8888 | ShmFormat::Xbgr8888 => Order::Rgba,
+        }
+    }
 }
 
 /// Convert `height` rows of `stride` bytes to RGBA. `X` formats are opaque.
@@ -192,6 +193,35 @@ mod tests {
         ];
         for (t, rows) in cases {
             assert_eq!(untransform(from_rows(rows), t), upright(), "{t:?}");
+        }
+    }
+
+    /// The video compositor reads buffers through `Transform::buffer_point`
+    /// instead of undoing the transform: both must agree, for every pixel.
+    #[test]
+    fn buffer_point_agrees_with_untransform() {
+        let all = [
+            Transform::Normal,
+            Transform::Rot90,
+            Transform::Rot180,
+            Transform::Rot270,
+            Transform::Flipped,
+            Transform::Flipped90,
+            Transform::Flipped180,
+            Transform::Flipped270,
+        ];
+        let (w, h) = (3, 2);
+        for t in all {
+            let (bw, bh) = if t.swaps_axes() { (h, w) } else { (w, h) };
+            let buffer = RgbaImage::from_fn(bw, bh, |x, y| Rgba([x as u8, y as u8, 0, 255]));
+            let screen = untransform(buffer.clone(), t);
+            assert_eq!(screen.dimensions(), (w, h), "{t:?}");
+            for y in 0..h {
+                for x in 0..w {
+                    let (bx, by) = t.buffer_point(x, y, w, h);
+                    assert_eq!(screen.get_pixel(x, y), buffer.get_pixel(bx, by), "{t:?}");
+                }
+            }
         }
     }
 }

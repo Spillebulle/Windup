@@ -107,6 +107,19 @@ fn screen_factory(area: Option<(i32, i32, u32, u32)>) -> Result<Box<dyn SourceFa
                 .ok_or("DISPLAY is not set, or the area is too small to record")?;
             Ok(Box::new(f))
         }
+        #[cfg(target_os = "linux")]
+        Some(m @ (Moving::ExtImageCopy | Moving::WlrScreencopy)) => {
+            use crate::linux::wayland::screencopy::Method;
+            let method = if *m == Moving::ExtImageCopy {
+                Method::ExtImageCopy
+            } else {
+                Method::WlrScreencopy
+            };
+            let rect = area.map_or_else(|| default(0.0, 0.0), rect);
+            let f = crate::linux::video::WaylandFactory::new(method, rect)
+                .ok_or("the area is too small to record")?;
+            Ok(Box::new(f))
+        }
         _ => {
             let _ = (default, rect);
             Err(format!(
