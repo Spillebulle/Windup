@@ -7,6 +7,7 @@ pub mod compose;
 pub mod format;
 pub mod pacing;
 pub mod pcm;
+pub mod place;
 pub mod probe;
 pub mod recorder;
 pub mod screencast;
@@ -14,6 +15,7 @@ pub mod screencast;
 pub use command::{AudioIn, SegmentJob, Source, join_args, segment_args, segment_ext};
 pub use compose::Composer;
 pub use pacing::Pacer;
+pub use place::place_bar;
 pub use recorder::{Finish, RecState, Recorder};
 
 pub use format::{

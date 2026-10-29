@@ -13,6 +13,7 @@ pub mod ants;
 pub mod bar;
 pub mod loupe;
 pub mod paint;
+pub mod recbar;
 #[cfg(test)]
 mod view_tests;
 

@@ -48,12 +48,13 @@ pub enum Icon {
     EyeOff,
     ChevronUp,
     Pause,
+    Play,
     Volume2,
     Mic,
 }
 
 impl Icon {
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 40] = [
         Self::Sliders,
         Self::Clipboard,
         Self::FileText,
@@ -91,6 +92,7 @@ impl Icon {
         Self::EyeOff,
         Self::ChevronUp,
         Self::Pause,
+        Self::Play,
         Self::Volume2,
         Self::Mic,
     ];
@@ -448,6 +450,10 @@ impl Icon {
                     r: 1.0,
                 },
             ],
+            // Lucide play (resume)
+            Self::Play => &[Node::Path(
+                "M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z",
+            )],
             // Lucide volume-2 (computer sound)
             Self::Volume2 => &[
                 Node::Path(

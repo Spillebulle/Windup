@@ -97,6 +97,15 @@ pub mod metrics {
     /// A read-only figure chip's padding (mockup `.chip`, §7.13).
     pub const CHIP_PAD_X: f32 = 7.0;
     pub const CHIP_PAD_Y: f32 = 2.0;
+    /// The recording bar's height: the launcher bar's (segment box plus
+    /// its breathing room), so the two read as one family.
+    pub const REC_BAR_H: f32 = 40.0;
+    /// The recording dot's diameter.
+    pub const REC_DOT: f32 = 8.0;
+    /// One breath of the recording dot, in seconds.
+    pub const REC_PULSE_SECS: f64 = 1.6;
+    /// The gap between the recording bar's parts, and from the area.
+    pub const REC_GAP: f32 = 8.0;
     /// Side of a resize handle on the selection or an annotation.
     pub const HANDLE: f32 = 7.0;
     /// Side of the colour wheel in the swatch's popover.
