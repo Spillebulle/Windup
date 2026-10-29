@@ -45,9 +45,8 @@ impl State {
             log::warn!("notice: no layer-shell; not shown: {message}");
             return;
         }
-        let canvas = Canvas::new(palette, mode);
-        // Fonts are ready after one pass.
-        let _ = canvas.ctx.run(egui::RawInput::default(), |_| {});
+        let mut canvas = Canvas::new(palette, mode);
+        canvas.warm_up();
         let card = notice::size(&canvas.ctx, &message, &canvas.palette);
         let size = (card.x.ceil().max(1.0) as u32, card.y.ceil().max(1.0) as u32);
         let id = egui::ViewportId::from_hash_of("windup-notice");
@@ -105,9 +104,6 @@ impl State {
         } = card;
         let label = action.as_ref().map(|_| crate::video::outcome::OPEN_FOLDER);
         let time = canvas.time();
-        let renderer = canvas.renderer.get_or_insert_with(|| {
-            egui_wgpu::Renderer::new(&gpu.device, gpu.format, None, 1, false)
-        });
         let px = pane.sync(gpu);
         let raw = pane.raw_input(time, self.pane_modifiers, *had_keyboard);
         let (palette, mode) = (canvas.palette, canvas.mode);
@@ -136,6 +132,10 @@ impl State {
         let Some(surface) = pane.wgpu.as_ref() else {
             return;
         };
+        canvas.take_pending(&mut output);
+        let renderer = canvas.renderer.get_or_insert_with(|| {
+            egui_wgpu::Renderer::new(&gpu.device, gpu.format, None, 1, false)
+        });
         let painted = paint(
             &gpu.device,
             &gpu.queue,

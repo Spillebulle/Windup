@@ -156,6 +156,9 @@ pub(super) struct Canvas {
     pub(super) epoch: Instant,
     pub(super) palette: Palette,
     pub(super) mode: Mode,
+    /// Textures a pass uploaded before anything was painted, for the first
+    /// frame that is.
+    pending: egui::TexturesDelta,
 }
 
 impl Canvas {
@@ -168,7 +171,24 @@ impl Canvas {
             epoch: Instant::now(),
             palette,
             mode,
+            pending: egui::TexturesDelta::default(),
         }
+    }
+
+    /// One empty pass, after which the fonts can measure text. It uploads
+    /// the font atlas, which is kept for the first frame painted: later
+    /// frames only patch it, and egui-wgpu panics on a patch to a texture
+    /// it never had.
+    pub(super) fn warm_up(&mut self) {
+        let output = self.ctx.run(egui::RawInput::default(), |_| {});
+        self.pending.append(output.textures_delta);
+    }
+
+    /// Puts what `warm_up` uploaded in front of `output`'s own textures.
+    pub(super) fn take_pending(&mut self, output: &mut egui::FullOutput) {
+        let mut textures = std::mem::take(&mut self.pending);
+        textures.append(std::mem::take(&mut output.textures_delta));
+        output.textures_delta = textures;
     }
 
     pub(super) fn time(&self) -> f64 {

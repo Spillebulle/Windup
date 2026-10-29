@@ -114,9 +114,8 @@ impl State {
             mode,
             reduced_motion,
         } = setup;
-        let canvas = Canvas::new(palette, mode);
-        // Fonts are ready after one pass.
-        let _ = canvas.ctx.run(egui::RawInput::default(), |_| {});
+        let mut canvas = Canvas::new(palette, mode);
+        canvas.warm_up();
         let bar_state = RecBarState {
             elapsed: clock.elapsed(),
             paused: clock.paused(),
@@ -235,9 +234,6 @@ impl State {
             ..
         } = bar;
         let time = canvas.time();
-        let renderer = canvas.renderer.get_or_insert_with(|| {
-            egui_wgpu::Renderer::new(&gpu.device, gpu.format, None, 1, false)
-        });
         let px = pane.sync(gpu);
         let raw = pane.raw_input(time, self.pane_modifiers, *had_keyboard);
         let (palette, mode) = (canvas.palette, canvas.mode);
@@ -258,6 +254,10 @@ impl State {
         let Some(surface) = pane.wgpu.as_ref() else {
             return;
         };
+        canvas.take_pending(&mut output);
+        let renderer = canvas.renderer.get_or_insert_with(|| {
+            egui_wgpu::Renderer::new(&gpu.device, gpu.format, None, 1, false)
+        });
         let painted = paint(
             &gpu.device,
             &gpu.queue,
