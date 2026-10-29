@@ -47,6 +47,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.2" date="2026-10-29">
+      <description>
+        <p>After an update, the running Windup hands over to the new version by itself instead of answering the shortcuts until it is stopped.</p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-10-29">
       <description>
         <p>Print Screen opens the capture bar and Ctrl+Shift+S takes a screenshot; Print Screen, Scroll Lock and Pause can be chosen for any shortcut; redo is Ctrl+Y.</p>

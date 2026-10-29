@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
 - On Linux, an update no longer leaves the old Windup answering the shortcuts until it is killed. Windup notices when a package update has replaced it and starts the new version within a few seconds, once no popup or capture is open. The first update to this version still needs the old one stopped once, since it predates this.
 
