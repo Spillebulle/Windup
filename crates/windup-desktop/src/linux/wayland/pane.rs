@@ -1,5 +1,6 @@
 //! The surfaces the Wayland thread draws in full with the GPU: one per output
-//! for the capture overlay, one for the notice card. Each is a layer surface
+//! for the capture overlay, one for the notice card, one for the recording
+//! bar. Each is a layer surface
 //! or an xdg toplevel ([`Role`]), with its own wgpu surface, viewport and
 //! preferred scale, and its own egui viewport in the context of its
 //! [`Canvas`]. The compositor's events for them (configure, scale, keyboard,
@@ -26,6 +27,22 @@ use windup_ui::{Mode, Palette};
 pub(super) enum Shell {
     Layer(LayerSurface),
     Window(Window),
+}
+
+/// Where a pane goes on its output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Spot {
+    /// All of it (the overlay).
+    Cover,
+    /// A card of this size the compositor centres (the notice).
+    Card((u32, u32)),
+    /// This size, this far from the output's top-left corner, whatever
+    /// panels reserve (the recording bar). It takes the keyboard only when
+    /// clicked.
+    At {
+        size: (u32, u32),
+        margin: (i32, i32),
+    },
 }
 
 /// One surface Windup draws in full with the GPU: an output of the overlay,
@@ -164,15 +181,16 @@ impl Canvas {
 pub(super) enum PaneRef {
     Overlay(usize),
     Notice,
+    RecBar,
 }
 
 impl State {
-    /// A surface of `role`. `size` is a card's; `None` covers `output`.
+    /// A surface of `role` on `output` at `spot`.
     pub(super) fn new_pane(
         &mut self,
         role: Role,
         output: Option<&wl_output::WlOutput>,
-        size: Option<(u32, u32)>,
+        spot: Spot,
         fallback: (u32, u32),
         scale: f64,
         id: egui::ViewportId,
@@ -185,43 +203,56 @@ impl State {
                     &self.qh,
                     surface.clone(),
                     Layer::Overlay,
-                    Some(if size.is_some() {
-                        "windup-notice"
-                    } else {
-                        "windup-capture"
+                    Some(match spot {
+                        Spot::Cover => "windup-capture",
+                        Spot::Card(_) => "windup-notice",
+                        Spot::At { .. } => "windup-recording",
                     }),
                     output,
                 );
-                match size {
+                match spot {
                     // Unanchored: the compositor centres it.
-                    Some((w, h)) => layer.set_size(w, h),
-                    None => {
+                    Spot::Card((w, h)) => layer.set_size(w, h),
+                    Spot::Cover => {
                         layer.set_anchor(
                             Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
                         );
                         layer.set_exclusive_zone(-1);
                         layer.set_size(0, 0);
                     }
+                    Spot::At {
+                        size: (w, h),
+                        margin: (x, y),
+                    } => {
+                        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
+                        // Margins from the output's edge, not a panel's.
+                        layer.set_exclusive_zone(-1);
+                        layer.set_margin(y, 0, 0, x);
+                        layer.set_size(w, h);
+                    }
                 }
-                layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+                layer.set_keyboard_interactivity(match spot {
+                    Spot::At { .. } => KeyboardInteractivity::OnDemand,
+                    _ => KeyboardInteractivity::Exclusive,
+                });
                 Shell::Layer(layer)
             }
             Role::Fullscreen => {
                 let shell = self.xdg_shell.as_ref().ok_or("no xdg-shell")?;
                 let window =
                     shell.create_window(surface.clone(), WindowDecorations::None, &self.qh);
-                window.set_title(if size.is_some() {
-                    "Windup notice"
-                } else {
-                    "Windup capture"
+                window.set_title(match spot {
+                    Spot::Cover => "Windup capture",
+                    Spot::Card(_) => "Windup notice",
+                    Spot::At { .. } => "Windup recording",
                 });
                 window.set_app_id(crate::APP_ID);
-                match size {
-                    Some((w, h)) => {
+                match spot {
+                    Spot::Card((w, h)) | Spot::At { size: (w, h), .. } => {
                         window.set_min_size(Some((w, h)));
                         window.set_max_size(Some((w, h)));
                     }
-                    None => window.set_fullscreen(output),
+                    Spot::Cover => window.set_fullscreen(output),
                 }
                 Shell::Window(window)
             }
@@ -266,22 +297,34 @@ impl State {
         {
             return Some(PaneRef::Overlay(i));
         }
-        self.notice
+        if self.notice.as_ref().is_some_and(|n| n.pane.is(surface)) {
+            return Some(PaneRef::Notice);
+        }
+        self.recbar
             .as_ref()
-            .filter(|n| n.pane.is(surface))
-            .map(|_| PaneRef::Notice)
+            .filter(|b| b.pane.is(surface))
+            .map(|_| PaneRef::RecBar)
     }
 
     fn pane_mut(&mut self, which: PaneRef) -> Option<&mut Pane> {
         match which {
             PaneRef::Overlay(i) => self.overlay.as_mut()?.panes.get_mut(i),
             PaneRef::Notice => self.notice.as_mut().map(|n| &mut n.pane),
+            PaneRef::RecBar => self.recbar.as_mut().map(|b| &mut b.pane),
         }
     }
 
-    /// Whether key presses go to a pane rather than the popup.
+    /// Whether key presses go to a pane rather than the popup: the overlay,
+    /// the notice, or the recording bar once it was clicked into.
     pub(super) fn panes_want_keys(&self) -> bool {
-        self.overlay.is_some() || self.notice.is_some()
+        self.overlay.is_some()
+            || self.notice.is_some()
+            || self.recbar.as_ref().is_some_and(|b| b.had_keyboard)
+    }
+
+    /// Whether any pane is up, to be redrawn.
+    fn has_panes(&self) -> bool {
+        self.overlay.is_some() || self.notice.is_some() || self.recbar.is_some()
     }
 
     pub(super) fn pane_configured(
@@ -306,6 +349,7 @@ impl State {
         match self.pane_of(surface) {
             Some(PaneRef::Overlay(_)) => self.end_capture(Outcome::Cancel, false, None),
             Some(PaneRef::Notice) => self.close_notice(),
+            Some(PaneRef::RecBar) => self.close_recbar(),
             None => {}
         }
     }
@@ -327,10 +371,12 @@ impl State {
             && let Some(p) = o.panes.iter_mut().find(|p| mine(p))
         {
             Some(p)
+        } else if let Some(n) = self.notice.as_mut().filter(|n| mine(&n.pane)) {
+            Some(&mut n.pane)
         } else {
-            self.notice
+            self.recbar
                 .as_mut()
-                .map(|n| &mut n.pane)
+                .map(|b| &mut b.pane)
                 .filter(|p| mine(p))
         };
         let Some(pane) = pane else {
@@ -361,6 +407,13 @@ impl State {
                 Some(n) if n.had_keyboard => self.close_notice(),
                 _ => {}
             },
+            // The bar stays; it only stops hearing keys.
+            Some(PaneRef::RecBar) => {
+                if let Some(b) = self.recbar.as_mut() {
+                    b.had_keyboard = entered;
+                }
+                self.queue_pane_redraw();
+            }
             None => {}
         }
     }
@@ -381,7 +434,11 @@ impl State {
                 o.panes.get_mut(i)
             }
             (None, Some(n)) => Some(&mut n.pane),
-            (None, None) => None,
+            (None, None) => self
+                .recbar
+                .as_mut()
+                .filter(|b| b.had_keyboard)
+                .map(|b| &mut b.pane),
         };
         if let Some(pane) = pane {
             pane.events.push(event);
@@ -403,7 +460,7 @@ impl State {
                 _ => {}
             }
         }
-        if which == PaneRef::Notice
+        if matches!(which, PaneRef::Notice | PaneRef::RecBar)
             && matches!(event.kind, PointerEventKind::Enter { .. })
             && let Some(pointer) = &self.pointer
         {
@@ -445,7 +502,7 @@ impl State {
     }
 
     pub(super) fn queue_pane_redraw(&mut self) {
-        if self.pane_redraw_queued || !self.panes_want_keys() {
+        if self.pane_redraw_queued || !self.has_panes() {
             return;
         }
         self.pane_redraw_queued = true;
@@ -453,6 +510,7 @@ impl State {
             state.pane_redraw_queued = false;
             state.draw_capture();
             state.draw_notice();
+            state.draw_recbar();
         });
     }
 

@@ -238,9 +238,11 @@ impl Background {
         events: &Receiver<ServiceEvent>,
     ) {
         // Sooner while a picture is being taken, so the overlay follows it
-        // at once.
+        // at once, and while a recording runs, so the bar's buttons answer.
         let wait = if self.capture.gate.grabbing() {
             Duration::from_millis(20)
+        } else if self.capture.live.busy() {
+            Duration::from_millis(50)
         } else {
             Duration::from_millis(200)
         };
@@ -253,9 +255,11 @@ impl Background {
                 ServiceEvent::PopupResized(w, h) => self.save_popup_size(config, w, h),
                 ServiceEvent::PasteElsewhere => portal::paste_ctrl_v(),
                 ServiceEvent::CaptureDone(end) => self.capture_done(*end, config, shared, commands),
+                ServiceEvent::RecBar(action) => self.recbar_action(action),
             }
         }
         self.poll_capture(config, shared, commands);
+        self.poll_recording(config, shared, commands);
 
         // The settings window saves config.json as it changes; pick it up.
         let stamp = config_stamp();
@@ -323,17 +327,15 @@ impl Background {
             Command::PastePlain if config.is_tool_enabled(ToolId::PastePlainText) => {
                 crate::paste::paste_current_clipboard_as_plain(Target::None);
             }
-            // Phase 1 has one mode, so both open the same overlay. The
-            // viewport host (X11) captures in `overlay.rs` instead.
+            // The viewport host (X11) captures in `overlay.rs` instead.
             Command::Capture => {
                 self.start_capture(ToolId::CaptureLauncher, CaptureMode::Screenshot, config);
             }
             Command::Screenshot => {
                 self.start_capture(ToolId::Screenshot, CaptureMode::Screenshot, config);
             }
-            Command::Record if config.is_tool_enabled(ToolId::Video) => {
-                log::info!("Video arrives in a later task");
-            }
+            Command::Record => self.record_command(config, shared, commands),
+            Command::RecordStop => self.stop_recording(),
             Command::Show => self.show_settings(),
             Command::Reload => {
                 *config = Config::load();

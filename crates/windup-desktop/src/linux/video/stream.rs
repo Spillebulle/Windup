@@ -67,7 +67,7 @@ const POLL_TAKING: Duration = Duration::from_millis(2);
 /// so the error says what happened.
 const SETTLE: Duration = Duration::from_millis(200);
 
-const DISCONNECTED: &str = "A monitor was disconnected.";
+const DISCONNECTED: &str = crate::video::outcome::MONITOR_GONE;
 
 fn reason(e: CaptureError) -> String {
     match e {

@@ -65,77 +65,50 @@ impl SourceFactory for PatternFactory {
 }
 
 /// The frame source for the real screen on this desktop, for `area` (desktop
-/// units; the primary monitor's top-left 320x240 without one).
+/// units; the primary monitor's top-left 320x240 without one). The choice
+/// is the recording's own (`live::screen_factory`); a test never passes a
+/// ScreenCast token, so it neither spends the owner's grant (each token is
+/// good once) nor saves a new one: the portal asks.
 fn screen_factory(area: Option<(i32, i32, u32, u32)>) -> Result<Box<dyn SourceFactory>, String> {
-    use windup_core::capture::backend::{Moving, video_order};
-    let order = video_order(&crate::capture::video_facts());
-    let default = |x: f32, y: f32| DRect {
-        x,
-        y,
-        w: 320.0,
-        h: 240.0,
+    let rect = match area {
+        Some((x, y, w, h)) => DRect {
+            x: x as f32,
+            y: y as f32,
+            w: w as f32,
+            h: h as f32,
+        },
+        None => {
+            let (x, y) = primary_origin()?;
+            DRect {
+                x,
+                y,
+                w: 320.0,
+                h: 240.0,
+            }
+        }
     };
-    let rect = |(x, y, w, h): (i32, i32, u32, u32)| DRect {
-        x: x as f32,
-        y: y as f32,
-        w: w as f32,
-        h: h as f32,
-    };
-    match order.first() {
-        #[cfg(target_os = "windows")]
-        Some(Moving::Ddagrab | Moving::Gdigrab) => {
-            let monitors = crate::capture::windows::monitor_list();
-            let layouts: Vec<DRect> = monitors.iter().map(|(r, _)| *r).collect();
-            let primary = layouts
-                .iter()
-                .find(|m| m.contains(0.0, 0.0))
-                .or(layouts.first())
-                .ok_or("no monitors found")?;
-            let rect = area.map_or_else(|| default(primary.x, primary.y), rect);
-            let f = super::windows::WindowsFactory::new(
-                rect,
-                &layouts,
-                &super::windows::dxgi_outputs(),
-            )
-            .ok_or("the area is too small to record")?;
-            Ok(Box::new(f))
-        }
-        #[cfg(target_os = "linux")]
-        Some(Moving::X11grab) => {
-            let rect = area.map_or_else(|| default(0.0, 0.0), rect);
-            let f = super::x11::X11Factory::from_env(rect)
-                .ok_or("DISPLAY is not set, or the area is too small to record")?;
-            Ok(Box::new(f))
-        }
-        #[cfg(target_os = "linux")]
-        Some(m @ (Moving::ExtImageCopy | Moving::WlrScreencopy)) => {
-            use crate::linux::wayland::screencopy::Method;
-            let method = if *m == Moving::ExtImageCopy {
-                Method::ExtImageCopy
-            } else {
-                Method::WlrScreencopy
-            };
-            let rect = area.map_or_else(|| default(0.0, 0.0), rect);
-            let f = crate::linux::video::WaylandFactory::new(method, rect)
-                .ok_or("the area is too small to record")?;
-            Ok(Box::new(f))
-        }
-        #[cfg(target_os = "linux")]
-        Some(Moving::ScreenCast) => {
-            // No saved token: a test must neither spend the owner's grant
-            // (each token is good once) nor save a new one. The portal asks.
-            let rect = area.map_or_else(|| default(0.0, 0.0), rect);
-            let f = crate::linux::video::ScreenCastFactory::new(rect, None)
-                .ok_or("the area is too small to record")?;
-            Ok(Box::new(f))
-        }
-        _ => {
-            let _ = (default, rect);
-            Err(format!(
-                "this desktop has no screen source yet ({order:?}); use --pattern"
-            ))
-        }
-    }
+    super::live::screen_factory(rect, None).map(|picked| picked.factory)
+}
+
+/// The primary monitor's top-left: the one holding the origin on Windows,
+/// the origin itself elsewhere.
+#[cfg(target_os = "windows")]
+fn primary_origin() -> Result<(f32, f32), String> {
+    let layouts: Vec<DRect> = crate::capture::windows::monitor_list()
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect();
+    let primary = layouts
+        .iter()
+        .find(|m| m.contains(0.0, 0.0))
+        .or(layouts.first())
+        .ok_or("no monitors found")?;
+    Ok((primary.x, primary.y))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn primary_origin() -> Result<(f32, f32), String> {
+    Ok((0.0, 0.0))
 }
 
 type Opener = fn(Option<&str>) -> Result<Box<dyn AudioSource>, String>;

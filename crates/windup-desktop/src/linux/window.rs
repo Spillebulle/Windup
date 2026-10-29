@@ -143,11 +143,12 @@ impl eframe::App for PopupWindow<'_> {
     }
 }
 
-/// The notice card as a small window of its own, with OK; Enter and Esc
-/// close it too. Returns, once it has closed, the commands that arrived
-/// meanwhile.
+/// The notice card as a small window of its own, with OK (and "Open folder"
+/// when `action` names a saved file); Enter and Esc close it too. Returns,
+/// once it has closed, the commands that arrived meanwhile.
 pub fn notice(
     message: &str,
+    action: Option<&std::path::Path>,
     palette: Palette,
     mode: Mode,
     commands: &Receiver<Command>,
@@ -175,6 +176,7 @@ pub fn notice(
             install_fonts(&cc.egui_ctx);
             Ok(Box::new(NoticeWindow {
                 message,
+                action,
                 palette,
                 mode,
                 commands,
@@ -202,6 +204,7 @@ fn notice_size(message: &str, palette: &Palette) -> egui::Vec2 {
 
 struct NoticeWindow<'a> {
     message: &'a str,
+    action: Option<&'a std::path::Path>,
     palette: Palette,
     mode: Mode,
     commands: &'a Receiver<Command>,
@@ -218,10 +221,20 @@ impl eframe::App for NoticeWindow<'_> {
         apply_theme(ctx, self.palette, self.mode);
         self.later.extend(self.commands.try_iter());
         let mut close = false;
+        let label = self.action.map(|_| crate::video::outcome::OPEN_FOLDER);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
-                close = notice::show(ui, &self.palette, self.message)
+                match notice::show(ui, &self.palette, self.message, label) {
+                    Some(notice::NoticeReply::Action) => {
+                        if let Some(file) = self.action {
+                            crate::video::outcome::open_folder(file);
+                        }
+                        close = true;
+                    }
+                    Some(notice::NoticeReply::Dismissed) => close = true,
+                    None => {}
+                }
             });
         // Focus moving elsewhere puts it away, as it does the popup.
         match ctx.input(|i| i.viewport().focused) {

@@ -16,7 +16,8 @@
 # in a real GTK text field or in the history file. The capture cases check
 # `windup --capture-test` pictures (sizes, and a marker window on a rotated
 # output) and that `windup --screenshot` opens an overlay Escape closes. The
-# recording case checks a `windup --record-test` file's size and length with
+# recording cases check a `windup --record-test` file's size and length, and
+# a recording made through `windup --record` and `--record-stop`, with
 # ffprobe, which (like ffmpeg) must sit next to the binary:
 # `tools/fetch-ffmpeg.sh linux64 <bin-dir> --with-ffprobe`.
 # Screenshots and logs go to the artefact directory.
@@ -354,6 +355,71 @@ sway_record() {
     rm -f "$out"
 }
 
+# A recording as a person makes one: `windup --record` opens the launcher in
+# Video, Ctrl+A takes the whole output and Enter records it; two seconds
+# later `windup --record-stop` stops it. The file must land in the Videos
+# folder with a video stream, and the notice must say so. The whole output is
+# recorded, so the bar has no room and is not shown; the hotkey stops it.
+sway_record_live() {
+    local videos=$home/Videos log=$art/wayland-windup.log probe file notices
+    probe=$(dirname "$bin")/ffprobe
+    # Where `directories` finds the Videos folder on Linux.
+    mkdir -p "$videos" "$XDG_CONFIG_HOME"
+    echo "XDG_VIDEOS_DIR=\"$videos\"" >"$XDG_CONFIG_HOME/user-dirs.dirs"
+    export XDG_VIDEOS_DIR=$videos
+    # Video is offered once the encoder probe has finished.
+    if ! wait_for 600 test -s "$XDG_CONFIG_HOME/windup/encoders.json"; then
+        bad "wayland: the encoder probe did not finish; no recording case"
+        return
+    fi
+    notices=$(grep -c "notice: shown" "$log")
+    keys_later 4000 -M ctrl -k a -m ctrl -s 400 -k Return
+    "$bin" --record
+    wait $keys_pid
+    if wait_for 100 grep -q "capture: closed (record)" "$log"; then
+        ok "wayland: --record opened the launcher in Video and Enter recorded"
+    else
+        bad "wayland: --record did not end in a recording"
+        grep -E "capture|notice|recording" "$log"
+        return
+    fi
+    if wait_for 150 grep -q "recording: started" "$log"; then
+        ok "wayland: the recording started"
+    else
+        bad "wayland: the recording did not start"
+        grep -E "recording|notice" "$log"
+        return
+    fi
+    sleep 2
+    "$bin" --record-stop
+    if wait_for 300 grep -q "recording: over" "$log"; then
+        ok "wayland: --record-stop stopped the recording"
+    else
+        bad "wayland: the recording did not stop"
+        grep -E "recording|notice" "$log"
+        return
+    fi
+    file=$(ls "$videos"/Windup/*.mp4 2>/dev/null | head -1)
+    if [ -n "$file" ] &&
+        [ "$("$probe" -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "$file")" = video ]; then
+        ok "wayland: the recording was saved to Videos/Windup with a video stream"
+    else
+        bad "wayland: no recording with a video stream in $videos/Windup: $(ls -R "$videos")"
+    fi
+    if wait_for 100 sh -c '[ "$(grep -c "notice: shown" "$1")" -gt "$2" ]' _ "$log" "$notices" &&
+        grep -q "capture: notice: Saved to " "$log"; then
+        ok "wayland: the notice says where the recording went"
+    else
+        bad "wayland: no notice for the saved recording"
+        grep -E "notice" "$log"
+    fi
+    # Put the notice away: a new keyboard device sends focus elsewhere, and
+    # the notice closes when it loses the keyboard, if not on Escape.
+    wtype -k Escape
+    sleep 0.4
+    rm -rf "$videos"/Windup
+}
+
 wayland_session() {
     echo "== Wayland (headless sway)"
     fresh_home
@@ -513,6 +579,8 @@ EOF
     else
         bad "wayland: the overlay did not close on Escape, or Windup stopped"
     fi
+
+    sway_record_live
 
     # A second `windup` does not start a second copy; it opens settings.
     "$bin"

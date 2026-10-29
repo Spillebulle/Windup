@@ -43,7 +43,7 @@ use crate::video::run::{FrameSource, SourceFactory};
 const PORTAL_WAIT: Duration = Duration::from_secs(120);
 
 /// Why a recording ends when the desktop stops the sharing.
-pub(super) const STOPPED: &str = "The screen sharing was stopped.";
+pub(super) const STOPPED: &str = crate::video::outcome::SHARING_STOPPED;
 
 /// One stream the portal handed over: its PipeWire node, and where its
 /// monitor sits and how big it is in desktop units, when the portal says.
@@ -61,8 +61,9 @@ pub(crate) struct ScreenCastFactory {
     rect: DRect,
     /// The logical size, for `source` before a stream knows the real one.
     size: (u32, u32),
-    /// The restore token for the next session.
-    token: Mutex<Option<String>>,
+    /// The restore token for the next session, shared with whoever saves
+    /// it (`token_slot`).
+    token: Arc<Mutex<Option<String>>>,
 }
 
 impl ScreenCastFactory {
@@ -74,16 +75,16 @@ impl ScreenCastFactory {
         Some(ScreenCastFactory {
             rect,
             size,
-            token: Mutex::new(token),
+            token: Arc::new(Mutex::new(token)),
         })
     }
 
-    /// The token to save to `VideoConfig.screencast_token` once the
-    /// recording has started.
-    // Task 13 saves it through `change_config`; `--record-test` must not.
-    #[allow(dead_code)]
-    pub(crate) fn token(&self) -> Option<String> {
-        self.token.lock().ok().and_then(|t| t.clone())
+    /// Where the next token lands, for saving to
+    /// `VideoConfig.screencast_token` once the recording has started (and
+    /// again at its end: a pause starts a new session, which spends it).
+    /// `--record-test` never saves it.
+    pub(crate) fn token_slot(&self) -> Arc<Mutex<Option<String>>> {
+        Arc::clone(&self.token)
     }
 }
 

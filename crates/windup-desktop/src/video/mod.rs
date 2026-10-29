@@ -3,6 +3,8 @@
 pub(crate) mod audio;
 pub(crate) mod availability;
 pub(crate) mod ffmpeg;
+pub(crate) mod live;
+pub(crate) mod outcome;
 pub(crate) mod pipe;
 pub(crate) mod run;
 pub(crate) mod test_source;

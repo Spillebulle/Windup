@@ -1,7 +1,7 @@
 //! Whether a capture is under way on a Wayland host, where the picture is
 //! taken on a worker thread and the overlay lives on the Wayland thread. A
-//! capture hotkey pressed while one is grabbing or open is ignored, as it is
-//! on Windows.
+//! capture hotkey pressed while one is grabbing or open, or while a
+//! recording runs, is ignored, as it is on Windows.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Gate {
@@ -11,6 +11,9 @@ pub enum Gate {
     Grabbing,
     /// The overlay, or the notice saying why there is none, is up.
     Open,
+    /// The overlay closed on Record: the recording starts, runs and is
+    /// joined. Ends with `end` once the file is saved or the start failed.
+    Recording,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -29,6 +32,12 @@ impl Gate {
         if *self == Gate::Grabbing {
             *self = Gate::Open;
         }
+    }
+
+    /// The overlay closed on Record; the gate stays shut until the
+    /// recording has ended.
+    pub fn recording(&mut self) {
+        *self = Gate::Recording;
     }
 
     /// The capture is over, however it went.
@@ -147,6 +156,30 @@ mod tests {
         Reply::new(tx, Err("dropped".to_owned())).send(Ok(()));
         assert_eq!(rx.try_recv(), Ok(Ok(())));
         assert!(rx.try_recv().is_err(), "nothing more after the result");
+    }
+
+    #[test]
+    fn a_capture_hotkey_is_ignored_while_recording() {
+        let mut g = Gate::default();
+        assert!(g.begin());
+        g.opened();
+        // The overlay closed on Record: the gate stays shut.
+        g.recording();
+        assert_eq!(g, Gate::Recording);
+        assert!(!g.begin(), "while recording");
+        assert_eq!(g, Gate::Recording);
+        assert!(!g.grabbing());
+    }
+
+    #[test]
+    fn ending_a_recording_reopens_the_gate() {
+        let mut g = Gate::default();
+        assert!(g.begin());
+        g.opened();
+        g.recording();
+        g.end();
+        assert_eq!(g, Gate::Idle);
+        assert!(g.begin(), "the next capture starts");
     }
 
     #[test]

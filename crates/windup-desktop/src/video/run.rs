@@ -84,8 +84,6 @@ pub(crate) struct RecordJob {
 }
 
 /// Where a recording is saved: the configured folder, else `<Videos>/Windup`.
-// Task 13 starts recordings from the app and is the caller.
-#[allow(dead_code)]
 pub(crate) fn out_dir(cfg: &VideoConfig) -> Option<PathBuf> {
     cfg.save_dir
         .clone()
@@ -226,13 +224,10 @@ impl Recording {
         })
     }
 
-    // Task 13's recording bar pauses and resumes.
-    #[allow(dead_code)]
     pub(crate) fn pause(&self) {
         let _ = self.tx.send(Ctl::Pause(self.shared.now()));
     }
 
-    #[allow(dead_code)]
     pub(crate) fn resume(&self) {
         let _ = self.tx.send(Ctl::Resume(self.shared.now()));
     }
@@ -261,11 +256,14 @@ impl Recording {
     }
 
     /// Seconds recorded, not counting pauses.
-    // Task 13's timer reads it.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn elapsed(&self) -> f64 {
-        let now = self.shared.now();
-        self.shared.recorder.lock().map_or(0.0, |r| r.elapsed(now))
+        self.clock().elapsed()
+    }
+
+    /// The timer, for a bar drawn on another thread.
+    pub(crate) fn clock(&self) -> RecClock {
+        RecClock(Arc::clone(&self.shared))
     }
 
     /// Set when a segment died; what was recorded before it is still kept.
@@ -275,8 +273,6 @@ impl Recording {
 
     /// A sound device went away during the recording, which goes on
     /// without it.
-    // Task 13's bar shows a notice.
-    #[allow(dead_code)]
     pub(crate) fn sound_lost(&self) -> bool {
         self.shared
             .sound_lost
@@ -287,6 +283,26 @@ impl Recording {
     #[cfg(test)]
     fn set_encoder(&self, name: &'static str, hardware: bool) {
         let _ = self.tx.send(Ctl::Encoder(name, hardware));
+    }
+}
+
+/// A recording's timer and pause state, readable from any thread: the
+/// recording bar on the Wayland thread reads it every frame.
+#[derive(Clone)]
+pub(crate) struct RecClock(Arc<Shared>);
+
+impl RecClock {
+    /// Seconds recorded, not counting pauses.
+    pub(crate) fn elapsed(&self) -> f64 {
+        let now = self.0.now();
+        self.0.recorder.lock().map_or(0.0, |r| r.elapsed(now))
+    }
+
+    pub(crate) fn paused(&self) -> bool {
+        self.0
+            .recorder
+            .lock()
+            .is_ok_and(|r| r.state() == RecState::Paused)
     }
 }
 

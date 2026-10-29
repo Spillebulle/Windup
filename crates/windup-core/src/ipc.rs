@@ -22,6 +22,8 @@ pub enum Command {
     Screenshot,
     /// Start or stop a screen recording.
     Record,
+    /// Stop the screen recording, if one runs.
+    RecordStop,
     /// Bring up the settings window.
     Show,
     /// Re-read `config.json`; sent by the settings window after it saves.
@@ -29,12 +31,13 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 7] = [
+    pub const ALL: [Command; 8] = [
         Command::Popup,
         Command::PastePlain,
         Command::Capture,
         Command::Screenshot,
         Command::Record,
+        Command::RecordStop,
         Command::Show,
         Command::Reload,
     ];
@@ -47,6 +50,7 @@ impl Command {
             Command::Capture => "capture",
             Command::Screenshot => "screenshot",
             Command::Record => "record",
+            Command::RecordStop => "record-stop",
             Command::Show => "show",
             Command::Reload => "reload",
         }
@@ -61,9 +65,8 @@ impl Command {
             Action::Screenshot => Command::Screenshot,
             // The recording keys are only grabbed while recording, and only
             // where Windup can grab keys at all; a command stands in for them.
-            Action::Video | Action::RecordPause | Action::RecordStop | Action::RecordCancel => {
-                Command::Record
-            }
+            Action::Video | Action::RecordPause | Action::RecordCancel => Command::Record,
+            Action::RecordStop => Command::RecordStop,
         }
     }
 
@@ -119,6 +122,7 @@ Usage: windup [OPTION]
   --capture       Open the capture launcher
   --screenshot    Take a screenshot
   --record        Start or stop a screen recording
+  --record-stop   Stop the screen recording
   --background    Start without opening the window
   --help          Show this text
 
@@ -236,6 +240,7 @@ where
             "--capture" => Launch::Send(Command::Capture),
             "--screenshot" => Launch::Send(Command::Screenshot),
             "--record" => Launch::Send(Command::Record),
+            "--record-stop" => Launch::Send(Command::RecordStop),
             "--show" => Launch::Send(Command::Show),
             "--background" => Launch::Background,
             "--settings" => Launch::Settings,
@@ -492,6 +497,25 @@ mod tests {
             Command::Capture
         );
         assert_eq!(Command::for_action(Action::Screenshot), Command::Screenshot);
+        assert_eq!(Command::for_action(Action::Video), Command::Record);
+        // The Video shortcut pressed again while recording.
+        assert_eq!(Command::for_action(Action::RecordStop), Command::RecordStop);
+    }
+
+    #[test]
+    fn record_stop_is_a_command_with_its_own_flag() {
+        assert_eq!(
+            parse_args(["--record-stop"]),
+            Launch::Send(Command::RecordStop)
+        );
+        assert_eq!(
+            Command::parse(
+                "record-stop
+"
+            ),
+            Some(Command::RecordStop)
+        );
+        assert!(USAGE.contains("--record-stop"));
     }
 
     #[test]

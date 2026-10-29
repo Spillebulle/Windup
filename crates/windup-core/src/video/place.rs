@@ -64,9 +64,33 @@ pub fn place_bar(rect: DRect, monitors: &[DRect], bar: (f32, f32), gap: f32) -> 
         })
 }
 
+/// The launcher bar's spot, where Windows keeps the recording bar (a window
+/// it leaves out of every capture): centred at the top of `monitor`, `top`
+/// below its edge, and kept on it sideways. Desktop units.
+pub fn top_centre(monitor: DRect, bar: (f32, f32), top: f32) -> DRect {
+    let (w, h) = bar;
+    DRect {
+        x: (monitor.x + (monitor.w - w) / 2.0).max(monitor.x),
+        y: monitor.y + top,
+        w,
+        h,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_launcher_spot_is_the_top_centre_of_its_monitor() {
+        let m = r(1920.0, -200.0, 2560.0, 1440.0);
+        assert_eq!(
+            top_centre(m, (400.0, 80.0), 32.0),
+            r(1920.0 + 1080.0, -168.0, 400.0, 80.0)
+        );
+        // Wider than the monitor: from its left edge.
+        assert_eq!(top_centre(m, (3000.0, 80.0), 0.0).x, 1920.0);
+    }
 
     fn r(x: f32, y: f32, w: f32, h: f32) -> DRect {
         DRect { x, y, w, h }

@@ -8,6 +8,7 @@ mod linux;
 mod overlay;
 mod paste;
 mod platform;
+mod recording;
 mod setup;
 mod video;
 
@@ -52,6 +53,8 @@ struct WindupApp {
     /// Where overlays go: only the viewport host draws them here.
     host: Host,
     overlay: overlay::Overlay,
+    /// A recording, its bar and its end (Windows and X11).
+    rec: recording::Rec,
     last_saved_state: (usize, u64),
     max_items_atomic: Arc<AtomicUsize>,
     save_images_atomic: Arc<AtomicBool>,
@@ -157,6 +160,7 @@ impl WindupApp {
                         Command::Capture => HotkeyEvent::Capture { target },
                         Command::Screenshot => HotkeyEvent::Screenshot { target },
                         Command::Record => HotkeyEvent::Record { target },
+                        Command::RecordStop => HotkeyEvent::RecordStop,
                         Command::Show => HotkeyEvent::Show,
                         Command::Reload => HotkeyEvent::Reload,
                     };
@@ -191,6 +195,7 @@ impl WindupApp {
             target: Target::None,
             host: plan.host,
             overlay: overlay::Overlay::default(),
+            rec: recording::Rec::default(),
             last_saved_state: initial_state,
             max_items_atomic,
             save_images_atomic,
@@ -270,6 +275,7 @@ impl eframe::App for WindupApp {
         if !self.settings_only
             && !self.popup_open
             && !self.overlay.busy()
+            && !self.rec.live.busy()
             && let Some(exe) = linux::ipc::upgraded_exe()
         {
             linux::ipc::hand_over(&exe);
@@ -330,7 +336,9 @@ impl eframe::App for WindupApp {
                 HotkeyEvent::Screenshot { target } => {
                     self.start_capture(ctx, CaptureMode::Screenshot, ToolId::Screenshot, target)
                 }
-                HotkeyEvent::Record { .. } => log::info!("Video arrives in a later task"),
+                // While a recording runs, the Video hotkey stops it.
+                HotkeyEvent::Record { target } => self.video_hotkey(ctx, target),
+                HotkeyEvent::RecordStop => self.stop_recording(),
                 HotkeyEvent::Show => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -524,6 +532,8 @@ impl eframe::App for WindupApp {
             }
         }
 
+        // Before the overlays: a Record they give starts next frame.
+        self.drive_recording(ctx, &palette, mode);
         self.drive_capture(ctx, &palette);
 
         // Keep UI smooth and responsive (60fps when popup is open, 100ms when idle)

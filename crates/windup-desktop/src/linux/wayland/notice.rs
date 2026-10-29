@@ -1,5 +1,6 @@
 //! The notice card on the layer host: why a capture could not start or
-//! save, with OK; Enter and Esc close it, and so does the keyboard going
+//! save, or where a recording went (with "Open folder"), with OK; Enter and
+//! Esc close it, and so does the keyboard going
 //! elsewhere, as it does the popup. A layer surface of the card's size that
 //! the compositor centres. The window host shows it as a window of its own
 //! instead (`linux::window::notice`).
@@ -7,14 +8,17 @@
 use super::State;
 use super::gpu::{Painted, card_clear, paint};
 use super::overlay::{IDLE, MIN_FRAME, Role};
-use super::pane::{Canvas, Pane};
+use super::pane::{Canvas, Pane, Spot};
 use calloop::timer::{TimeoutAction, Timer};
+use std::path::PathBuf;
 use std::time::Duration;
 use windup_ui::{Mode, Palette, apply_theme, notice};
 
 /// A notice to show.
 pub struct NoticeSetup {
     pub message: String,
+    /// A saved recording, which "Open folder" shows.
+    pub action: Option<PathBuf>,
     pub palette: Palette,
     pub mode: Mode,
 }
@@ -23,6 +27,7 @@ pub(super) struct Notice {
     pub(super) pane: Pane,
     pub(super) canvas: Canvas,
     pub(super) message: String,
+    pub(super) action: Option<PathBuf>,
     pub(super) had_keyboard: bool,
 }
 
@@ -30,6 +35,7 @@ impl State {
     pub(super) fn open_notice(&mut self, setup: NoticeSetup) {
         let NoticeSetup {
             message,
+            action,
             palette,
             mode,
         } = setup;
@@ -45,13 +51,14 @@ impl State {
         let card = notice::size(&canvas.ctx, &message, &canvas.palette);
         let size = (card.x.ceil().max(1.0) as u32, card.y.ceil().max(1.0) as u32);
         let id = egui::ViewportId::from_hash_of("windup-notice");
-        match self.new_pane(Role::Layer, None, Some(size), size, 1.0, id) {
+        match self.new_pane(Role::Layer, None, Spot::Card(size), size, 1.0, id) {
             Ok(pane) => {
                 log::info!("notice: opening");
                 self.notice = Some(Notice {
                     pane,
                     canvas,
                     message,
+                    action,
                     had_keyboard: false,
                 });
             }
@@ -93,8 +100,10 @@ impl State {
             pane,
             canvas,
             message,
+            action,
             had_keyboard,
         } = card;
+        let label = action.as_ref().map(|_| crate::video::outcome::OPEN_FOLDER);
         let time = canvas.time();
         let renderer = canvas.renderer.get_or_insert_with(|| {
             egui_wgpu::Renderer::new(&gpu.device, gpu.format, None, 1, false)
@@ -103,12 +112,22 @@ impl State {
         let raw = pane.raw_input(time, self.pane_modifiers, *had_keyboard);
         let (palette, mode) = (canvas.palette, canvas.mode);
         let mut close = false;
+        let mut act = false;
         let mut output = canvas.ctx.run(raw, |ctx| {
             apply_theme(ctx, palette, mode);
-            egui::CentralPanel::default()
-                .frame(egui::Frame::NONE)
-                .show(ctx, |ui| close |= notice::show(ui, &palette, message));
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(
+                ctx,
+                |ui| match notice::show(ui, &palette, message, label) {
+                    Some(notice::NoticeReply::Action) => act = true,
+                    Some(notice::NoticeReply::Dismissed) => close = true,
+                    None => {}
+                },
+            );
         });
+        if act && let Some(file) = action.as_deref() {
+            crate::video::outcome::open_folder(file);
+            close = true;
+        }
         let delay = output
             .viewport_output
             .get(&pane.id)

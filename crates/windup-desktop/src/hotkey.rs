@@ -30,6 +30,9 @@ pub enum HotkeyEvent {
     Record {
         target: Target,
     },
+    /// Stop the recording (`windup --record-stop`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    RecordStop,
     /// Bring the settings window up (`windup` run a second time).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Show,

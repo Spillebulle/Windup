@@ -1,7 +1,8 @@
 //! The capture overlay on the viewport host (Windows and X11): the frozen
 //! screen in one borderless, always-on-top viewport per monitor, each drawing
 //! the shared [`CaptureView`], and what happens to the picture afterwards.
-//! Also the notice card that says why a capture could not start or save.
+//! Also the notice card that says why a capture could not start or save,
+//! or where a recording went. The recording itself is `recording.rs`.
 //!
 //! The Wayland hosts never come here: they have no eframe viewports to put
 //! an overlay in. Their capture is `linux::capture`, with the overlay on the
@@ -71,6 +72,8 @@ struct Surface {
 
 struct Notice {
     message: String,
+    /// A saved recording, which "Open folder" shows.
+    action: Option<std::path::PathBuf>,
     rect: egui::Rect,
     frames: u32,
     had_focus: bool,
@@ -117,7 +120,7 @@ pub(crate) fn points_rect(layout: DRect, ppp: f32) -> egui::Rect {
 impl WindupApp {
     /// A capture hotkey. Takes the picture first, while nothing of Windup's
     /// is on the screen but what was already there, then opens the overlays.
-    /// Ignored while a capture is open.
+    /// Ignored while a capture is open or a recording runs.
     pub(crate) fn start_capture(
         &mut self,
         ctx: &egui::Context,
@@ -128,6 +131,10 @@ impl WindupApp {
         let o = &self.overlay;
         if o.capture.is_some() || o.finishing.is_some() {
             log::debug!("capture: already open");
+            return;
+        }
+        if self.rec.live.busy() {
+            log::debug!("capture: a recording is under way");
             return;
         }
         if !self.config.is_tool_enabled(tool) {
@@ -147,14 +154,14 @@ impl WindupApp {
         let shot = match capture::grab_all() {
             Ok(shot) if !shot.monitors.is_empty() => shot,
             Ok(_) => {
-                self.open_notice(ctx, capture::CaptureError::Unsupported.message());
+                self.open_notice(ctx, capture::CaptureError::Unsupported.message(), None);
                 return;
             }
             Err(e) => {
                 if let capture::CaptureError::Failed(why) = &e {
                     log::warn!("capture: {why}");
                 }
-                self.open_notice(ctx, e.message());
+                self.open_notice(ctx, e.message(), None);
                 return;
             }
         };
@@ -312,8 +319,8 @@ impl WindupApp {
         remember(&mut self.config.screenshot, &cap.session);
         if let Some(Outcome::Record { rect, choice }) = &outcome {
             remember_video(&mut self.config.video, &cap.session);
-            // Task 13 starts the recording here.
-            log::info!("Recording arrives in a later task ({rect:?}, {choice:?})");
+            // Started next frame, once the overlays are off the screen.
+            self.record_from(*rect, *choice, &cap.session);
             outcome = None;
         }
         self.config.save();
@@ -333,12 +340,18 @@ impl WindupApp {
         if let Some(error) =
             finish::deliver(outcome, &self.config.screenshot, paste::set_clipboard_image)
         {
-            self.open_notice(ctx, &error);
+            self.open_notice(ctx, &error, None);
         }
     }
 
-    /// Opens the notice card at the cursor, the way the clipboard popup opens.
-    fn open_notice(&mut self, ctx: &egui::Context, message: &str) {
+    /// Opens the notice card at the cursor, the way the clipboard popup opens,
+    /// with "Open folder" when there is a saved file to show.
+    pub(crate) fn open_notice(
+        &mut self,
+        ctx: &egui::Context,
+        message: &str,
+        action: Option<std::path::PathBuf>,
+    ) {
         let palette = self.resolved_palette(self.resolved_mode(ctx));
         let size = notice::size(ctx, message, &palette);
         let ((cx, cy), mon) = cursor::get_cursor_and_monitor();
@@ -352,6 +365,7 @@ impl WindupApp {
         let (x, y) = placement::place((cx / ppp, cy / ppp), area, (size.x, size.y));
         self.overlay.notice = Some(Notice {
             message: message.to_owned(),
+            action,
             rect: egui::Rect::from_min_size(egui::pos2(x, y), size),
             frames: 0,
             had_focus: false,
@@ -376,6 +390,11 @@ impl WindupApp {
             .with_inner_size(n.rect.size())
             .with_position(n.rect.min);
         let mut close = false;
+        let mut act = false;
+        let label = n
+            .action
+            .as_ref()
+            .map(|_| crate::video::outcome::OPEN_FOLDER);
         let id = egui::ViewportId::from_hash_of("capture_notice");
         ctx.show_viewport_immediate(id, builder, |vctx, class| {
             if class != egui::ViewportClass::Immediate {
@@ -403,7 +422,11 @@ impl WindupApp {
             }
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
-                .show(vctx, |ui| close |= notice::show(ui, p, &n.message));
+                .show(vctx, |ui| match notice::show(ui, p, &n.message, label) {
+                    Some(notice::NoticeReply::Action) => act = true,
+                    Some(notice::NoticeReply::Dismissed) => close = true,
+                    None => {}
+                });
             // Clicking elsewhere puts it away, as it does the popup.
             match vctx.input(|i| i.viewport().focused) {
                 Some(true) => n.had_focus = true,
@@ -415,7 +438,10 @@ impl WindupApp {
         if n.frames < FOCUS_FRAMES {
             ctx.request_repaint();
         }
-        if close {
+        if act && let Some(file) = n.action.as_deref() {
+            crate::video::outcome::open_folder(file);
+        }
+        if close || act {
             self.overlay.notice = None;
             crate::hide_popup_window(NOTICE_TITLE);
             crate::reset_popup_clipping_cache();
@@ -438,7 +464,7 @@ fn physical(layout: DRect) -> (i32, i32, i32, i32) {
 /// The monitor's scale (its DPI over 96) on Windows. Elsewhere `None`: the
 /// window's own scale corrects the guess once it exists.
 #[cfg(target_os = "windows")]
-fn monitor_scale(layout: DRect) -> Option<f32> {
+pub(crate) fn monitor_scale(layout: DRect) -> Option<f32> {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
     use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
@@ -457,14 +483,14 @@ fn monitor_scale(layout: DRect) -> Option<f32> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn monitor_scale(_layout: DRect) -> Option<f32> {
+pub(crate) fn monitor_scale(_layout: DRect) -> Option<f32> {
     None
 }
 
 /// Whether the OS asks for less motion. Windows' closest switch is "Show
 /// animations in Windows" (client-area animation). X11 has no standard one.
 #[cfg(target_os = "windows")]
-fn reduced_motion() -> bool {
+pub(crate) fn reduced_motion() -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
     };
@@ -482,13 +508,13 @@ fn reduced_motion() -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn reduced_motion() -> bool {
+pub(crate) fn reduced_motion() -> bool {
     false
 }
 
 /// Our own top-level window with this title.
 #[cfg(target_os = "windows")]
-fn own_window(title: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
+pub(crate) fn own_window(title: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId};
     let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
@@ -510,7 +536,7 @@ fn own_window(title: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
 /// scale makes winit resize it for the new DPI, so the move is repeated
 /// until it holds.
 #[cfg(target_os = "windows")]
-fn place_overlay(title: &str, layout: DRect, focus: bool) {
+pub(crate) fn place_overlay(title: &str, layout: DRect, focus: bool) {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowRect, HWND_TOPMOST, SWP_NOACTIVATE, SetWindowPos,
@@ -539,14 +565,14 @@ fn place_overlay(title: &str, layout: DRect, focus: bool) {
 /// X11: egui's focus request is an application's, which window managers may
 /// refuse; ask again as a pager does.
 #[cfg(target_os = "linux")]
-fn place_overlay(title: &str, _layout: DRect, focus: bool) {
+pub(crate) fn place_overlay(title: &str, _layout: DRect, focus: bool) {
     if focus && let Some(w) = crate::linux::x11::window_named(title) {
         crate::linux::x11::activate(w);
     }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn place_overlay(_title: &str, _layout: DRect, _focus: bool) {}
+pub(crate) fn place_overlay(_title: &str, _layout: DRect, _focus: bool) {}
 
 /// How an X11 overlay asks to be fullscreen and above the panels (EWMH
 /// `_NET_WM_STATE`).
@@ -605,7 +631,7 @@ fn fullscreen_overlay(_title: &str) {}
 /// Keeps the window out of Alt+Tab. winit's `with_taskbar(false)` only takes
 /// the taskbar button away (through `ITaskbarList`).
 #[cfg(target_os = "windows")]
-fn make_tool_window(title: &str) {
+pub(crate) fn make_tool_window(title: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
@@ -622,7 +648,7 @@ fn make_tool_window(title: &str) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn make_tool_window(_title: &str) {}
+pub(crate) fn make_tool_window(_title: &str) {}
 
 /// Foreground and keyboard focus for `hwnd`, with the input of the current
 /// foreground thread attached so Windows allows it (as the popup does).
@@ -654,7 +680,7 @@ unsafe fn force_foreground(hwnd: windows_sys::Win32::Foundation::HWND) {
 /// Hides the overlay now rather than when egui drops its viewport at the
 /// end of the next frame.
 #[cfg(target_os = "windows")]
-fn hide_overlay(title: &str) {
+pub(crate) fn hide_overlay(title: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
     if let Some(hwnd) = own_window(title) {
         // SAFETY: one of this process's windows.
@@ -663,7 +689,7 @@ fn hide_overlay(title: &str) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn hide_overlay(_title: &str) {}
+pub(crate) fn hide_overlay(_title: &str) {}
 
 /// Focus back to the window the hotkey was pressed in, before the overlay
 /// that has it goes away (Windows lets the foreground window hand it on).

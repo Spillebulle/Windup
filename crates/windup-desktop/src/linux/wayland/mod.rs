@@ -3,8 +3,8 @@
 //! capture overlay and the notice card, so none of them race each other.
 //!
 //! - `popup.rs`: the clipboard popup;
-//! - `overlay.rs`: the capture overlay, `notice.rs` the notice card, and
-//!   `pane.rs` the surfaces both draw on;
+//! - `overlay.rs`: the capture overlay, `notice.rs` the notice card,
+//!   `recbar.rs` the recording bar, and `pane.rs` the surfaces they draw on;
 //! - `gpu.rs`: the device they share, and putting a frame on a surface;
 //! - `handlers.rs`: what the compositor says, sent on to the right one.
 //!
@@ -18,6 +18,7 @@ mod notice;
 mod overlay;
 mod pane;
 mod popup;
+mod recbar;
 pub(crate) mod screencopy;
 mod vkbd;
 
@@ -25,6 +26,7 @@ pub use clip::Payload;
 pub use notice::NoticeSetup;
 pub use overlay::{CaptureEnd, CaptureSetup};
 pub use popup::PopupSetup;
+pub use recbar::RecBarSetup;
 
 use crate::platform::{DataControl, Host, PasteVia, Plan, Watch};
 use calloop::channel::{Channel, Event as ChannelEvent, Sender as LoopSender, channel};
@@ -122,6 +124,10 @@ pub enum Request {
     OpenCapture(Box<CaptureSetup>),
     /// Show the notice card (the layer host's).
     Notice(Box<NoticeSetup>),
+    /// Show the recording bar (the layer host's).
+    OpenRecBar(Box<RecBarSetup>),
+    /// Take the recording bar down.
+    CloseRecBar,
 }
 
 pub enum ServiceEvent {
@@ -132,6 +138,8 @@ pub enum ServiceEvent {
     PasteElsewhere,
     /// The capture overlay closed, or could not open.
     CaptureDone(Box<CaptureEnd>),
+    /// Pause, Resume or Stop on the recording bar.
+    RecBar(windup_ui::capture::recbar::RecBarAction),
 }
 
 /// What the service shares with the rest of the app.
@@ -235,6 +243,14 @@ impl Service {
     pub fn notice(&self, setup: NoticeSetup) -> bool {
         self.send(Request::Notice(Box::new(setup)))
     }
+
+    pub fn open_recbar(&self, setup: RecBarSetup) {
+        self.send(Request::OpenRecBar(Box::new(setup)));
+    }
+
+    pub fn close_recbar(&self) {
+        self.send(Request::CloseRecBar);
+    }
 }
 
 pub struct State {
@@ -281,6 +297,7 @@ pub struct State {
 
     overlay: Option<overlay::Overlay>,
     notice: Option<notice::Notice>,
+    recbar: Option<recbar::RecBar>,
     pane_redraw_queued: bool,
     /// The modifiers held, for the overlay and the notice.
     pane_modifiers: egui::Modifiers,
@@ -377,6 +394,7 @@ impl State {
             redraw_queued: false,
             overlay: None,
             notice: None,
+            recbar: None,
             pane_redraw_queued: false,
             pane_modifiers: egui::Modifiers::default(),
         };
@@ -443,6 +461,8 @@ impl State {
             }
             Request::OpenCapture(setup) => self.open_capture(setup),
             Request::Notice(setup) => self.open_notice(*setup),
+            Request::OpenRecBar(setup) => self.open_recbar(*setup),
+            Request::CloseRecBar => self.close_recbar(),
         }
     }
 

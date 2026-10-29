@@ -13,20 +13,29 @@
 //! The window host (GNOME, Weston) runs no Wayland service of its own for the
 //! clipboard; the first capture starts one for the overlay, and keeps it.
 //! Nothing about its clipboard changes.
+//!
+//! A Record from the overlay starts the recording here (`video::live`), with
+//! the gate kept shut until it is over. The layer host shows the recording
+//! bar on the Wayland thread (`wayland::recbar`); the window host shows none,
+//! and the Video hotkey (or `windup --record-stop`) stops it.
 
-use super::wayland::{CaptureEnd, CaptureSetup, NoticeSetup, Service, Shared};
+use super::wayland::{CaptureEnd, CaptureSetup, NoticeSetup, RecBarSetup, Service, Shared};
 use super::{Background, copy_image, popup_setup, portal, window};
 use crate::capture::gate::{Gate, Reply};
 use crate::capture::{CaptureError, finish, grab_all, window_rects};
 use crate::platform::{Host, PasteVia, Plan, Watch};
 use crate::video::availability;
+use crate::video::live::{Ask, Live, LiveEvent};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
-use windup_core::capture::DesktopShot;
 use windup_core::capture::WindowRect;
+use windup_core::capture::backend::{BarHost, record_bar_host};
 use windup_core::capture::session::{Action, CaptureMode, ModeAvailability, Outcome, Session};
+use windup_core::capture::{DRect, DesktopShot};
 use windup_core::ipc::Command;
 use windup_core::{Config, ToolId};
+use windup_ui::capture::recbar::RecBarAction;
 
 /// How long the reduced-motion answer may take once the picture is in.
 const MOTION_WAIT: Duration = Duration::from_millis(300);
@@ -51,6 +60,12 @@ pub(super) struct Capturing {
     rx: Receiver<Grabbed>,
     /// The service started for the overlay where none runs for the clipboard.
     own_service: Option<Service>,
+    /// The recording, from the overlay's Record to its notice.
+    pub(super) live: Live,
+    /// What the recording bar is placed beside.
+    rec_rect: Option<DRect>,
+    /// The reduced-motion answer, asked as the recording starts.
+    motion: Option<Receiver<bool>>,
 }
 
 impl Default for Capturing {
@@ -62,6 +77,9 @@ impl Default for Capturing {
             tx,
             rx,
             own_service: None,
+            live: Live::default(),
+            rec_rect: None,
+            motion: None,
         }
     }
 }
@@ -178,7 +196,8 @@ impl Background {
         }
     }
 
-    /// The overlay closed: remember its choices, then copy and save.
+    /// The overlay closed: remember its choices, then copy and save, or
+    /// start recording.
     pub(super) fn capture_done(
         &mut self,
         end: CaptureEnd,
@@ -195,8 +214,19 @@ impl Background {
             }
         });
         if let Outcome::Record { rect, choice } = &end.outcome {
-            // Task 13 starts the recording here.
-            log::info!("Recording arrives in a later task ({rect:?}, {choice:?})");
+            // The overlay's surfaces were destroyed before this event was
+            // sent; the start waits a moment more on its worker for the
+            // compositor to show the desktop again.
+            let ask = Ask {
+                rect: *rect,
+                choice: *choice,
+                cfg: config.video.clone(),
+            };
+            if self.capture.live.start(ask) {
+                self.capture.gate.recording();
+                self.capture.rec_rect = Some(*rect);
+                self.capture.motion = Some(portal::ask_reduced_motion());
+            }
         }
         if end.open_settings {
             self.show_settings();
@@ -222,6 +252,18 @@ impl Background {
         shared: &Shared,
         commands: &Receiver<Command>,
     ) {
+        self.notice_with(message, None, config, shared, commands);
+    }
+
+    /// `notice`, with "Open folder" for a saved recording.
+    fn notice_with(
+        &mut self,
+        message: &str,
+        action: Option<PathBuf>,
+        config: &mut Config,
+        shared: &Shared,
+        commands: &Receiver<Command>,
+    ) {
         log::info!("capture: notice: {message}");
         let theme = popup_setup(config);
         if self.runtime.plan.host == Host::Layer
@@ -229,15 +271,127 @@ impl Background {
         {
             service.notice(NoticeSetup {
                 message: message.to_owned(),
+                action,
                 palette: theme.palette,
                 mode: theme.mode,
             });
             return;
         }
-        let later = window::notice(message, theme.palette, theme.mode, commands);
+        let later = window::notice(
+            message,
+            action.as_deref(),
+            theme.palette,
+            theme.mode,
+            commands,
+        );
         for command in later {
             self.command(command, config, shared, commands);
         }
+    }
+
+    /// The Video hotkey (`windup --record`): stops a recording that runs,
+    /// else opens the launcher in Video, or says why Video cannot work here.
+    pub(super) fn record_command(
+        &mut self,
+        config: &mut Config,
+        shared: &Shared,
+        commands: &Receiver<Command>,
+    ) {
+        if self.capture.live.stoppable() {
+            self.stop_recording();
+            return;
+        }
+        if self.capture.live.busy() || !config.is_tool_enabled(ToolId::Video) {
+            return;
+        }
+        if let Err(why) = availability::current(&config.video).video {
+            self.notice(why, config, shared, commands);
+            return;
+        }
+        self.start_capture(ToolId::Video, CaptureMode::Video, config);
+    }
+
+    /// Stop, from the bar, the hotkey or `windup --record-stop`. The bar
+    /// goes at once; the notice comes once the file is joined.
+    pub(super) fn stop_recording(&mut self) {
+        if self.capture.live.stoppable() {
+            log::info!("recording: stopping");
+        }
+        self.capture.live.stop();
+        self.close_recbar();
+    }
+
+    /// Pause, Resume or Stop from the bar.
+    pub(super) fn recbar_action(&mut self, action: RecBarAction) {
+        match (action, self.capture.live.running()) {
+            (RecBarAction::Pause, Some(r)) => r.pause(),
+            (RecBarAction::Resume, Some(r)) => r.resume(),
+            (RecBarAction::Stop, _) => self.stop_recording(),
+            _ => {}
+        }
+    }
+
+    fn close_recbar(&self) {
+        if let Some(service) = &self.runtime.service {
+            service.close_recbar();
+        }
+    }
+
+    /// Moves the recording along; every tick.
+    pub(super) fn poll_recording(
+        &mut self,
+        config: &mut Config,
+        shared: &Shared,
+        commands: &Receiver<Command>,
+    ) {
+        for event in self.capture.live.poll() {
+            match event {
+                LiveEvent::Started => self.open_recbar(config),
+                LiveEvent::Stopping => self.close_recbar(),
+                LiveEvent::Over(ended) => {
+                    self.close_recbar();
+                    self.capture.gate.end();
+                    self.capture.rec_rect = None;
+                    self.capture.motion = None;
+                    self.notice_with(&ended.message, ended.saved, config, shared, commands);
+                }
+                LiveEvent::Token(t) => {
+                    self.change_config(config, |c| c.video.screencast_token = Some(t));
+                }
+            }
+        }
+    }
+
+    /// The bar, where this desktop can keep it out of the recording.
+    fn open_recbar(&mut self, config: &Config) {
+        let host = record_bar_host(&crate::capture::facts());
+        if host != BarHost::Outside || self.runtime.plan.host != Host::Layer {
+            log::info!("recording: no bar here ({host:?}); the hotkey stops it");
+            return;
+        }
+        let (Some(service), Some(rect), Some(running)) = (
+            &self.runtime.service,
+            self.capture.rec_rect,
+            self.capture.live.running(),
+        ) else {
+            return;
+        };
+        let reduced_motion = self
+            .capture
+            .motion
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+            .unwrap_or(false);
+        let theme = popup_setup(config);
+        service.open_recbar(RecBarSetup {
+            clock: running.clock.clone(),
+            fps: running.fps,
+            label: running.label.clone(),
+            rect,
+            palette: theme.palette,
+            mode: theme.mode,
+            reduced_motion,
+        });
     }
 
     /// The service the overlay opens in: the one that runs for the

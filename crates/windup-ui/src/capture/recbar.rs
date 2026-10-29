@@ -113,6 +113,25 @@ pub fn bar_size(ctx: &Context, state: &RecBarState) -> Vec2 {
     vec2(w, metrics::REC_BAR_H)
 }
 
+/// The window or surface a host keeps for the bar: the bar at its top, and
+/// below it room for the buttons' tooltips, which paint under the bar and
+/// are clipped to the surface. Hosts place and size this, not the bar alone,
+/// so the room too stays off the recorded area.
+pub fn host_size(ctx: &Context, state: &RecBarState) -> Vec2 {
+    let bar = bar_size(ctx, state);
+    let tip = ctx
+        .layer_painter(LayerId::background())
+        .layout_no_wrap(
+            "Ag".into(),
+            FontId::proportional(text::TINY),
+            Color32::WHITE,
+        )
+        .size()
+        .y
+        + 2.0 * metrics::TOOLTIP_PAD_Y;
+    vec2(bar.x, bar.y + metrics::POPOVER_GAP + tip + metrics::S2)
+}
+
 #[derive(Default)]
 pub struct RecBarView {
     tip: Option<(Id, f64)>,
@@ -416,5 +435,18 @@ mod tests {
         };
         assert_eq!(at(0.0), at(3599.0));
         assert!(at(3600.0).x > at(0.0).x);
+    }
+
+    #[test]
+    fn the_host_leaves_room_for_a_tooltip_under_the_bar() {
+        let rig = Rig::new();
+        let s = state();
+        let bar = bar_size(&rig.ctx, &s);
+        let host = host_size(&rig.ctx, &s);
+        assert_eq!(host.x, bar.x);
+        assert!(
+            host.y >= bar.y + metrics::POPOVER_GAP + text::TINY + 2.0 * metrics::TOOLTIP_PAD_Y,
+            "{host:?} for {bar:?}"
+        );
     }
 }

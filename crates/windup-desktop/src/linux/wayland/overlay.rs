@@ -22,7 +22,7 @@
 //! the view's `Mapping` turns its points into desktop units unchanged.
 
 use super::gpu::{Painted, paint};
-use super::pane::{Canvas, Pane, wl_cursor};
+use super::pane::{Canvas, Pane, Spot, wl_cursor};
 use super::{ServiceEvent, State, screencopy};
 use crate::capture::CaptureError;
 use crate::capture::surfaces::{Output, logical_size, match_outputs};
@@ -156,7 +156,7 @@ impl State {
                 .map_or(1.0, |i| i.scale_factor.max(1) as f64);
             let id = egui::ViewportId::from_hash_of(("windup-capture", monitor));
             let fallback = logical_size(session.shot.monitors[monitor].layout);
-            match self.new_pane(role, Some(&o.output), None, fallback, scale, id) {
+            match self.new_pane(role, Some(&o.output), Spot::Cover, fallback, scale, id) {
                 Ok(mut pane) => {
                     pane.monitor = monitor;
                     panes.push(pane);
