@@ -1,7 +1,7 @@
 use crate::theme::{Palette, metrics, strong, text};
 use egui::{Align2, Color32, Key, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use std::hash::Hash;
-use windup_core::shortcut::Shortcut;
+use windup_core::shortcut::{Shortcut, UNHEARD_KEYS, key_label};
 
 /// Static keycap badge displaying a keyboard shortcut string.
 pub fn shortcut_badge(ui: &mut Ui, p: &Palette, text: &str) {
@@ -205,7 +205,7 @@ pub fn shortcut_recorder(
                                     .color(p.text_dim),
                             );
                             ui.label(
-                                egui::RichText::new(&shortcut.key)
+                                egui::RichText::new(key_label(&shortcut.key))
                                     .font(strong(text::CONTROL))
                                     .color(p.accent),
                             );
@@ -214,6 +214,18 @@ pub fn shortcut_recorder(
                                     .font(egui::FontId::proportional(text::TINY))
                                     .color(p.text_muted),
                             );
+                        });
+
+                        // Keys egui has no name for, so a press never
+                        // arrives: picked here instead.
+                        ui.horizontal_wrapped(|ui| {
+                            for key in UNHEARD_KEYS {
+                                let mut on = shortcut.key == key;
+                                if key_chip(ui, p, key_label(key), &mut on) && on {
+                                    shortcut.key = key.to_owned();
+                                    changed = true;
+                                }
+                            }
                         });
 
                         ui.add_space(metrics::S3);
@@ -243,7 +255,7 @@ pub fn shortcut_recorder(
 
                                     // Egui's key names match the canonical ones for
                                     // everything `windows_vk` knows. Egui has no Key
-                                    // for Print Screen, so that is only ever a default.
+                                    // for the `UNHEARD_KEYS`; their chips set them.
                                     let key_str = key.name().to_uppercase();
                                     if windup_core::hotkeys::windows_vk(&key_str).is_none() {
                                         continue;
@@ -316,7 +328,20 @@ pub fn shortcut_recorder(
 }
 
 fn mod_chip(ui: &mut Ui, p: &Palette, label: &str, on: &mut bool) -> bool {
-    let chip_w = 46.0;
+    chip(ui, p, label, on, 46.0)
+}
+
+/// A chip as wide as its label: a key to pick rather than press.
+fn key_chip(ui: &mut Ui, p: &Palette, label: &str, on: &mut bool) -> bool {
+    let w = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), strong(text::TINY), p.text)
+        .size()
+        .x;
+    chip(ui, p, label, on, w + metrics::S2 * 2.0)
+}
+
+fn chip(ui: &mut Ui, p: &Palette, label: &str, on: &mut bool, chip_w: f32) -> bool {
     let (rect, response) =
         ui.allocate_exact_size(vec2(chip_w, metrics::BUTTON * 0.8), Sense::click());
     let clicked = response.clicked();

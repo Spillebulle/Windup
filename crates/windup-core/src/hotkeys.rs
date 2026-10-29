@@ -2,7 +2,7 @@
 //! name translations each backend needs.
 
 use crate::config::Config;
-use crate::shortcut::{PRINT_SCREEN, Shortcut};
+use crate::shortcut::{PAUSE, PRINT_SCREEN, SCROLL_LOCK, Shortcut};
 use crate::tool::ToolId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -91,6 +91,8 @@ pub fn windows_vk(key: &str) -> Option<u16> {
     }
     Some(match key {
         PRINT_SCREEN => 0x2C,
+        SCROLL_LOCK => 0x91,
+        PAUSE => 0x13,
         "SPACE" => 0x20,
         "ENTER" => 0x0D,
         "TAB" => 0x09,
@@ -127,6 +129,8 @@ pub fn xkb_keysym_name(key: &str) -> Option<&'static str> {
     }
     Some(match key {
         PRINT_SCREEN => "Print",
+        SCROLL_LOCK => "Scroll_Lock",
+        PAUSE => "Pause",
         "SPACE" => "space",
         "ENTER" => "Return",
         "TAB" => "Tab",
@@ -167,8 +171,8 @@ mod tests {
         let c = Config::default();
         let t = |tool| portal_trigger(c.tool_shortcut(tool)).unwrap();
         assert_eq!(t(ToolId::ClipboardHistory), "LOGO+v");
-        assert_eq!(t(ToolId::CaptureLauncher), "LOGO+SHIFT+s");
-        assert_eq!(t(ToolId::Screenshot), "Print");
+        assert_eq!(t(ToolId::CaptureLauncher), "Print");
+        assert_eq!(t(ToolId::Screenshot), "CTRL+SHIFT+s");
     }
 
     #[test]
@@ -183,21 +187,21 @@ mod tests {
         c.screenshot.enabled = false;
         let b = bindings(&c);
         assert_eq!(b.len(), 3);
-        assert!(!b.contains(&(Shortcut::print_screen(), Action::Screenshot)));
+        assert!(!b.contains(&(Shortcut::ctrl_shift_s(), Action::Screenshot)));
     }
 
     #[test]
     fn the_first_tool_wins_a_shared_shortcut() {
         let mut c = Config::default();
-        c.screenshot.shortcut = Shortcut::super_shift_s();
+        c.screenshot.shortcut = Shortcut::print_screen();
         let b = bindings(&c);
         assert_eq!(
             b.iter()
-                .filter(|(s, _)| *s == Shortcut::super_shift_s())
+                .filter(|(s, _)| *s == Shortcut::print_screen())
                 .count(),
             1
         );
-        assert!(b.contains(&(Shortcut::super_shift_s(), Action::CaptureLauncher)));
+        assert!(b.contains(&(Shortcut::print_screen(), Action::CaptureLauncher)));
         assert_eq!(clashes(&c), vec![ToolId::Screenshot]);
     }
 
@@ -234,8 +238,20 @@ mod tests {
     }
 
     #[test]
+    fn every_key_the_editor_offers_has_a_name_everywhere() {
+        for key in crate::shortcut::UNHEARD_KEYS {
+            assert!(windows_vk(key).is_some(), "{key}");
+            assert!(xkb_keysym_name(key).is_some(), "{key}");
+        }
+        assert_eq!(windows_vk("SCROLLLOCK"), Some(0x91));
+        assert_eq!(windows_vk("PAUSE"), Some(0x13));
+    }
+
+    #[test]
     fn keysym_names() {
         assert_eq!(xkb_keysym_name("PRINTSCREEN"), Some("Print"));
+        assert_eq!(xkb_keysym_name("SCROLLLOCK"), Some("Scroll_Lock"));
+        assert_eq!(xkb_keysym_name("PAUSE"), Some("Pause"));
         assert_eq!(xkb_keysym_name("V"), Some("v"));
         assert_eq!(xkb_keysym_name("5"), Some("5"));
         assert_eq!(xkb_keysym_name("F24"), Some("F24"));

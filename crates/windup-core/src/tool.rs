@@ -54,8 +54,8 @@ impl ToolId {
         match self {
             ToolId::ClipboardHistory => Some(Shortcut::super_v()),
             ToolId::PastePlainText => Some(Shortcut::super_shift_v()),
-            ToolId::CaptureLauncher => Some(Shortcut::super_shift_s()),
-            ToolId::Screenshot => Some(Shortcut::print_screen()),
+            ToolId::CaptureLauncher => Some(Shortcut::print_screen()),
+            ToolId::Screenshot => Some(Shortcut::ctrl_shift_s()),
         }
     }
 }

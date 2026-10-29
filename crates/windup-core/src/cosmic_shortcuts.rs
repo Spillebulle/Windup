@@ -448,13 +448,13 @@ mod tests {
     fn wanted_follows_the_config() {
         let w = wanted(&Config::default());
         assert!(
-            w.iter().any(|w| w.args == "--capture"
-                && w.key == "s"
-                && w.modifiers == ["Super", "Shift"])
+            w.iter()
+                .any(|w| w.args == "--capture" && w.key == "Print" && w.modifiers.is_empty())
         );
         assert!(
-            w.iter()
-                .any(|w| w.args == "--screenshot" && w.key == "Print" && w.modifiers.is_empty())
+            w.iter().any(|w| w.args == "--screenshot"
+                && w.key == "s"
+                && w.modifiers == ["Ctrl", "Shift"])
         );
         let mut c = Config::default();
         c.screenshot.enabled = false;

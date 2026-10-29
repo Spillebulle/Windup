@@ -72,11 +72,10 @@ anything that would otherwise keep the formatting.
 
 ## Screenshots
 
-Press Win+Shift+S (Super+Shift+S) and the screen freezes under a capture bar:
-drag an area, click a window or take the whole screen. Then draw on it with a
-pen, boxes and ellipses, blur or mosaic what should not be seen, and copy or
-save it. Print Screen skips the bar and opens a screenshot in the editor at
-once.
+Press Print Screen and the screen freezes under a capture bar: drag an area,
+click a window or take the whole screen. Then draw on it with a pen, boxes and
+ellipses, blur or mosaic what should not be seen, and copy or save it.
+Ctrl+Shift+S skips the bar and opens a screenshot in the editor at once.
 
 ## What is not there yet
 
@@ -100,8 +99,8 @@ once.
 |---|---|
 | Win+V, Super+V | Open clipboard history at the cursor |
 | Win+Shift+V, Super+Shift+V | Paste the clipboard as plain text |
-| Win+Shift+S, Super+Shift+S | Open the capture bar |
-| Print Screen | Take a screenshot at once |
+| Print Screen | Open the capture bar |
+| Ctrl+Shift+S | Take a screenshot at once |
 | Type | Search the history |
 | Up, Down | Move through the history |
 | Enter | Paste the selected entry |

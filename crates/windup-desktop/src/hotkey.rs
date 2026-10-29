@@ -256,6 +256,8 @@ fn code_for(key: &str) -> Option<global_hotkey::hotkey::Code> {
     }
     Some(match key.as_str() {
         windup_core::shortcut::PRINT_SCREEN => Code::PrintScreen,
+        windup_core::shortcut::SCROLL_LOCK => Code::ScrollLock,
+        windup_core::shortcut::PAUSE => Code::Pause,
         "SPACE" => Code::Space,
         "ENTER" => Code::Enter,
         "TAB" => Code::Tab,
@@ -488,7 +490,6 @@ mod tests {
     use super::*;
     use windup_core::ToolId;
     use windup_core::hotkeys::bindings;
-    use windup_core::shortcut::PRINT_SCREEN;
     use windup_core::{Config, Shortcut, ShortcutModifiers};
 
     const WIN: ShortcutModifiers = ShortcutModifiers {
@@ -516,13 +517,15 @@ mod tests {
         assert_eq!(match_binding(&t, 0x56, WIN), Some(Action::ClipboardPopup));
         assert_eq!(match_binding(&t, 0x56, WIN_SHIFT), Some(Action::PastePlain));
         assert_eq!(
-            match_binding(&t, 0x53, WIN_SHIFT),
+            match_binding(&t, 0x2C, ShortcutModifiers::NONE),
             Some(Action::CaptureLauncher)
         );
         assert_eq!(
-            match_binding(&t, 0x2C, ShortcutModifiers::NONE),
+            match_binding(&t, 0x53, ShortcutModifiers::CTRL_SHIFT),
             Some(Action::Screenshot)
         );
+        // Windows keeps Win+Shift+S for its own Snipping Tool.
+        assert_eq!(match_binding(&t, 0x53, WIN_SHIFT), None);
     }
 
     #[test]
@@ -617,7 +620,9 @@ mod tests {
         assert!(code_for("V").is_some());
         assert!(code_for("7").is_some());
         assert!(code_for("F12").is_some());
-        assert!(code_for(PRINT_SCREEN).is_some());
+        for key in windup_core::shortcut::UNHEARD_KEYS {
+            assert!(code_for(key).is_some(), "{key}");
+        }
         assert!(code_for("NOSUCHKEY").is_none());
     }
 }

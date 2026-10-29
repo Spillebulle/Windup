@@ -93,7 +93,7 @@ impl Default for CaptureLauncherConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            shortcut: Shortcut::super_shift_s(),
+            shortcut: Shortcut::print_screen(),
         }
     }
 }
@@ -131,7 +131,7 @@ impl Default for EditorKeys {
             copy: Shortcut::new(ShortcutModifiers::NONE, "ENTER"),
             save: Shortcut::new(ShortcutModifiers::CTRL, "S"),
             undo: Shortcut::new(ShortcutModifiers::CTRL, "Z"),
-            redo: Shortcut::new(ShortcutModifiers::CTRL_SHIFT, "Z"),
+            redo: Shortcut::new(ShortcutModifiers::CTRL, "Y"),
             loupe: Shortcut::new(ShortcutModifiers::NONE, "Z"),
             select_all: Shortcut::new(ShortcutModifiers::CTRL, "A"),
         }
@@ -186,7 +186,7 @@ impl Default for ScreenshotConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            shortcut: Shortcut::print_screen(),
+            shortcut: Shortcut::ctrl_shift_s(),
             loupe_on: false,
             save_dir: None,
             name_pattern: "Screenshot {date} {time}".to_string(),
@@ -388,8 +388,8 @@ mod tests {
         let c: Config = serde_json::from_str(OLD_CONFIG).unwrap();
         assert_eq!(c.accent_hue, 200.0);
         assert_eq!(c.clipboard.max_items, 42);
-        assert_eq!(c.capture.shortcut, Shortcut::super_shift_s());
-        assert_eq!(c.screenshot.shortcut, Shortcut::print_screen());
+        assert_eq!(c.capture.shortcut, Shortcut::print_screen());
+        assert_eq!(c.screenshot.shortcut, Shortcut::ctrl_shift_s());
         assert!(!c.screenshot.loupe_on);
     }
 
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(c.screenshot.sizes.pen, 4.0);
         assert_eq!(
             c.screenshot.keys.redo,
-            Shortcut::new(ShortcutModifiers::CTRL_SHIFT, "Z")
+            Shortcut::new(ShortcutModifiers::CTRL, "Y")
         );
         assert_eq!(c.screenshot.last_target, TargetKind::Area);
         assert_eq!(c.screenshot.format, ImageFormat::Png);
@@ -420,7 +420,7 @@ mod tests {
         assert!(!c.is_tool_enabled(ToolId::Screenshot));
         assert_eq!(
             c.tool_shortcut(ToolId::CaptureLauncher),
-            &Shortcut::super_shift_s()
+            &Shortcut::print_screen()
         );
     }
 }

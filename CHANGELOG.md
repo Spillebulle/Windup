@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Print Screen opens the capture bar and Ctrl+Shift+S takes a screenshot at once, for new settings. Settings from 0.2.0 keep their keys; Revert on each shortcut row sets the new ones.
+- Print Screen, Scroll Lock and Pause can be chosen for any shortcut: the shortcut editor offers them as buttons, since the settings window cannot hear them pressed.
+- Redo in the editor is Ctrl+Y by default; Ctrl+Shift+Z still redoes too.
+- Blur has an eye-off icon in the capture bar.
+
 ## 0.2.0
 
 - Screenshots. Win+Shift+S (Super+Shift+S on Linux) opens the capture bar over a frozen copy of the screen: drag an area, click a window or take the whole screen, then draw on it, blur or mosaic parts of it, and copy or save it. Print Screen takes a screenshot at once and opens it in the editor.

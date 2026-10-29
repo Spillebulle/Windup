@@ -101,8 +101,8 @@ Any key binding that runs a command will do: run `windup --popup` and
 
 ## Screenshots
 
-Bind **Super+Shift+S** to `windup --capture`, which opens the capture bar, and
-**Print** to `windup --screenshot`, which takes a screenshot at once. Where
+Bind **Print** to `windup --capture`, which opens the capture bar, and
+**Ctrl+Shift+S** to `windup --screenshot`, which takes a screenshot at once. Where
 Windup binds the other two shortcuts for you (COSMIC, KDE, GNOME 48 and newer,
 Hyprland, X11), it binds these two the same way.
 

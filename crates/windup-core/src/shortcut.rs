@@ -3,6 +3,24 @@ use std::fmt;
 
 /// The canonical name of the Print Screen key in `Shortcut::key`.
 pub const PRINT_SCREEN: &str = "PRINTSCREEN";
+/// The canonical name of the Scroll Lock key.
+pub const SCROLL_LOCK: &str = "SCROLLLOCK";
+/// The canonical name of the Pause key.
+pub const PAUSE: &str = "PAUSE";
+
+/// Keys the settings window cannot hear when pressed (egui has no name for
+/// them), so the shortcut editor offers them as choices instead.
+pub const UNHEARD_KEYS: [&str; 3] = [PRINT_SCREEN, SCROLL_LOCK, PAUSE];
+
+/// How a canonical key name is shown: "Print Screen" for `PRINTSCREEN`.
+pub fn key_label(key: &str) -> &str {
+    match key {
+        PRINT_SCREEN => "Print Screen",
+        SCROLL_LOCK => "Scroll Lock",
+        PAUSE => "Pause",
+        _ => key,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct ShortcutModifiers {
@@ -90,8 +108,8 @@ impl Shortcut {
         Self::new(ShortcutModifiers::SUPER_SHIFT, "V")
     }
 
-    pub fn super_shift_s() -> Self {
-        Self::new(ShortcutModifiers::SUPER_SHIFT, "S")
+    pub fn ctrl_shift_s() -> Self {
+        Self::new(ShortcutModifiers::CTRL_SHIFT, "S")
     }
 
     pub fn print_screen() -> Self {
@@ -120,11 +138,7 @@ impl fmt::Display for Shortcut {
             parts.push("Shift");
         }
         if !self.key.is_empty() {
-            parts.push(if self.key == PRINT_SCREEN {
-                "Print Screen"
-            } else {
-                &self.key
-            });
+            parts.push(key_label(&self.key));
         }
         write!(f, "{}", parts.join("+"))
     }
@@ -137,6 +151,8 @@ mod tests {
     #[test]
     fn print_screen_displays_with_a_space() {
         assert_eq!(Shortcut::print_screen().to_string(), "Print Screen");
+        let scroll = Shortcut::new(ShortcutModifiers::CTRL, SCROLL_LOCK);
+        assert_eq!(scroll.to_string(), "Ctrl+Scroll Lock");
     }
 
     #[test]

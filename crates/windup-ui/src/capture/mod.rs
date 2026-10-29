@@ -114,8 +114,9 @@ fn matches(s: &Shortcut, k: &KeyPress) -> bool {
 ///
 /// Esc is first and cannot be rebound (spec "Escape"): whatever else is bound
 /// to it, it cancels. Every other editor key comes from `keys` (Copy is bare
-/// Enter by default); the one fixed alias is Ctrl+Y for redo, which the spec
-/// names beside the configured redo key. Modifiers match exactly, so the
+/// Enter by default); the fixed aliases are Ctrl+Y and Ctrl+Shift+Z for
+/// redo, which the spec names beside the configured redo key, so both work
+/// whichever one the settings hold. Modifiers match exactly, so the
 /// loupe's bare Z and undo's Ctrl+Z do not overlap.
 pub fn action_for(k: &KeyPress, keys: &EditorKeys) -> Option<Action> {
     const NONE: ShortcutModifiers = ShortcutModifiers::NONE;
@@ -140,7 +141,9 @@ pub fn action_for(k: &KeyPress, keys: &EditorKeys) -> Option<Action> {
             return Some(a);
         }
     }
-    if k.mods == ShortcutModifiers::CTRL && k.key == "Y" {
+    if (k.mods == ShortcutModifiers::CTRL && k.key == "Y")
+        || (k.mods == ShortcutModifiers::CTRL_SHIFT && k.key == "Z")
+    {
         return Some(Action::Redo);
     }
     if k.mods == NONE || k.mods == SHIFT {
@@ -739,6 +742,18 @@ mod tests {
         assert_eq!(a(NONE, "Z"), Some(Action::ToggleLoupe));
         assert_eq!(a(CTRL, "A"), Some(Action::SelectAll));
         assert_eq!(a(NONE, "Delete"), Some(Action::Delete));
+    }
+
+    #[test]
+    fn both_redo_keys_work_whatever_redo_is_bound_to() {
+        let k = EditorKeys {
+            redo: Shortcut::new(ShortcutModifiers::CTRL, "R"),
+            ..EditorKeys::default()
+        };
+        let a = |m, key| action_for(&press(m, key), &k);
+        assert_eq!(a(CTRL, "R"), Some(Action::Redo));
+        assert_eq!(a(CTRL, "Y"), Some(Action::Redo));
+        assert_eq!(a(CTRL_SHIFT, "Z"), Some(Action::Redo));
     }
 
     #[test]

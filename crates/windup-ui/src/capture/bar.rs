@@ -109,7 +109,7 @@ const TOOLS: [(Tool, Icon, &str); 7] = [
     (Tool::Pen, Icon::Brush, "Pen"),
     (Tool::Rect, Icon::Square, "Rectangle"),
     (Tool::Ellipse, Icon::Circle, "Ellipse"),
-    (Tool::Blur, Icon::Blur, "Blur"),
+    (Tool::Blur, Icon::EyeOff, "Blur"),
     (Tool::Mosaic, Icon::Grid3x3, "Mosaic"),
     (Tool::Pipette, Icon::Pipette, "Pick a colour"),
 ];

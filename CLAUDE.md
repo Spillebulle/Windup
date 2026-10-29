@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Windup is a desktop utility for Windows and Linux (Rust + egui/eframe/wgpu) that runs a settings window plus a set of global-hotkey "tools". Four tools exist today: **Clipboard history** (Win+V → floating popup at the cursor), **Paste plain text** (Win+Shift+V → strips formatting and pastes), **Capture launcher** (Win+Shift+S → capture bar over a frozen screen) and **Screenshot** (Print Screen → straight to the editor).
+Windup is a desktop utility for Windows and Linux (Rust + egui/eframe/wgpu) that runs a settings window plus a set of global-hotkey "tools". Four tools exist today: **Clipboard history** (Win+V → floating popup at the cursor), **Paste plain text** (Win+Shift+V → strips formatting and pastes), **Capture launcher** (Print Screen → capture bar over a frozen screen) and **Screenshot** (Ctrl+Shift+S → straight to the editor).
 
 ## Commands
 
@@ -86,7 +86,7 @@ Configured shortcuts are honoured: `core/hotkeys.rs` is the one table (`bindings
 
 ## Capture (screenshots)
 
-Capture launcher (Win+Shift+S, bar over a frozen desktop) and Screenshot (Print Screen, straight to the editor) share one session. Windup photographs the desktop first and the overlay draws over the photo.
+Capture launcher (Print Screen, bar over a frozen desktop) and Screenshot (Ctrl+Shift+S, straight to the editor) share one session. Windup photographs the desktop first and the overlay draws over the photo.
 
 - **core `capture/`**: `geometry` (desktop units, monitors), `selection` (drag/resize/nudge), `annotate` (tools, shapes), `raster` (draws them, blur, mosaic), `pick` (window choice, `edge_rect` fallback), `output` (file names, PNG/JPEG, default folder), `backend` (pure `detect` of which mechanism takes the still and finds windows, like `platform::detect`), `session` (pure state machine from freeze to copy/save/cancel).
 - **ui `capture/`**: `CaptureView`, the overlay drawn per monitor: bar, loupe, marching ants, annotations. Painted, no platform knowledge.

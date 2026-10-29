@@ -45,7 +45,7 @@ pub enum Icon {
     Redo2,
     Download,
     ChevronDown,
-    Blur,
+    EyeOff,
     ChevronUp,
 }
 
@@ -85,7 +85,7 @@ impl Icon {
         Self::Redo2,
         Self::Download,
         Self::ChevronDown,
-        Self::Blur,
+        Self::EyeOff,
         Self::ChevronUp,
     ];
 
@@ -414,10 +414,17 @@ impl Icon {
             Self::ChevronDown => &[Node::Path("m6 9 6 6 6-6")],
             // Lucide chevron-up
             Self::ChevronUp => &[Node::Path("m18 15-6-6-6 6")],
-            // Lucide droplet (blur: a drop reads as soft focus, and no Lucide mark is named for it)
-            Self::Blur => &[Node::Path(
-                "M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z",
-            )],
+            // Lucide eye-off (blur hides what is under it)
+            Self::EyeOff => &[
+                Node::Path(
+                    "M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49",
+                ),
+                Node::Path("M14.084 14.158a3 3 0 0 1-4.242-4.242"),
+                Node::Path(
+                    "M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143",
+                ),
+                Node::Path("m2 2 20 20"),
+            ],
         }
     }
 
