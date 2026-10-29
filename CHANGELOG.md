@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - Print Screen opens the capture bar and Ctrl+Shift+S takes a screenshot at once, for new settings. Settings from 0.2.0 keep their keys; Revert on each shortcut row sets the new ones.
 - Print Screen, Scroll Lock and Pause can be chosen for any shortcut: the shortcut editor offers them as buttons, since the settings window cannot hear them pressed.

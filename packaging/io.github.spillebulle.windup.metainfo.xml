@@ -47,6 +47,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.1" date="2026-10-29">
+      <description>
+        <p>Print Screen opens the capture bar and Ctrl+Shift+S takes a screenshot; Print Screen, Scroll Lock and Pause can be chosen for any shortcut; redo is Ctrl+Y.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-29">
       <description>
         <p>Screenshots: a capture bar over a frozen screen for an area, a window or a whole screen, an editor to draw, blur and mosaic, and copy or save. The shortcuts set in the settings window are used now.</p>
