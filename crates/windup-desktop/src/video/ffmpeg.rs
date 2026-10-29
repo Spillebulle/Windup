@@ -288,7 +288,8 @@ const FOLLOW_TRIES: u32 = 120;
 
 /// For the settings child, which never probes: no ffmpeg, or the cache the
 /// recording process writes. On a first start that process may still be
-/// probing when settings open, so the cache is asked for until it is there.
+/// probing when settings open, so the cache is asked for until it is there,
+/// and then `GaveUp`, so the pane stops saying it is still checking.
 pub(crate) fn follow_cache() {
     std::thread::spawn(|| {
         if locate().is_none() {
@@ -302,6 +303,7 @@ pub(crate) fn follow_cache() {
             }
             std::thread::sleep(Duration::from_secs(1));
         }
+        publish(ProbeState::GaveUp);
     });
 }
 

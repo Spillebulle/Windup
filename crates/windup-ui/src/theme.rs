@@ -78,6 +78,8 @@ pub mod metrics {
     pub const SEG_ICON_W: f32 = 28.0;
     /// A settings row's dropdown trigger (§7.7), as wide as the theme picker's.
     pub const DROPDOWN_W: f32 = 200.0;
+    /// The tallest a settings dropdown's list grows before it scrolls.
+    pub const DROPDOWN_LIST_MAX: f32 = 240.0;
     /// The chevron of a dropdown trigger (§7.7, mockup `.dd svg.chev`).
     pub const CHEVRON: f32 = 12.0;
     /// Gap between an icon and its label inside a control (mockup `gap: 6px`).

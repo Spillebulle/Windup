@@ -104,40 +104,55 @@ pub fn dropdown(
                     .shadow(shadow::menu(mode))
                     .inner_margin(metrics::MENU_PAD)
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        for (i, entry) in entries.iter().enumerate() {
-                            let (item, item_response) = ui
-                                .allocate_exact_size(vec2(item_w, metrics::BUTTON), Sense::click());
-                            let selected = current == Some(i);
-                            let painter = ui.painter();
-                            if item_response.hovered() {
-                                painter.rect_filled(item, metrics::RADIUS_TIGHT, p.control_hover);
-                            }
-                            if selected {
-                                painter.rect_filled(
-                                    Rect::from_min_size(
-                                        item.left_top(),
-                                        vec2(metrics::NAV_MARK_W, item.height()),
-                                    ),
-                                    0.0,
-                                    p.accent,
-                                );
-                            }
-                            painter.text(
-                                pos2(item.min.x + metrics::MENU_ITEM_PAD_X, item.center().y),
-                                Align2::LEFT_CENTER,
-                                entry,
-                                if selected {
-                                    strong(text::CONTROL)
-                                } else {
-                                    font.clone()
-                                },
-                                if selected { p.text_strong } else { p.text },
-                            );
-                            if item_response.clicked() {
-                                picked = Some(i);
-                            }
-                        }
+                        // A long list of sound devices scrolls rather than
+                        // running off the window.
+                        egui::ScrollArea::vertical()
+                            .max_height(metrics::DROPDOWN_LIST_MAX)
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                for (i, entry) in entries.iter().enumerate() {
+                                    let (item, item_response) = ui.allocate_exact_size(
+                                        vec2(item_w, metrics::BUTTON),
+                                        Sense::click(),
+                                    );
+                                    let selected = current == Some(i);
+                                    let painter = ui.painter();
+                                    if item_response.hovered() {
+                                        painter.rect_filled(
+                                            item,
+                                            metrics::RADIUS_TIGHT,
+                                            p.control_hover,
+                                        );
+                                    }
+                                    if selected {
+                                        painter.rect_filled(
+                                            Rect::from_min_size(
+                                                item.left_top(),
+                                                vec2(metrics::NAV_MARK_W, item.height()),
+                                            ),
+                                            0.0,
+                                            p.accent,
+                                        );
+                                    }
+                                    painter.text(
+                                        pos2(
+                                            item.min.x + metrics::MENU_ITEM_PAD_X,
+                                            item.center().y,
+                                        ),
+                                        Align2::LEFT_CENTER,
+                                        entry,
+                                        if selected {
+                                            strong(text::CONTROL)
+                                        } else {
+                                            font.clone()
+                                        },
+                                        if selected { p.text_strong } else { p.text },
+                                    );
+                                    if item_response.clicked() {
+                                        picked = Some(i);
+                                    }
+                                }
+                            });
                     });
             });
         let clicked_elsewhere = ui.input(|i| i.pointer.any_click())

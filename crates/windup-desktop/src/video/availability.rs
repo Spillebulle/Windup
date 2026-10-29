@@ -150,7 +150,10 @@ pub(crate) fn current(config: &VideoConfig) -> ModeAvailability {
         config.codec,
         sources.as_deref(),
     );
-    let sound = sound_list().map(|d| d.counts());
+    let sound = SOUND
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(AudioDevices::counts));
     let (system_audio, mic) = avail::sound(sound);
     ModeAvailability {
         video,
@@ -167,9 +170,17 @@ pub(crate) fn probe_state() -> ProbeState {
         .unwrap_or(ProbeState::Running)
 }
 
-/// The sound devices as last listed; `None` before the first list.
-pub(crate) fn sound_list() -> Option<AudioDevices> {
-    SOUND.read().ok().and_then(|g| g.clone())
+/// The probe if it differs from `seen`, compared under the lock so an
+/// unchanged one is not copied.
+pub(crate) fn probe_if_changed(seen: &ProbeState) -> Option<ProbeState> {
+    let g = PROBE.read().ok()?;
+    (*g != *seen).then(|| g.clone())
+}
+
+/// The sound devices if they differ from `seen`, likewise.
+pub(crate) fn sound_if_changed(seen: &Option<AudioDevices>) -> Option<Option<AudioDevices>> {
+    let g = SOUND.read().ok()?;
+    (*g != *seen).then(|| g.clone())
 }
 
 /// For a capture built on the UI thread: what is kept, and a refresh

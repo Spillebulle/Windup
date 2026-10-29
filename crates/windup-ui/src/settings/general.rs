@@ -2,8 +2,8 @@
 
 use crate::theme::{Mode, Palette, metrics, oklch, rgb_to_oklch_hue, strong, text};
 use crate::themelib;
-use crate::widgets::{button, eyebrow, row, segmented, slider, toggle};
-use egui::{Align2, Color32, Key, Rect, Sense, Stroke, Ui, pos2, vec2};
+use crate::widgets::{button, dropdown, eyebrow, row, segmented, slider, toggle};
+use egui::{Color32, Key, Sense, Stroke, Ui, pos2, vec2};
 use windup_core::{Config, ThemeMode};
 
 pub fn render(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mode) {
@@ -296,185 +296,30 @@ fn render_custom_themes(ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mod
                 "Default (Built-in)"
             };
 
-            let popup_id = ui.make_persistent_id("theme_dropdown_popover");
-            let mut is_open = ui.data_mut(|d| d.get_temp::<bool>(popup_id).unwrap_or(false));
-
-            let btn_w = 200.0;
-            let (rect, response) =
-                ui.allocate_exact_size(vec2(btn_w, metrics::BUTTON), Sense::click());
-            if response.clicked() {
-                is_open = !is_open;
-                ui.data_mut(|d| d.insert_temp(popup_id, is_open));
-            }
-
-            let painter = ui.painter();
-            let fill = if response.is_pointer_button_down_on() {
-                p.control_active
-            } else if response.hovered() || is_open {
-                p.control_hover
-            } else {
-                p.control
-            };
-
-            let stroke_col = if is_open {
-                p.accent
-            } else if response.hovered() {
-                p.text_dim
-            } else {
-                p.line
-            };
-
-            painter.rect_filled(rect, metrics::RADIUS, fill);
-            painter.rect_stroke(
-                rect,
-                metrics::RADIUS,
-                Stroke::new(metrics::HAIRLINE, stroke_col),
-                egui::StrokeKind::Inside,
+            let mut labels = vec!["Default (Built-in)".to_owned()];
+            labels.extend(
+                custom_themes
+                    .iter()
+                    .map(|t| format!("{} ({})", t.name, t.base)),
             );
-
-            painter.text(
-                pos2(rect.min.x + metrics::PAD_STRIP, rect.center().y),
-                Align2::LEFT_CENTER,
+            let current = match &config.custom_theme {
+                None => Some(0),
+                Some(id) => custom_themes
+                    .iter()
+                    .position(|t| &t.id == id)
+                    .map(|i| i + 1),
+            };
+            if let Some(i) = dropdown(
+                ui,
+                p,
+                mode,
+                "theme_dropdown_popover",
+                &labels,
+                current,
                 active_name,
-                strong(text::CONTROL),
-                p.text_strong,
-            );
-
-            // Trailing Chevron down
-            let ch_x = rect.max.x - 14.0;
-            let ch_y = rect.center().y;
-            let ch_col = if is_open { p.accent } else { p.text_dim };
-            painter.line_segment(
-                [pos2(ch_x - 4.0, ch_y - 2.0), pos2(ch_x, ch_y + 2.0)],
-                Stroke::new(1.2_f32, ch_col),
-            );
-            painter.line_segment(
-                [pos2(ch_x, ch_y + 2.0), pos2(ch_x + 4.0, ch_y - 2.0)],
-                Stroke::new(1.2_f32, ch_col),
-            );
-
-            if is_open {
-                let menu_pos = pos2(rect.left(), rect.bottom() + 4.0);
-                egui::Area::new(popup_id.with("menu_area"))
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(menu_pos)
-                    .show(ui.ctx(), |ui| {
-                        egui::Frame::NONE
-                            .fill(p.popover)
-                            .corner_radius(metrics::RADIUS_CARD)
-                            .stroke(Stroke::new(metrics::HAIRLINE, p.line_popover))
-                            .shadow(crate::theme::shadow::menu(mode))
-                            .inner_margin(4.0)
-                            .show(ui, |ui| {
-                                ui.set_width(btn_w);
-
-                                // Default option
-                                let is_default = config.custom_theme.is_none();
-                                let (item_rect, item_resp) = ui.allocate_exact_size(
-                                    vec2(btn_w - 8.0, metrics::BUTTON),
-                                    Sense::click(),
-                                );
-                                let ip = ui.painter();
-                                if item_resp.hovered() {
-                                    ip.rect_filled(
-                                        item_rect,
-                                        metrics::RADIUS_TIGHT,
-                                        p.control_hover,
-                                    );
-                                }
-                                if is_default {
-                                    ip.rect_filled(
-                                        Rect::from_min_size(
-                                            item_rect.left_top(),
-                                            vec2(metrics::NAV_MARK_W, item_rect.height()),
-                                        ),
-                                        0.0,
-                                        p.accent,
-                                    );
-                                }
-                                ip.text(
-                                    pos2(
-                                        item_rect.min.x + metrics::PAD_STRIP,
-                                        item_rect.center().y,
-                                    ),
-                                    Align2::LEFT_CENTER,
-                                    "Default (Built-in)",
-                                    if is_default {
-                                        strong(text::CONTROL)
-                                    } else {
-                                        egui::FontId::proportional(text::CONTROL)
-                                    },
-                                    if is_default { p.text_strong } else { p.text },
-                                );
-                                if item_resp.clicked() {
-                                    config.custom_theme = None;
-                                    config.save();
-                                    is_open = false;
-                                }
-
-                                for t in &custom_themes {
-                                    let is_sel = config.custom_theme.as_deref() == Some(&t.id);
-                                    let (t_rect, t_resp) = ui.allocate_exact_size(
-                                        vec2(btn_w - 8.0, metrics::BUTTON),
-                                        Sense::click(),
-                                    );
-                                    let tip = ui.painter();
-                                    if t_resp.hovered() {
-                                        tip.rect_filled(
-                                            t_rect,
-                                            metrics::RADIUS_TIGHT,
-                                            p.control_hover,
-                                        );
-                                    }
-                                    if is_sel {
-                                        tip.rect_filled(
-                                            Rect::from_min_size(
-                                                t_rect.left_top(),
-                                                vec2(metrics::NAV_MARK_W, t_rect.height()),
-                                            ),
-                                            0.0,
-                                            p.accent,
-                                        );
-                                    }
-                                    let label = format!("{} ({})", t.name, t.base);
-                                    tip.text(
-                                        pos2(t_rect.min.x + metrics::PAD_STRIP, t_rect.center().y),
-                                        Align2::LEFT_CENTER,
-                                        label,
-                                        if is_sel {
-                                            strong(text::CONTROL)
-                                        } else {
-                                            egui::FontId::proportional(text::CONTROL)
-                                        },
-                                        if is_sel { p.text_strong } else { p.text },
-                                    );
-                                    if t_resp.clicked() {
-                                        config.custom_theme = Some(t.id.clone());
-                                        config.save();
-                                        is_open = false;
-                                    }
-                                }
-
-                                if ui.input(|i| i.key_pressed(Key::Escape)) {
-                                    is_open = false;
-                                }
-                            });
-                    });
-
-                if ui.input(|i| i.pointer.any_click()) && !response.clicked() {
-                    let total_menu_rect = Rect::from_min_size(
-                        menu_pos,
-                        vec2(btn_w, (custom_themes.len() + 1) as f32 * 28.0 + 8.0),
-                    );
-                    if let Some(pos) = ui.input(|i| i.pointer.interact_pos())
-                        && !total_menu_rect.contains(pos)
-                        && !rect.contains(pos)
-                    {
-                        is_open = false;
-                    }
-                }
-
-                ui.data_mut(|d| d.insert_temp(popup_id, is_open));
+            ) {
+                config.custom_theme = i.checked_sub(1).map(|i| custom_themes[i].id.clone());
+                config.save();
             }
         },
     );

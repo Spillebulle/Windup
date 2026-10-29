@@ -12,6 +12,8 @@ pub const NO_FFMPEG: &str = "Video needs FFmpeg, which is missing from this inst
 pub const PROBE_RUNNING: &str = "Windup is still checking which encoders work.";
 pub const NO_ENCODER: &str = "No video encoder works on this computer.";
 pub const NO_SCREEN_SOURCE: &str = "This desktop does not let applications record the screen.";
+pub const PROBE_GAVE_UP: &str =
+    "Windup has not finished checking encoders. Reopen settings once it has.";
 pub const SOURCES_CHECKING: &str = "Windup is still checking how this desktop can be recorded.";
 
 /// The probe as the process that runs it publishes it, and as the settings
@@ -23,12 +25,15 @@ pub enum ProbeState {
     Running,
     Done(Probe),
     NoFfmpeg,
+    /// The settings window waited for another process's probe and stopped
+    /// waiting: no answer will come to this process.
+    GaveUp,
 }
 
 impl ProbeState {
     pub fn probed(&self) -> Probed<'_> {
         match self {
-            ProbeState::Running => Probed::Running,
+            ProbeState::Running | ProbeState::GaveUp => Probed::Running,
             ProbeState::Done(p) => Probed::Done(p),
             ProbeState::NoFfmpeg => Probed::NoFfmpeg,
         }

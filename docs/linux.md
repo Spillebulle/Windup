@@ -164,10 +164,12 @@ Where the frames come from depends on the desktop:
 
 Esc always cancels a recording, where the desktop lets Windup hear it:
 
-- **X11, COSMIC, KDE, GNOME 48 and newer, Hyprland:** from anywhere. On
-  COSMIC, Windup adds the recording's keys to Custom shortcuts while it runs
-  and takes them out again afterwards; KDE, GNOME and Hyprland may ask once
-  to let Windup have them.
+- **X11, COSMIC, KDE, GNOME 48 and newer:** from anywhere. On COSMIC,
+  Windup adds the recording's keys to Custom shortcuts while it runs and
+  takes them out again afterwards; KDE and GNOME may ask once to let Windup
+  have them.
+- **Hyprland:** from anywhere with its GlobalShortcuts portal
+  (xdg-desktop-portal-hyprland), which may ask once; without it, as Sway.
 - **Sway, river, niri, labwc, Wayfire:** only while the recording bar has
   the keyboard. Bind Esc, or another key, to `windup --record-cancel` to
   cancel from anywhere.

@@ -255,9 +255,10 @@ impl WindupApp {
     /// Hands the Video pane the probe and the sound devices while it is
     /// open. The devices are listed again each time it opens, so one plugged
     /// in since is offered; until the answers are in, it is redrawn now and
-    /// then to show them.
+    /// then to show them. Only what changed is copied into the view.
     fn sync_video_facts(&mut self, ctx: &egui::Context) {
-        use video::availability::{probe_state, refresh_sound, sound_list};
+        use video::availability::{probe_if_changed, refresh_sound, sound_if_changed};
+        use video::ffmpeg::ProbeState;
         let open = self.settings_view.active_pane == windup_ui::settings::SettingsPane::Video;
         if open && !self.video_pane_open {
             let _ = refresh_sound();
@@ -266,14 +267,17 @@ impl WindupApp {
         if !open {
             return;
         }
-        let facts = windup_ui::VideoFacts {
-            probe: probe_state(),
-            sound: sound_list(),
-        };
-        if facts.probe == video::ffmpeg::ProbeState::Running || facts.sound.is_none() {
+        let facts = &mut self.settings_view.video;
+        if let Some(probe) = probe_if_changed(&facts.probe) {
+            facts.probe = probe;
+        }
+        if let Some(sound) = sound_if_changed(&facts.sound) {
+            facts.sound = sound;
+        }
+        // `GaveUp` is an answer too: nothing more will come.
+        if facts.probe == ProbeState::Running || facts.sound.is_none() {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
-        self.settings_view.video = facts;
     }
 }
 

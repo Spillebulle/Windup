@@ -13,7 +13,9 @@ use windup_core::capture::output;
 use windup_core::config::VideoConfig;
 use windup_core::shortcut::Shortcut;
 use windup_core::tool::ToolId;
-use windup_core::video::avail::{self, AudioDevices, NO_FFMPEG, PROBE_RUNNING, ProbeState};
+use windup_core::video::avail::{
+    self, AudioDevices, NO_FFMPEG, PROBE_GAVE_UP, PROBE_RUNNING, ProbeState,
+};
 use windup_core::video::{
     Bitrate, Codec, Container, FIXED_BITRATES, GIF_COLOURS, candidates, codecs_for, frame_rates,
 };
@@ -128,6 +130,7 @@ fn format_reason(video: &VideoConfig, probe: &ProbeState) -> Option<&'static str
     match probe {
         ProbeState::NoFfmpeg => Some(NO_FFMPEG),
         ProbeState::Running => Some(PROBE_RUNNING),
+        ProbeState::GaveUp => Some(PROBE_GAVE_UP),
         ProbeState::Done(_) => codec_choices(video.container, probe)
             .is_empty()
             .then_some(NO_CODEC),
@@ -588,6 +591,10 @@ mod tests {
         assert_eq!(
             format_reason(&video, &ProbeState::Running),
             Some(PROBE_RUNNING)
+        );
+        assert_eq!(
+            format_reason(&video, &ProbeState::GaveUp),
+            Some(PROBE_GAVE_UP)
         );
         assert_eq!(
             format_reason(&video, &ProbeState::NoFfmpeg),
