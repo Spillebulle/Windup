@@ -320,6 +320,38 @@ sway_record() {
         bad "wayland: --record-test failed (see wayland-record.log)"
     fi
     rm -f "$out"
+
+    # A monitor unplugged mid-recording ends it with that reason and keeps
+    # what was recorded. --record-test exits 0 whenever it saved a file, so
+    # the message and the file are what is checked, not the exit code.
+    if ! swaymsg create_output >/dev/null 2>&1; then
+        echo "  (sway cannot create an output; skipping the unplug case)"
+        return
+    fi
+    local second rec unplug_log=$art/wayland-unplug.log
+    second=$(swaymsg -t get_outputs -r | python3 -c \
+        'import json, sys; print(next(o["name"] for o in json.load(sys.stdin) if o["name"] != "HEADLESS-1"))')
+    swaymsg output "$second" resolution 800x600 position 1600 0 >/dev/null
+    sleep 0.5
+    out=/tmp/windup-e2e-unplug-$$.mp4
+    timeout 30 "$bin" --record-test "$out" --seconds 8 --area 1600,0,320,240 >"$unplug_log" 2>&1 &
+    rec=$!
+    # Long enough for the recording to be under way: it starts at once,
+    # with no encoder probe to wait for.
+    sleep 3
+    swaymsg output "$second" unplug >/dev/null
+    wait $rec
+    if grep -q "A monitor was disconnected." "$unplug_log"; then
+        ok "wayland: unplugging the recorded monitor says so"
+    else
+        bad "wayland: unplugging the recorded monitor gave: $(tail -1 "$unplug_log")"
+    fi
+    if [ -s "$out" ]; then
+        ok "wayland: what was recorded before the unplug is kept"
+    else
+        bad "wayland: nothing was kept after the unplug (see wayland-unplug.log)"
+    fi
+    rm -f "$out"
 }
 
 wayland_session() {

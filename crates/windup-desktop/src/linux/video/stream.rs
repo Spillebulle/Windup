@@ -305,8 +305,9 @@ struct Stream {
 
 impl Stream {
     fn setup(method: Method, rect: DRect) -> Result<Stream, String> {
-        let (conn, globals) = connect().map_err(reason)?;
-        let mut queue = conn.new_event_queue::<StreamState>();
+        // The registry's own queue, so an output's removal reaches
+        // `output_destroyed` below.
+        let (conn, globals, mut queue) = connect::<StreamState>().map_err(reason)?;
         let qh = queue.handle();
         let mut state = StreamState {
             registry: RegistryState::new(&globals),

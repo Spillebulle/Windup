@@ -20,8 +20,8 @@ use std::fs::File;
 use std::os::fd::AsFd;
 use std::os::unix::fs::FileExt;
 use std::time::{Duration, Instant};
-use wayland_client::globals::{GlobalList, registry_queue_init};
-use wayland_client::protocol::{wl_buffer, wl_output, wl_shm, wl_shm_pool};
+use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
+use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::ext::image_capture_source::v1::client::{
     ext_image_capture_source_v1::ExtImageCaptureSourceV1,
@@ -53,17 +53,23 @@ fn failed(what: impl std::fmt::Display) -> CaptureError {
     CaptureError::Failed(what.to_string())
 }
 
-/// A Wayland connection of our own and the globals on it.
-pub(crate) fn connect() -> Result<(Connection, GlobalList), CaptureError> {
+/// A Wayland connection of our own, the globals on it, and the queue the
+/// registry belongs to. Later registry events (an output's `global_remove`)
+/// reach only that queue's state: a caller that must notice a monitor going
+/// away dispatches it as `D`; the stills, done in a moment, drop it.
+pub(crate) fn connect<D>() -> Result<(Connection, GlobalList, EventQueue<D>), CaptureError>
+where
+    D: Dispatch<wl_registry::WlRegistry, GlobalListContents> + 'static,
+{
     let conn = Connection::connect_to_env().map_err(|_| CaptureError::Unsupported)?;
-    let (globals, _queue) =
-        registry_queue_init::<super::Probe>(&conn).map_err(|_| CaptureError::Unsupported)?;
-    Ok((conn, globals))
+    let (globals, queue) =
+        registry_queue_init::<D>(&conn).map_err(|_| CaptureError::Unsupported)?;
+    Ok((conn, globals, queue))
 }
 
 /// Connect to the compositor and take the picture by `method`.
 pub fn grab_from_env(method: Method) -> Result<DesktopShot, CaptureError> {
-    let (conn, globals) = connect()?;
+    let (conn, globals, _queue) = connect::<super::Probe>()?;
     grab_by(&conn, &globals, method)
 }
 
@@ -139,7 +145,7 @@ fn learn_outputs(
 /// portal) take their monitors' places from this.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn output_layout_from_env() -> Result<Vec<(String, DRect)>, CaptureError> {
-    let (conn, globals) = connect()?;
+    let (conn, globals, _queue) = connect::<super::Probe>()?;
     let (_queue, state) = learn_outputs(&conn, &globals)?;
     let layout: Vec<_> = outputs_of(&state.output_state)
         .into_iter()
