@@ -40,6 +40,7 @@ pub(crate) use captured::{Captured, SharedRing, ring};
     allow(dead_code, unused_imports)
 )]
 mod captured {
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -63,6 +64,8 @@ mod captured {
         ring: SharedRing,
         pad: Pad,
         t0: Instant,
+        /// Set by the device's thread when the device goes away.
+        lost: Arc<AtomicBool>,
         /// Whatever keeps the device running; dropping it stops the device.
         _device: Box<dyn Send>,
     }
@@ -72,6 +75,7 @@ mod captured {
             rate: u32,
             channels: u16,
             ring: SharedRing,
+            lost: Arc<AtomicBool>,
             device: Box<dyn Send>,
         ) -> Self {
             Self {
@@ -80,8 +84,18 @@ mod captured {
                 ring,
                 pad: Pad::new(rate),
                 t0: Instant::now(),
+                lost,
                 _device: device,
             }
+        }
+
+        fn now(&self) -> f64 {
+            self.t0.elapsed().as_secs_f64()
+        }
+
+        fn silence(&self, buf: &mut Vec<f32>, frames: u64) {
+            let n = frames as usize * usize::from(self.channels.max(1));
+            buf.extend(std::iter::repeat_n(0.0, n));
         }
     }
 
@@ -95,15 +109,27 @@ mod captured {
         }
 
         fn read(&mut self, buf: &mut Vec<f32>) -> Result<(), String> {
-            let before = buf.len();
+            let mut got = Vec::new();
             if let Ok(mut ring) = self.ring.lock() {
-                ring.drain_into(buf);
+                ring.drain_into(&mut got);
             }
-            let channels = usize::from(self.channels.max(1));
-            let got = ((buf.len() - before) / channels) as u64;
-            let silent = self.pad.fill(self.t0.elapsed().as_secs_f64(), got);
-            buf.extend(std::iter::repeat_n(0.0, silent as usize * channels));
+            let frames = (got.len() / usize::from(self.channels.max(1))) as u64;
+            let fill = self.pad.fill(self.now(), frames);
+            self.silence(buf, fill.before);
+            buf.extend_from_slice(&got);
+            self.silence(buf, fill.after);
             Ok(())
+        }
+
+        fn finish(&mut self, buf: &mut Vec<f32>) -> Result<(), String> {
+            self.read(buf)?;
+            let owed = self.pad.flush(self.now());
+            self.silence(buf, owed);
+            Ok(())
+        }
+
+        fn lost(&self) -> Option<Arc<AtomicBool>> {
+            Some(Arc::clone(&self.lost))
         }
 
         fn restart(&mut self) {
@@ -137,7 +163,8 @@ use crate::linux::video::audio as platform;
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
     use std::thread::JoinHandle;
     use std::time::Duration;
 
@@ -195,10 +222,12 @@ mod platform {
         let (ready_tx, ready_rx) = mpsc::channel::<Ready>();
         let (stop, stop_rx) = mpsc::channel::<()>();
         let name = name.map(str::to_owned);
+        let lost = Arc::new(AtomicBool::new(false));
+        let device_lost = Arc::clone(&lost);
         let thread = std::thread::Builder::new()
             .name("windup-sound".into())
             .spawn(move || {
-                let stream = match build(output, name.as_deref()) {
+                let stream = match build(output, name.as_deref(), device_lost) {
                     Ok((stream, ready)) => {
                         let _ = ready_tx.send(Ok(ready));
                         stream
@@ -226,6 +255,7 @@ mod platform {
             rate,
             channels,
             ring,
+            lost,
             Box::new(running),
         )))
     }
@@ -254,6 +284,7 @@ mod platform {
     fn build(
         output: bool,
         name: Option<&str>,
+        lost: Arc<AtomicBool>,
     ) -> Result<(cpal::Stream, (u32, u16, SharedRing)), String> {
         let device = find(output, name)?;
         // Loopback records in the output's own format.
@@ -275,7 +306,7 @@ mod platform {
         let config = supported.config();
         let (rate, channels) = (config.sample_rate.0, config.channels);
         let shared = ring(rate, channels);
-        let push = std::sync::Arc::clone(&shared);
+        let push = Arc::clone(&shared);
         let mut samples = Vec::new();
         let stream = device
             .build_input_stream_raw(
@@ -295,8 +326,13 @@ mod platform {
                     }
                 },
                 // A device that goes away leaves silence, which `Pad` fills:
-                // the picture keeps recording.
-                |e| log::warn!("sound device: {e}"),
+                // the picture keeps recording, and `lost` lets the bar say so.
+                move |e| {
+                    log::warn!("sound device: {e}");
+                    if matches!(e, cpal::StreamError::DeviceNotAvailable) {
+                        lost.store(true, Ordering::Relaxed);
+                    }
+                },
                 None,
             )
             .map_err(|e| format!("Could not open the sound device: {e}"))?;
@@ -334,7 +370,7 @@ mod tests {
     use super::*;
 
     fn source(r: &SharedRing) -> Captured {
-        Captured::new(1000, 2, Arc::clone(r), Box::new(()))
+        Captured::new(1000, 2, Arc::clone(r), Arc::default(), Box::new(()))
     }
 
     #[test]
@@ -373,5 +409,61 @@ mod tests {
         assert!((600..=1000).contains(&buf.len()), "{}", buf.len());
         assert!(buf.len().is_multiple_of(2));
         assert!(buf.iter().all(|s| *s == 0.0));
+    }
+
+    #[test]
+    fn sound_after_quiet_lands_at_its_real_time() {
+        // A loopback device that sends nothing until something plays half
+        // a second in, then 10 ms periods.
+        let r = ring(1000, 2);
+        let mut src = source(&r);
+        src.restart();
+        let mut out = Vec::new();
+        src.read(&mut out).unwrap();
+        let t0 = std::time::Instant::now();
+        let mut pushed = 500u64;
+        while t0.elapsed().as_secs_f64() < 0.8 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let now = (t0.elapsed().as_secs_f64() * 1000.0) as u64;
+            if now > pushed {
+                let n = (now - pushed) as usize;
+                r.lock().unwrap().push(&vec![1.0; n * 2]);
+                pushed = now;
+            }
+            src.read(&mut out).unwrap();
+        }
+        let first = out.iter().position(|s| *s != 0.0).expect("sound") / 2;
+        // Its frame position is its time: 500 ms, within a period or two.
+        assert!(
+            (480..=530).contains(&first),
+            "sound starts at frame {first}"
+        );
+    }
+
+    #[test]
+    fn finish_pays_the_silence_owed() {
+        let r = ring(1000, 2);
+        let mut src = source(&r);
+        src.restart();
+        let mut out = Vec::new();
+        src.read(&mut out).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        src.read(&mut out).unwrap();
+        assert!(out.is_empty(), "below the threshold, read waits");
+        src.finish(&mut out).unwrap();
+        assert!((240..=300).contains(&out.len()), "{}", out.len());
+    }
+
+    #[test]
+    fn captured_sources_share_their_lost_flag() {
+        let r = ring(1000, 2);
+        let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let src = Captured::new(1000, 2, r, Arc::clone(&lost), Box::new(()));
+        lost.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            src.lost()
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 }

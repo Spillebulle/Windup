@@ -13,7 +13,8 @@
 use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -215,10 +216,12 @@ fn open(system: bool, device: Option<&str>) -> Result<Box<dyn AudioSource>, Stri
     };
     let (stop, stop_rx) = pw::channel::channel::<()>();
     let (ready, ready_rx) = mpsc::channel();
+    let lost = Arc::new(AtomicBool::new(false));
+    let device_lost = Arc::clone(&lost);
     let thread = std::thread::Builder::new()
         .name("windup-sound".into())
         .spawn(move || {
-            if let Err(e) = run(system, target, ready.clone(), stop_rx) {
+            if let Err(e) = run(system, target, ready.clone(), device_lost, stop_rx) {
                 // Before the format was agreed this reaches `open`; after,
                 // the recording keeps going on silence.
                 let _ = ready.send(Err(e.clone()));
@@ -236,6 +239,7 @@ fn open(system: bool, device: Option<&str>) -> Result<Box<dyn AudioSource>, Stri
             rate,
             channels,
             ring,
+            lost,
             Box::new(running),
         ))),
         Ok(Err(e)) => Err(e),
@@ -251,18 +255,23 @@ struct Feed {
     ring: Option<SharedRing>,
     channels: u16,
     samples: Vec<f32>,
+    /// Set when the stream fails after `open` returned.
+    lost: Arc<AtomicBool>,
     mainloop: pw::main_loop::WeakMainLoop,
 }
 
 impl Feed {
-    /// The stream failed: to `open` while it still waits, else only logged,
-    /// and the recording carries on with silence.
+    /// The stream failed: to `open` while it still waits, else logged and
+    /// flagged as lost, and the recording carries on with silence.
     fn fail(&mut self, why: String) {
         match self.ready.take() {
             Some(ready) => {
                 let _ = ready.send(Err(why));
             }
-            None => log::warn!("sound: {why}"),
+            None => {
+                log::warn!("sound: {why}");
+                self.lost.store(true, Ordering::Relaxed);
+            }
         }
         if let Some(ml) = self.mainloop.upgrade() {
             ml.quit();
@@ -272,7 +281,7 @@ impl Feed {
     fn format(&mut self, rate: u32, channels: u16) {
         if let Some(ready) = self.ready.take() {
             let shared = ring(rate, channels);
-            self.ring = Some(std::sync::Arc::clone(&shared));
+            self.ring = Some(Arc::clone(&shared));
             self.channels = channels;
             let _ = ready.send(Ok((rate, channels, shared)));
         } else if channels != self.channels {
@@ -303,6 +312,7 @@ fn run(
     system: bool,
     target: Option<String>,
     ready: Ready,
+    lost: Arc<AtomicBool>,
     stop: pw::channel::Receiver<()>,
 ) -> Result<(), String> {
     let err = |e: pw::Error| format!("PipeWire: {e}");
@@ -315,6 +325,7 @@ fn run(
         ring: None,
         channels: 2,
         samples: Vec::new(),
+        lost,
         mainloop: mainloop.downgrade(),
     }));
 

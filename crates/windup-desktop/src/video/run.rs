@@ -61,6 +61,16 @@ pub(crate) trait AudioSource: Send {
     /// is dropped rather than put at the start of the segment, and a source
     /// that pads silence starts counting again.
     fn restart(&mut self) {}
+    /// The segment ends: the last `read`, plus whatever silence a source
+    /// that keeps time still owes, so the sound lasts to the very end.
+    fn finish(&mut self, buf: &mut Vec<f32>) -> Result<(), String> {
+        self.read(buf)
+    }
+    /// Set once the device has gone (unplugged, its server stopped): the
+    /// recording carries on silent, and the bar can say so.
+    fn lost(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
 }
 
 pub(crate) struct RecordJob {
@@ -87,6 +97,8 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// A hardware encoder that dies this soon did not work at all.
 const FALLBACK_WINDOW: Duration = Duration::from_secs(1);
 const TICK: Duration = Duration::from_millis(20);
+/// How long a segment that ends with `q` waits for its sound writers.
+const SOUND_FLUSH: Duration = Duration::from_millis(500);
 
 /// Numbers the segment folders of this process.
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
@@ -105,6 +117,8 @@ struct Shared {
     t0: Instant,
     recorder: Mutex<Recorder>,
     failed: Mutex<Option<String>>,
+    /// Each sound source's `lost` flag.
+    sound_lost: Vec<Arc<AtomicBool>>,
     /// Whether the last failure was noticed with a writer error in hand.
     #[cfg(test)]
     writer_error_seen: AtomicBool,
@@ -171,6 +185,7 @@ impl Recording {
             t0: Instant::now(),
             recorder: Mutex::new(Recorder::start(0.0)),
             failed: Mutex::new(None),
+            sound_lost: job.audio.iter().filter_map(|a| a.lost()).collect(),
             #[cfg(test)]
             writer_error_seen: AtomicBool::new(false),
         });
@@ -256,6 +271,17 @@ impl Recording {
     /// Set when a segment died; what was recorded before it is still kept.
     pub(crate) fn failed(&self) -> Option<String> {
         self.shared.failed.lock().ok().and_then(|f| f.clone())
+    }
+
+    /// A sound device went away during the recording, which goes on
+    /// without it.
+    // Task 13's bar shows a notice.
+    #[allow(dead_code)]
+    pub(crate) fn sound_lost(&self) -> bool {
+        self.shared
+            .sound_lost
+            .iter()
+            .any(|l| l.load(Ordering::Relaxed))
     }
 
     #[cfg(test)]
@@ -478,6 +504,20 @@ impl Run {
         } else if !seg.piped
             && let Some(stdin) = seg.stdin.as_mut()
         {
+            // The sound writers flush their last silence and close their
+            // pipes first: `q` makes ffmpeg drop what it has not read yet,
+            // so the sound would end early (or late) by however much that
+            // race left behind.
+            let deadline = Instant::now() + SOUND_FLUSH;
+            let waited = Instant::now();
+            while seg.audio.iter().any(|(_, h)| !h.is_finished()) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            log::debug!(
+                "segment {}: sound closed after {:?}",
+                seg.index,
+                waited.elapsed()
+            );
             let _ = stdin.write_all(b"q");
             let _ = stdin.flush();
         }
@@ -835,6 +875,14 @@ fn write_audio(
     let mut bytes = Vec::new();
     let result = loop {
         if stop.load(Ordering::Relaxed) {
+            // The segment's last sound, so it is as long as the picture. A
+            // pipe ffmpeg has closed already is no failure now.
+            samples.clear();
+            if src.finish(&mut samples).is_ok() && !samples.is_empty() {
+                bytes.clear();
+                put_f32le(&samples, &mut bytes);
+                let _ = file.write_all(&bytes);
+            }
             break Ok(());
         }
         samples.clear();
@@ -1283,6 +1331,202 @@ mod tests {
         // second segment would start with a second of catching up.
         let d = duration(&info);
         assert!((1.6..2.6).contains(&d), "{d} s");
+    }
+
+    /// When the sync test's picture flashes white and its sound clicks,
+    /// in seconds after the test starts.
+    const MARKS: [f64; 4] = [0.8, 1.6, 3.4, 4.2];
+    const MARK_LEN: f64 = 0.15;
+    /// From here on the fake device sends only the clicks, nothing between
+    /// them, as WASAPI loopback does while nothing plays.
+    const QUIET_FROM: f64 = 2.0;
+    const SYNC_RATE: u32 = 48000;
+
+    fn marked(t: f64) -> bool {
+        MARKS.iter().any(|m| (*m..m + MARK_LEN).contains(&t))
+    }
+
+    /// Black, white during the marks.
+    struct Flash {
+        epoch: Instant,
+    }
+
+    impl FrameSource for Flash {
+        fn size(&self) -> (u32, u32) {
+            (64, 64)
+        }
+        fn next_frame(&mut self, buf: &mut Vec<u8>) -> Result<bool, String> {
+            let v = if marked(self.epoch.elapsed().as_secs_f64()) {
+                255
+            } else {
+                0
+            };
+            buf.clear();
+            buf.extend(std::iter::repeat_n([v, v, v, 255], 64 * 64).flatten());
+            Ok(true)
+        }
+    }
+
+    struct FlashFactory {
+        epoch: Instant,
+    }
+
+    impl SourceFactory for FlashFactory {
+        fn source(&self) -> Source {
+            PatternFactory { w: 64, h: 64 }.source()
+        }
+        fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
+            Some(Box::new(Flash { epoch: self.epoch }))
+        }
+    }
+
+    /// A fake sound device on a thread of its own, pushing 10 ms periods
+    /// into a `Captured` source: a 1 kHz click during the marks, silence
+    /// between them until `QUIET_FROM`, nothing at all after it.
+    struct FakeDevice {
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for FakeDevice {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    fn clicking_source(epoch: Instant) -> Box<dyn AudioSource> {
+        use crate::video::audio::{Captured, ring};
+        let shared = ring(SYNC_RATE, 2);
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (shared, stop) = (Arc::clone(&shared), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut next = 0u64;
+                let mut period = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    sleep(0.01);
+                    let now = (epoch.elapsed().as_secs_f64() * f64::from(SYNC_RATE)) as u64;
+                    period.clear();
+                    for k in next..now {
+                        let t = k as f64 / f64::from(SYNC_RATE);
+                        let v = if marked(t) {
+                            0.5 * (std::f64::consts::TAU * 1000.0 * t).sin() as f32
+                        } else if t < QUIET_FROM {
+                            0.0
+                        } else {
+                            continue;
+                        };
+                        period.extend([v, v]);
+                    }
+                    next = now;
+                    if !period.is_empty() {
+                        shared.lock().unwrap().push(&period);
+                    }
+                }
+            })
+        };
+        let device = FakeDevice {
+            stop,
+            thread: Some(thread),
+        };
+        Box::new(Captured::new(
+            SYNC_RATE,
+            2,
+            shared,
+            Arc::default(),
+            Box::new(device),
+        ))
+    }
+
+    /// What ffmpeg logs running `filter` over one stream of `file`.
+    fn analyse(ffmpeg: &Path, file: &Path, filter: &[&str]) -> String {
+        let out = ffmpeg::command(ffmpeg)
+            .args(["-hide_banner", "-i"])
+            .arg(file)
+            .args(filter)
+            .args(["-f", "null", "-"])
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
+    /// The times the picture turns white.
+    fn flash_onsets(ffmpeg: &Path, file: &Path) -> Vec<f64> {
+        let log = analyse(
+            ffmpeg,
+            file,
+            &[
+                "-an",
+                "-vf",
+                "signalstats,metadata=print:key=lavfi.signalstats.YAVG",
+            ],
+        );
+        let (mut onsets, mut at, mut lit) = (Vec::new(), 0.0, false);
+        for line in log.lines() {
+            if let Some(i) = line.find("pts_time:") {
+                at = line[i + 9..].trim().parse().unwrap_or(at);
+            } else if let Some(i) = line.find("YAVG=") {
+                let y: f64 = line[i + 5..].trim().parse().unwrap_or(0.0);
+                if y > 128.0 && !lit {
+                    onsets.push(at);
+                }
+                lit = y > 128.0;
+            }
+        }
+        onsets
+    }
+
+    /// The times the sound starts after a stretch of silence.
+    fn click_onsets(ffmpeg: &Path, file: &Path) -> Vec<f64> {
+        let log = analyse(
+            ffmpeg,
+            file,
+            &["-vn", "-af", "silencedetect=n=-30dB:d=0.05"],
+        );
+        log.lines()
+            .filter_map(|l| {
+                let i = l.find("silence_end: ")? + 13;
+                l[i..].split_whitespace().next()?.parse().ok()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sound_and_picture_stay_in_step_through_quiet() {
+        let Some(ff) = ffmpeg_or_skip("sound_and_picture_stay_in_step_through_quiet") else {
+            return;
+        };
+        let dir = TempDir::new("sync");
+        let epoch = Instant::now();
+        let mut j = job(&dir, vec![clicking_source(epoch)]);
+        j.factory = Box::new(FlashFactory { epoch });
+        j.cfg.fps = 60;
+        let mut rec = start(&dir, j, ("libx264", false));
+        sleep(5.0 - epoch.elapsed().as_secs_f64());
+        let out = rec.stop().join().unwrap().unwrap();
+        let flashes = flash_onsets(&ff, &out);
+        let text = info(&ff, &out);
+        // silencedetect also ends the silence at the end of the file.
+        let end = duration(&text);
+        let clicks: Vec<f64> = click_onsets(&ff, &out)
+            .into_iter()
+            .filter(|t| *t < end - 0.1)
+            .collect();
+        eprintln!(
+            "flashes {flashes:?}
+clicks  {clicks:?}"
+        );
+        assert_eq!(flashes.len(), MARKS.len(), "{flashes:?}");
+        assert_eq!(clicks.len(), MARKS.len(), "{clicks:?}");
+        for (f, c) in flashes.iter().zip(&clicks) {
+            eprintln!("click - flash = {:+.3} s", c - f);
+            assert!((c - f).abs() < 0.05, "flash {f}, click {c}");
+        }
+        assert!(text.contains("Audio: aac"), "{text}");
     }
 
     #[test]

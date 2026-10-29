@@ -81,16 +81,29 @@ impl Ring {
 /// its way.
 pub const SILENCE_AFTER: f64 = 0.2;
 
-/// Keeps a source at real time. ffmpeg times raw sound by counting samples,
-/// so a device that sends nothing while nothing plays (WASAPI loopback) would
+/// Silent frames to send around what arrived: `before` it, then `after`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fill {
+    pub before: u64,
+    pub after: u64,
+}
+
+/// Keeps a source at real time. The sound is timed by counting samples, so
+/// a device that sends nothing while nothing plays (WASAPI loopback) would
 /// slide everything after it earlier than the picture. `Pad` counts the
-/// frames sent since the clock started and says how many silent frames make
-/// up a gap longer than `SILENCE_AFTER`.
+/// frames sent since the clock started against the clock:
+/// - while nothing arrives, a gap longer than `SILENCE_AFTER` is filled with
+///   silence up to now, and the source counts as quiet;
+/// - when sound arrives while quiet (and at the start, which is quiet too),
+///   the silence still owed goes before it, so it ends at real time;
+/// - while sound flows the device keeps time itself and nothing is added,
+///   so a late period is never padded on top of.
 #[derive(Debug, Default)]
 pub struct Pad {
     rate: u32,
     t0: Option<f64>,
     sent: u64,
+    quiet: bool,
 }
 
 impl Pad {
@@ -99,6 +112,7 @@ impl Pad {
             rate,
             t0: None,
             sent: 0,
+            quiet: true,
         }
     }
 
@@ -106,21 +120,43 @@ impl Pad {
     pub fn reset(&mut self) {
         self.t0 = None;
         self.sent = 0;
+        self.quiet = true;
     }
 
-    /// `got` frames arrived by `now` (seconds on any steady clock). Returns
-    /// how many frames of silence to send after them.
-    pub fn fill(&mut self, now: f64, got: u64) -> u64 {
+    /// Frames due by `now` since the clock started.
+    fn due(&mut self, now: f64) -> u64 {
         let t0 = *self.t0.get_or_insert(now);
-        self.sent += got;
-        let due = ((now - t0).max(0.0) * f64::from(self.rate)) as u64;
-        let behind = due.saturating_sub(self.sent);
-        if behind as f64 > SILENCE_AFTER * f64::from(self.rate) {
-            self.sent += behind;
-            behind
+        ((now - t0).max(0.0) * f64::from(self.rate)) as u64
+    }
+
+    /// `got` frames arrived by `now` (seconds on any steady clock). Says how
+    /// much silence goes before and after them.
+    pub fn fill(&mut self, now: f64, got: u64) -> Fill {
+        let due = self.due(now);
+        let mut fill = Fill::default();
+        if got > 0 {
+            if self.quiet {
+                // The frames that arrived end now; what is still missing
+                // before them was quiet.
+                fill.before = due.saturating_sub(self.sent + got);
+                self.quiet = false;
+            }
         } else {
-            0
+            let behind = due.saturating_sub(self.sent);
+            if behind as f64 > SILENCE_AFTER * f64::from(self.rate) {
+                fill.after = behind;
+                self.quiet = true;
+            }
         }
+        self.sent += fill.before + got + fill.after;
+        fill
+    }
+
+    /// The segment ends: all the silence owed up to `now`, however little.
+    pub fn flush(&mut self, now: f64) -> u64 {
+        let owed = self.due(now).saturating_sub(self.sent);
+        self.sent += owed;
+        owed
     }
 }
 
@@ -176,44 +212,79 @@ mod tests {
         assert!(ring.is_empty());
     }
 
+    fn fill(pad: &mut Pad, now: f64, got: u64) -> (u64, u64) {
+        let f = pad.fill(now, got);
+        (f.before, f.after)
+    }
+
     #[test]
     fn steady_sound_needs_no_padding() {
         let mut pad = Pad::new(1000);
-        assert_eq!(pad.fill(10.0, 0), 0, "the clock starts here");
+        assert_eq!(fill(&mut pad, 10.0, 0), (0, 0), "the clock starts here");
         // A period every 10 ms, and a late one now and then.
-        assert_eq!(pad.fill(10.01, 10), 0);
-        assert_eq!(pad.fill(10.15, 10), 0);
-        assert_eq!(pad.fill(10.16, 150), 0);
+        assert_eq!(fill(&mut pad, 10.01, 10), (0, 0));
+        assert_eq!(fill(&mut pad, 10.15, 10), (0, 0));
+        assert_eq!(fill(&mut pad, 10.16, 150), (0, 0));
     }
 
     #[test]
     fn a_silent_device_is_padded_to_real_time() {
         let mut pad = Pad::new(1000);
-        pad.fill(5.0, 0);
-        assert_eq!(pad.fill(5.1, 0), 0, "still within a period");
-        assert_eq!(pad.fill(5.5, 0), 500);
-        assert_eq!(pad.fill(5.6, 0), 0);
-        // Sound again, and it is not padded on top of.
-        assert_eq!(pad.fill(5.61, 10), 0);
-        assert_eq!(pad.fill(6.0, 0), 490);
+        fill(&mut pad, 5.0, 0);
+        assert_eq!(fill(&mut pad, 5.1, 0), (0, 0), "still within a period");
+        assert_eq!(fill(&mut pad, 5.5, 0), (0, 500));
+        assert_eq!(fill(&mut pad, 5.6, 0), (0, 0));
+        // Sound again: the 100 ms of quiet not yet paid go before it, so it
+        // ends at real time instead of 100 ms early.
+        assert_eq!(fill(&mut pad, 5.61, 10), (100, 0));
+        assert_eq!(fill(&mut pad, 5.62, 10), (0, 0));
+        assert_eq!(fill(&mut pad, 6.0, 0), (0, 380));
+    }
+
+    #[test]
+    fn sound_after_quiet_starts_on_time() {
+        // WASAPI loopback: nothing at all until something plays at 0.14 s,
+        // its first period arriving at 0.15 s.
+        let mut pad = Pad::new(1000);
+        fill(&mut pad, 0.0, 0);
+        assert_eq!(fill(&mut pad, 0.1, 0), (0, 0));
+        assert_eq!(fill(&mut pad, 0.15, 10), (140, 0));
+        // From then on the device keeps time itself.
+        assert_eq!(fill(&mut pad, 0.16, 10), (0, 0));
+        assert_eq!(
+            fill(&mut pad, 0.27, 10),
+            (0, 0),
+            "a late period is not quiet"
+        );
+        assert_eq!(fill(&mut pad, 0.28, 100), (0, 0));
     }
 
     #[test]
     fn a_device_ahead_of_the_clock_is_not_padded() {
         let mut pad = Pad::new(1000);
-        pad.fill(0.0, 2000);
-        assert_eq!(pad.fill(1.0, 0), 0);
-        assert_eq!(pad.fill(2.5, 0), 500);
+        assert_eq!(fill(&mut pad, 0.0, 2000), (0, 0));
+        assert_eq!(fill(&mut pad, 1.0, 0), (0, 0));
+        assert_eq!(fill(&mut pad, 2.5, 0), (0, 500));
     }
 
     #[test]
     fn reset_starts_the_clock_again() {
         let mut pad = Pad::new(1000);
-        pad.fill(0.0, 0);
-        pad.fill(1.0, 0);
+        fill(&mut pad, 0.0, 0);
+        fill(&mut pad, 1.0, 0);
         pad.reset();
         // Paused for a minute: nothing owed for it.
-        assert_eq!(pad.fill(61.0, 0), 0);
-        assert_eq!(pad.fill(61.5, 0), 500);
+        assert_eq!(fill(&mut pad, 61.0, 0), (0, 0));
+        assert_eq!(fill(&mut pad, 61.5, 0), (0, 500));
+    }
+
+    #[test]
+    fn flush_pays_all_that_is_owed() {
+        let mut pad = Pad::new(1000);
+        fill(&mut pad, 0.0, 0);
+        assert_eq!(fill(&mut pad, 0.1, 0), (0, 0));
+        // The segment ends: the last 150 ms are owed even below the threshold.
+        assert_eq!(pad.flush(0.15), 150);
+        assert_eq!(pad.flush(0.15), 0);
     }
 }
