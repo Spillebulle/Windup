@@ -188,6 +188,8 @@ pub fn run_background(
     ipc::serve(listener, move |c| {
         let _ = cmd_tx.send(c);
     });
+    // A recording's keys a crash left in COSMIC's shortcuts.
+    cosmic::remove_temporary();
     cosmic::bind_once(&config);
     portal::start_shortcuts(&runtime.plan, &config);
 
@@ -335,7 +337,9 @@ impl Background {
                 self.start_capture(ToolId::Screenshot, CaptureMode::Screenshot, config);
             }
             Command::Record => self.record_command(config, shared, commands),
+            Command::RecordPause => self.pause_recording(),
             Command::RecordStop => self.stop_recording(),
+            Command::RecordCancel => self.cancel_recording(),
             Command::Show => self.show_settings(),
             Command::Reload => {
                 *config = Config::load();

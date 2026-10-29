@@ -89,9 +89,17 @@ pub enum HotkeyHint {
     Cosmic,
 }
 
+/// The Video pane's caution where the desktop gives Windup no way to take
+/// Esc while a recording runs (`SettingsView::esc_only_on_bar`).
+pub const ESC_ONLY_ON_BAR: &str = "On this desktop Esc only cancels from the recording bar; bind windup --record-cancel in your desktop's settings.";
+
 pub struct SettingsView {
     pub active_pane: SettingsPane,
     pub hotkey_hint: HotkeyHint,
+    /// Esc cannot be taken globally here (Sway, GNOME without the
+    /// GlobalShortcuts portal): the Video pane shows [`ESC_ONLY_ON_BAR`].
+    /// The UI knows no platform, so the desktop crate sets this.
+    pub esc_only_on_bar: bool,
 }
 
 impl Default for SettingsView {
@@ -99,6 +107,7 @@ impl Default for SettingsView {
         Self {
             active_pane: SettingsPane::Overview,
             hotkey_hint: HotkeyHint::None,
+            esc_only_on_bar: false,
         }
     }
 }

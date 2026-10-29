@@ -173,6 +173,8 @@ enum Phase {
         rx: Receiver<Result<Started, NotStarted>>,
         /// Stop came before the start did.
         stop: bool,
+        /// Cancel came before the start did; it wins over a stop.
+        cancel: bool,
         fps: u32,
         label: String,
     },
@@ -211,7 +213,18 @@ impl Live {
 
     /// Starting or running: what the Video hotkey stops.
     pub(crate) fn stoppable(&self) -> bool {
-        matches!(self.phase, Phase::Starting { .. } | Phase::Running(_))
+        match &self.phase {
+            Phase::Starting { stop, cancel, .. } => !stop && !cancel,
+            Phase::Running(_) => true,
+            Phase::Idle | Phase::Joining(_) => false,
+        }
+    }
+
+    /// Whether the recording's keys (pause, stop, Esc) should be bound now:
+    /// from the start until it is stopped or cancelled. Each host binds and
+    /// unbinds them as this changes.
+    pub(crate) fn keys_wanted(&self) -> bool {
+        self.stoppable()
     }
 
     pub(crate) fn running(&self) -> Option<&Running> {
@@ -245,10 +258,41 @@ impl Live {
         self.phase = Phase::Starting {
             rx,
             stop: false,
+            cancel: false,
             fps,
             label,
         };
         true
+    }
+
+    /// Pauses a running recording, or resumes a paused one: the pause key.
+    /// Says whether it asked for a pause (true) or a resume (false); `None`
+    /// when nothing runs.
+    pub(crate) fn toggle_pause(&self) -> Option<bool> {
+        let running = self.running()?;
+        let pause = !running.clock.paused();
+        if pause {
+            running.pause();
+        } else {
+            running.resume();
+        }
+        Some(pause)
+    }
+
+    /// Cancels the recording and throws it away (Esc): no file is saved.
+    /// While it is starting, as soon as it has started. A recording already
+    /// stopping is left to finish: its file is on its way.
+    pub(crate) fn cancel(&mut self) {
+        match &mut self.phase {
+            Phase::Starting { cancel, .. } => *cancel = true,
+            Phase::Running(_) => {
+                if let Phase::Running(running) = std::mem::take(&mut self.phase) {
+                    log::info!("recording: cancelled");
+                    self.phase = Phase::Joining(discard(running.rec));
+                }
+            }
+            Phase::Idle | Phase::Joining(_) => {}
+        }
     }
 
     /// Stops the recording (or, while it is starting, as soon as it has
@@ -274,6 +318,7 @@ impl Live {
             Phase::Starting {
                 rx,
                 stop,
+                cancel,
                 fps,
                 label,
             } => match rx.try_recv() {
@@ -287,7 +332,11 @@ impl Live {
                         fps: *fps,
                         label: std::mem::take(label),
                     };
-                    if *stop {
+                    if *cancel {
+                        log::info!("recording: cancelled");
+                        self.phase = Phase::Joining(discard(running.rec));
+                        events.push(LiveEvent::Stopping);
+                    } else if *stop {
                         self.phase = Phase::Joining(join(running.rec, running.unopened));
                         events.push(LiveEvent::Stopping);
                     } else {
@@ -428,6 +477,29 @@ fn open_audio(cfg: &VideoConfig) -> (Vec<Box<dyn AudioSource>>, Unopened) {
     (audio, unopened)
 }
 
+/// Cancels `rec` on a worker (it waits for ffmpeg to go and the segments
+/// to be removed); the receiver gets the notice.
+fn discard(mut rec: Recording) -> Receiver<Ended> {
+    let (tx, rx) = channel();
+    let cancelled = Ended {
+        message: outcome::CANCELLED.to_owned(),
+        saved: None,
+    };
+    let reply = Reply::new(tx, cancelled.clone());
+    let spawned = std::thread::Builder::new()
+        .name("recording-cancel".into())
+        .spawn(move || {
+            rec.cancel();
+            reply.send(cancelled);
+        });
+    if let Err(e) = spawned {
+        // The closure is dropped, and with it the recording, which cancels
+        // it there and then; `reply` says so.
+        log::error!("recording: no thread for the cancel: {e}");
+    }
+    rx
+}
+
 /// Stops `rec` and joins it on a worker; the receiver gets the notice.
 fn join(mut rec: Recording, unopened: Unopened) -> Receiver<Ended> {
     let (tx, rx) = channel();
@@ -563,6 +635,104 @@ mod tests {
         assert!(!live.busy());
     }
 
+    /// A recording whose supervisor waits to be told, then says so.
+    fn running(body: impl FnOnce() -> Result<PathBuf, String> + Send + 'static) -> Live {
+        let rec = Recording::with_supervisor(body);
+        Live {
+            phase: Phase::Running(Running {
+                clock: rec.clock(),
+                rec,
+                unopened: Unopened::default(),
+                fps: 30,
+                label: String::new(),
+            }),
+            ..Live::default()
+        }
+    }
+
+    fn until_over(live: &mut Live) -> Vec<LiveEvent> {
+        let mut events = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !events.iter().any(|e| matches!(e, LiveEvent::Over(_)))
+            && std::time::Instant::now() < deadline
+        {
+            events.extend(live.poll());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        events
+    }
+
+    #[test]
+    fn cancel_discards_a_running_recording_and_says_so() {
+        let mut live = running(|| {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(PathBuf::from("must-not-be-kept.mp4"))
+        });
+        assert!(live.keys_wanted());
+        live.cancel();
+        assert!(!live.keys_wanted(), "the keys go with the recording");
+        assert!(!live.stoppable() && live.busy());
+        let events = until_over(&mut live);
+        match events.last() {
+            Some(LiveEvent::Over(e)) => {
+                assert_eq!(e.message, outcome::CANCELLED);
+                assert_eq!(e.saved, None, "nothing to open a folder on");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!live.busy());
+        // A second cancel, or a stop, after it does nothing.
+        live.cancel();
+        live.stop();
+        assert!(live.poll().is_empty());
+    }
+
+    #[test]
+    fn cancel_while_starting_discards_it_as_soon_as_it_starts() {
+        let mut live = Live::default();
+        let (tx, rx) = channel();
+        live.phase = Phase::Starting {
+            rx,
+            stop: false,
+            cancel: false,
+            fps: 30,
+            label: String::new(),
+        };
+        live.cancel();
+        assert!(!live.keys_wanted());
+        let rec = Recording::with_supervisor(|| Ok(PathBuf::from("kept.mp4")));
+        tx.send(Ok((rec, None, Unopened::default()))).unwrap();
+        let events = until_over(&mut live);
+        assert!(!events.contains(&LiveEvent::Started), "{events:?}");
+        assert!(events.contains(&LiveEvent::Stopping), "{events:?}");
+        assert!(
+            matches!(events.last(), Some(LiveEvent::Over(e)) if e.message == outcome::CANCELLED)
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_the_stop_leaves_the_join_alone() {
+        // Esc after the stop key: the join is under way, and keeps its file.
+        let mut live = running(|| Ok(PathBuf::from("a.mp4")));
+        live.stop();
+        live.cancel();
+        let events = until_over(&mut live);
+        assert!(
+            matches!(events.last(), Some(LiveEvent::Over(e)) if e.message != outcome::CANCELLED)
+        );
+    }
+
+    #[test]
+    fn the_pause_key_pauses_and_resumes() {
+        // Nothing to pause: nothing happens.
+        assert_eq!(Live::default().toggle_pause(), None);
+        // A running recording that is not paused is paused. (This fake one
+        // has no supervisor to take the pause, so it never reads as paused.)
+        let mut live = running(|| Ok(PathBuf::from("a.mp4")));
+        assert_eq!(live.toggle_pause(), Some(true));
+        live.cancel();
+    }
+
     #[test]
     fn an_idle_recording_polls_quietly_and_stop_does_nothing() {
         let mut live = Live::default();
@@ -580,6 +750,7 @@ mod tests {
         live.phase = Phase::Starting {
             rx,
             stop: false,
+            cancel: false,
             fps: 30,
             label: String::new(),
         };
@@ -602,6 +773,7 @@ mod tests {
         live.phase = Phase::Starting {
             rx,
             stop: false,
+            cancel: false,
             fps: 30,
             label: String::new(),
         };
@@ -624,6 +796,7 @@ mod tests {
         live.phase = Phase::Starting {
             rx,
             stop: false,
+            cancel: false,
             fps: 30,
             label: String::new(),
         };

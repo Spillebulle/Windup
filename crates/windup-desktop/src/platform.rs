@@ -178,6 +178,45 @@ pub fn detect(env: &Env, globals: Option<&[String]>) -> Plan {
     }
 }
 
+/// How a recording's keys (pause, stop, and Esc, which always cancels) are
+/// bound for as long as it runs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordingKeys {
+    /// The Windows hook matches them while the recording runs.
+    Hook,
+    /// Passive X grabs from the start to the end.
+    XGrab,
+    /// Temporary entries in COSMIC's custom shortcuts.
+    Cosmic,
+    /// A second GlobalShortcuts portal session (KDE, GNOME 48+, Hyprland).
+    Portal,
+    /// Nothing global: Sway, GNOME without the portal, Weston. Esc cancels
+    /// only from the recording bar, and the settings say so.
+    BarOnly,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl RecordingKeys {
+    /// Whether Esc cancels from anywhere, as the owner's rule wants.
+    pub fn global_esc(self) -> bool {
+        self != RecordingKeys::BarOnly
+    }
+}
+
+/// Where the recording's keys come from, given how the tools' hotkeys arrive,
+/// whether this is COSMIC, and whether the GlobalShortcuts portal is there.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn recording_keys(hotkeys: HotkeysVia, cosmic: bool, portal: bool) -> RecordingKeys {
+    match hotkeys {
+        HotkeysVia::Hook => RecordingKeys::Hook,
+        HotkeysVia::XGrab => RecordingKeys::XGrab,
+        HotkeysVia::Command if cosmic => RecordingKeys::Cosmic,
+        HotkeysVia::Command if portal => RecordingKeys::Portal,
+        HotkeysVia::Command => RecordingKeys::BarOnly,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +325,22 @@ mod tests {
     fn nothing_at_all() {
         let plan = detect(&Env::default(), None);
         assert_eq!(plan.hotkeys, HotkeysVia::Command);
+    }
+
+    #[test]
+    fn where_the_recording_keys_come_from() {
+        use RecordingKeys::*;
+        assert_eq!(recording_keys(HotkeysVia::Hook, false, false), Hook);
+        assert_eq!(recording_keys(HotkeysVia::XGrab, false, false), XGrab);
+        // Wayland: COSMIC's shortcut file, else the portal (KDE, GNOME 48+,
+        // Hyprland), else nothing global (Sway, older GNOME, Weston).
+        assert_eq!(recording_keys(HotkeysVia::Command, true, false), Cosmic);
+        assert_eq!(recording_keys(HotkeysVia::Command, true, true), Cosmic);
+        assert_eq!(recording_keys(HotkeysVia::Command, false, true), Portal);
+        assert_eq!(recording_keys(HotkeysVia::Command, false, false), BarOnly);
+        assert!(!BarOnly.global_esc());
+        for keys in [Hook, XGrab, Cosmic, Portal] {
+            assert!(keys.global_esc(), "{keys:?}");
+        }
     }
 }

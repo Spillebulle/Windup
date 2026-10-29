@@ -41,6 +41,8 @@ struct WindupApp {
     _monitor: Option<ClipboardMonitor>,
     hotkey_listener: Option<HotkeyListener>,
     applied_bindings: Vec<(windup_core::Shortcut, windup_core::hotkeys::Action)>,
+    /// The recording's keys as last bound (live only while one runs).
+    applied_recording: Vec<(windup_core::Shortcut, windup_core::hotkeys::Action)>,
     settings_only: bool,
     popup_view: PopupView,
     popup_open: bool,
@@ -88,6 +90,25 @@ fn hotkey_hint(plan: Plan, settings_only: bool) -> windup_ui::HotkeyHint {
         }
     }
     windup_ui::HotkeyHint::None
+}
+
+/// Whether this desktop has no way to take Esc globally while a recording
+/// runs (Sway, GNOME without the GlobalShortcuts portal, Weston), which the
+/// Video settings must say. Asked of the desktop as `hotkey_hint` is.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn esc_only_on_bar(plan: Plan, settings_only: bool) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let plan = if settings_only { linux::detect() } else { plan };
+        let cosmic = linux::cosmic::is_cosmic();
+        // The portal is asked only where it would be the way in.
+        let portal = plan.hotkeys == platform::HotkeysVia::Command
+            && !cosmic
+            && linux::portal::global_shortcuts_available();
+        return !platform::recording_keys(plan.hotkeys, cosmic, portal).global_esc();
+    }
+    #[allow(unreachable_code)]
+    false
 }
 
 impl WindupApp {
@@ -160,7 +181,9 @@ impl WindupApp {
                         Command::Capture => HotkeyEvent::Capture { target },
                         Command::Screenshot => HotkeyEvent::Screenshot { target },
                         Command::Record => HotkeyEvent::Record { target },
+                        Command::RecordPause => HotkeyEvent::RecordPause,
                         Command::RecordStop => HotkeyEvent::RecordStop,
+                        Command::RecordCancel => HotkeyEvent::RecordCancel,
                         Command::Show => HotkeyEvent::Show,
                         Command::Reload => HotkeyEvent::Reload,
                     };
@@ -173,17 +196,20 @@ impl WindupApp {
         }
 
         let applied_bindings = windup_core::hotkeys::bindings(&config);
+        let applied_recording = windup_core::hotkeys::recording_bindings(&config);
         paste::set_trigger_vk(paste_plain_vk(&applied_bindings));
         Self {
             config,
             settings_view: SettingsView {
                 hotkey_hint: hotkey_hint(plan, startup.settings_only),
+                esc_only_on_bar: esc_only_on_bar(plan, startup.settings_only),
                 ..SettingsView::default()
             },
             history,
             _monitor: monitor,
             hotkey_listener,
             applied_bindings,
+            applied_recording,
             settings_only: startup.settings_only,
             popup_view: PopupView::new(),
             popup_open: false,
@@ -282,12 +308,14 @@ impl eframe::App for WindupApp {
         }
 
         let wanted = windup_core::hotkeys::bindings(&self.config);
-        if wanted != self.applied_bindings {
+        let wanted_recording = windup_core::hotkeys::recording_bindings(&self.config);
+        if wanted != self.applied_bindings || wanted_recording != self.applied_recording {
             if let Some(l) = &self.hotkey_listener {
                 l.rebind(&self.config);
             }
             paste::set_trigger_vk(paste_plain_vk(&wanted));
             self.applied_bindings = wanted;
+            self.applied_recording = wanted_recording;
         }
 
         // -------------------------------------------------------------
@@ -338,7 +366,9 @@ impl eframe::App for WindupApp {
                 }
                 // While a recording runs, the Video hotkey stops it.
                 HotkeyEvent::Record { target } => self.video_hotkey(ctx, target),
+                HotkeyEvent::RecordPause => self.pause_recording(),
                 HotkeyEvent::RecordStop => self.stop_recording(),
+                HotkeyEvent::RecordCancel => self.cancel_recording(),
                 HotkeyEvent::Show => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));

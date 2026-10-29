@@ -19,6 +19,7 @@
 use crate::config::Config;
 use crate::hotkeys::{bindings, xkb_keysym_name};
 use crate::ipc::Command;
+use crate::shortcut::Shortcut;
 
 /// A shortcut Windup wants.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,25 +39,31 @@ pub fn wanted(config: &Config) -> Vec<Wanted> {
     bindings(config)
         .into_iter()
         .filter_map(|(shortcut, action)| {
-            let m = &shortcut.modifiers;
-            let modifiers = [
-                (m.super_key, "Super"),
-                (m.ctrl, "Ctrl"),
-                (m.alt, "Alt"),
-                (m.shift, "Shift"),
-            ]
-            .into_iter()
-            .filter(|(on, _)| *on)
-            .map(|(_, name)| name.to_owned())
-            .collect();
+            let (modifiers, key) = cosmic_keys(&shortcut)?;
             Some(Wanted {
                 modifiers,
-                key: xkb_keysym_name(&shortcut.key)?.to_owned(),
+                key,
                 description: action.tool().display_name().to_owned(),
                 args: format!("--{}", Command::for_action(action).as_str()),
             })
         })
         .collect()
+}
+
+/// COSMIC's modifier names and the keysym name for `shortcut`.
+fn cosmic_keys(shortcut: &Shortcut) -> Option<(Vec<String>, String)> {
+    let m = &shortcut.modifiers;
+    let modifiers = [
+        (m.super_key, "Super"),
+        (m.ctrl, "Ctrl"),
+        (m.alt, "Alt"),
+        (m.shift, "Shift"),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .map(|(_, name)| name.to_owned())
+    .collect();
+    Some((modifiers, xkb_keysym_name(&shortcut.key)?.to_owned()))
 }
 
 const MARKER_HEADER: &str =
@@ -125,6 +132,12 @@ struct Entry {
     modifiers: Vec<String>,
     key: Option<String>,
     action: String,
+    /// The text of `description: Some("..")`, if it has one.
+    description: Option<String>,
+    /// Its span in the file: from the end of whatever comes before it (the
+    /// map's brace, the comma before, a comment) to the end of its own comma,
+    /// or of its action when it has none.
+    span: (usize, usize),
 }
 
 /// The new file, if anything was added, and what happened to each of
@@ -229,15 +242,120 @@ fn runs_windup(action: &str, args: &str) -> bool {
             .any(|w| w.trim_matches(['"', ')']) == args)
 }
 
-fn same_keys(e: &Entry, w: &Wanted) -> bool {
-    let mut a: Vec<String> = e.modifiers.iter().map(|m| m.to_ascii_lowercase()).collect();
-    let mut b: Vec<String> = w.modifiers.iter().map(|m| m.to_ascii_lowercase()).collect();
+fn same_mods(a: &[String], b: &[String]) -> bool {
+    let mut a: Vec<String> = a.iter().map(|m| m.to_ascii_lowercase()).collect();
+    let mut b: Vec<String> = b.iter().map(|m| m.to_ascii_lowercase()).collect();
     a.sort();
     b.sort();
     a == b
+}
+
+fn same_keys(e: &Entry, w: &Wanted) -> bool {
+    same_mods(&e.modifiers, &w.modifiers)
         && e.key
             .as_deref()
             .is_some_and(|k| k.eq_ignore_ascii_case(&w.key))
+}
+
+// --- the recording's keys, for as long as it runs ---------------------------
+//
+// While a recording runs, its pause, stop and cancel keys are bound the same
+// way and taken out again when it ends. Those entries carry a tag in their
+// description, so any a crash left behind are found at the next start and
+// removed, and an entry of the user's own is never touched.
+
+/// How a temporary entry's description starts.
+pub const TEMPORARY_TAG: &str = "Windup while recording: ";
+
+/// The arguments a temporary entry runs Windup with.
+const TEMPORARY_ARGS: [&str; 3] = ["--record-pause", "--record-stop", "--record-cancel"];
+
+/// The empty map a missing file starts as.
+const EMPTY_MAP: &str = "{\n}\n";
+
+fn temporary_label(args: &str) -> &str {
+    match args {
+        "--record-pause" => "Pause",
+        "--record-stop" => "Stop",
+        "--record-cancel" => "Cancel",
+        other => other,
+    }
+}
+
+/// Windup's own temporary entry: tagged, and running one of its recording
+/// commands.
+fn is_temporary(e: &Entry) -> bool {
+    e.description
+        .as_deref()
+        .is_some_and(|d| d.starts_with(TEMPORARY_TAG))
+        && TEMPORARY_ARGS.iter().any(|a| runs_windup(&e.action, a))
+}
+
+/// The file with temporary entries for `keys` (a shortcut, and the arguments
+/// it runs Windup with, e.g. `--record-cancel`) put first in the map, or
+/// `None` when every key is bound already: the user's binding stands, and the
+/// Video key is stop already through Windup's own entry. `existing` is the
+/// file's text, `None` when there is none. Nothing else in the file changes,
+/// so [`remove_temporary`] gives back exactly the text it was given.
+pub fn add_temporary(
+    existing: Option<&str>,
+    keys: &[(Shortcut, &str)],
+    program: &str,
+) -> Result<Option<String>, Unreadable> {
+    let text = existing
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or(EMPTY_MAP);
+    let (entries, open, _) = parse_map(text)?;
+    let mut added: Vec<Wanted> = Vec::new();
+    for (shortcut, args) in keys {
+        let Some((modifiers, key)) = cosmic_keys(shortcut) else {
+            continue;
+        };
+        let w = Wanted {
+            modifiers,
+            key,
+            description: format!("{TEMPORARY_TAG}{}", temporary_label(args)),
+            args: (*args).to_owned(),
+        };
+        let taken = entries.iter().any(|e| same_keys(e, &w))
+            || added.iter().any(|a| {
+                a.key.eq_ignore_ascii_case(&w.key) && same_mods(&a.modifiers, &w.modifiers)
+            });
+        if !taken {
+            added.push(w);
+        }
+    }
+    if added.is_empty() {
+        return Ok(None);
+    }
+    // Right after the brace, each with its own comma, so no comma of the
+    // user's is added or needed.
+    let body: String = added
+        .iter()
+        .map(|w| format!("\n    {},", render(w, program)))
+        .collect();
+    Ok(Some(format!("{}{body}{}", &text[..open], &text[open..])))
+}
+
+/// The file without Windup's temporary entries, or `None` when it has none.
+pub fn remove_temporary(text: &str) -> Result<Option<String>, Unreadable> {
+    let (entries, _) = parse(text)?;
+    let spans: Vec<(usize, usize)> = entries
+        .iter()
+        .filter(|e| is_temporary(e))
+        .map(|e| e.span)
+        .collect();
+    if spans.is_empty() {
+        return Ok(None);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (start, end) in spans {
+        out.push_str(&text[at..start]);
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    Ok(Some(out))
 }
 
 // --- a reader for the little of RON this file uses ---------------------------
@@ -364,11 +482,12 @@ impl<'a> Reader<'a> {
         Ok(self.text[start..self.at].trim())
     }
 
-    /// `(modifiers: [..], key: "..", ...)`
-    fn binding(&mut self) -> Result<(Vec<String>, Option<String>), Unreadable> {
+    /// `(modifiers: [..], key: "..", description: Some(".."), ...)`
+    fn binding(&mut self) -> Result<Binding, Unreadable> {
         self.expect('(')?;
         let mut modifiers = Vec::new();
         let mut key = None;
+        let mut description = None;
         loop {
             if self.eat(')') {
                 break;
@@ -387,6 +506,7 @@ impl<'a> Reader<'a> {
                     }
                 }
                 "key" => key = Some(self.string()?),
+                "description" => description = some_string(self.value()?),
                 _ => {
                     self.value()?;
                 }
@@ -396,29 +516,58 @@ impl<'a> Reader<'a> {
                 break;
             }
         }
-        Ok((modifiers, key))
+        Ok((modifiers, key, description))
     }
+}
+
+/// A binding's modifiers, key and description.
+type Binding = (Vec<String>, Option<String>, Option<String>);
+
+/// The string in `Some("..")`; `None` for `None` or anything else.
+fn some_string(value: &str) -> Option<String> {
+    let mut r = Reader { text: value, at: 0 };
+    if r.ident().ok()? != "Some" || !r.eat('(') {
+        return None;
+    }
+    let s = r.string().ok()?;
+    r.eat(')').then_some(s)
 }
 
 /// The entries, and where the map's closing brace is.
 fn parse(text: &str) -> Result<(Vec<Entry>, usize), Unreadable> {
+    parse_map(text).map(|(entries, _, close)| (entries, close))
+}
+
+/// The entries, where the map's opening brace ends, and where its closing
+/// brace is.
+fn parse_map(text: &str) -> Result<(Vec<Entry>, usize, usize), Unreadable> {
     let mut r = Reader { text, at: 0 };
     r.expect('{')?;
+    let open = r.at;
     let mut entries = Vec::new();
     loop {
         r.skip();
         if r.peek() == Some('}') {
             break;
         }
-        let (modifiers, key) = r.binding()?;
+        // Back over the white space only, so a comment before it stays.
+        let start = text[..r.at].trim_end().len();
+        let (modifiers, key, description) = r.binding()?;
         r.expect(':')?;
         let action = r.value()?.to_string();
+        let mut end = r.at;
+        let comma = r.eat(',');
+        if comma {
+            end = r.at;
+        }
         entries.push(Entry {
             modifiers,
             key,
             action,
+            description,
+            span: (start, end),
         });
-        if !r.eat(',') {
+        if !comma {
             r.skip();
             if r.peek() != Some('}') {
                 return r.err("expected ',' or '}'");
@@ -431,7 +580,7 @@ fn parse(text: &str) -> Result<(Vec<Entry>, usize), Unreadable> {
     if r.at != text.len() {
         return r.err("text after the map");
     }
-    Ok((entries, close))
+    Ok((entries, open, close))
 }
 
 #[cfg(test)]
@@ -602,6 +751,129 @@ mod tests {
         ] {
             assert!(merge(Some(text), &two(), "windup").is_err(), "{text}");
         }
+    }
+
+    fn recording_keys() -> Vec<(Shortcut, &'static str)> {
+        let c = Config::default();
+        vec![
+            (c.video.pause_shortcut.clone(), "--record-pause"),
+            (c.video.shortcut.clone(), "--record-stop"),
+            (
+                Shortcut::new(crate::ShortcutModifiers::NONE, crate::shortcut::ESCAPE),
+                "--record-cancel",
+            ),
+        ]
+    }
+
+    #[test]
+    fn temporary_entries_come_and_go_leaving_the_file_byte_identical() {
+        let windup_bound = merge(Some(SETTINGS), &wanted(&Config::default()), "windup")
+            .unwrap()
+            .0
+            .unwrap();
+        for text in [
+            SETTINGS,
+            "{}",
+            "{\n}\n",
+            "// mine\n{ (modifiers: [Super], key: \"t\"): Spawn(\"cosmic-term\") }  \n",
+            windup_bound.as_str(),
+        ] {
+            let added = add_temporary(Some(text), &recording_keys(), "windup")
+                .unwrap()
+                .unwrap();
+            assert_ne!(added, text);
+            let (entries, _) = parse(&added).unwrap();
+            assert!(entries.iter().any(|e| e.key.as_deref() == Some("Escape")
+                && e.modifiers.is_empty()
+                && runs_windup(&e.action, "--record-cancel")));
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.key.as_deref() == Some("p")
+                        && runs_windup(&e.action, "--record-pause"))
+            );
+            assert_eq!(
+                remove_temporary(&added).unwrap().as_deref(),
+                Some(text),
+                "{text}"
+            );
+            // Nothing tagged: nothing to do.
+            assert_eq!(remove_temporary(text).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn a_temporary_key_never_shadows_one_already_bound() {
+        // Windup's own Video binding already stops a recording on its key.
+        let bound = merge(None, &wanted(&Config::default()), "windup")
+            .unwrap()
+            .0
+            .unwrap();
+        let added = add_temporary(Some(&bound), &recording_keys(), "windup")
+            .unwrap()
+            .unwrap();
+        let (entries, _) = parse(&added).unwrap();
+        let r: Vec<_> = entries
+            .iter()
+            .filter(|e| e.key.as_deref() == Some("r"))
+            .collect();
+        assert_eq!(r.len(), 1);
+        assert!(runs_windup(&r[0].action, "--record"));
+        assert_eq!(remove_temporary(&added).unwrap().as_deref(), Some(&*bound));
+    }
+
+    #[test]
+    fn a_missing_file_gets_an_empty_map_back() {
+        let added = add_temporary(None, &recording_keys(), "windup")
+            .unwrap()
+            .unwrap();
+        assert_eq!(parse(&added).unwrap().0.len(), 3);
+        assert_eq!(remove_temporary(&added).unwrap().as_deref(), Some("{\n}\n"));
+    }
+
+    #[test]
+    fn stale_tagged_entries_are_cleaned_and_the_users_kept() {
+        // A crash left Windup's temporary entries, and COSMIC Settings has
+        // rewritten the file in its own layout since.
+        let stale = r#"{
+    (
+        modifiers: [
+            Super,
+        ],
+        key: "t",
+        description: Some("Terminal"),
+    ): Spawn("cosmic-term"),
+    (
+        modifiers: [],
+        key: "Escape",
+        description: Some("Windup while recording: Cancel"),
+    ): Spawn("windup --record-cancel"),
+    (
+        modifiers: [
+            Super,
+            Shift,
+        ],
+        key: "p",
+        description: Some("Windup while recording: Pause"),
+    ): Spawn("/opt/Windup.AppImage --record-pause")
+}"#;
+        let cleaned = remove_temporary(stale).unwrap().unwrap();
+        let (entries, _) = parse(&cleaned).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "Spawn(\"cosmic-term\")");
+        assert!(cleaned.starts_with(&SETTINGS[..SETTINGS.len() - 1]));
+        assert_eq!(remove_temporary(&cleaned).unwrap(), None);
+    }
+
+    #[test]
+    fn the_users_own_windup_entries_are_never_removed() {
+        // Same command, but not tagged: the user's.
+        let text = r#"{
+    (modifiers: [], key: "Escape", description: Some("Mine")): Spawn("windup --record-cancel"),
+    (modifiers: [Super], key: "x", description: Some("Windup while recording: Cancel")): Spawn("other-tool"),
+}"#;
+        assert_eq!(remove_temporary(text).unwrap(), None);
+        assert!(remove_temporary("{ oops }").is_err());
     }
 
     #[test]

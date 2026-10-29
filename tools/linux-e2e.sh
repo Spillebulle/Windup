@@ -18,7 +18,8 @@
 # output) and that `windup --screenshot` opens an overlay Escape closes. The
 # recording cases check a `windup --record-test` file's size and length, and
 # a recording made through `windup --record` and `--record-stop`, with
-# ffprobe, which (like ffmpeg) must sit next to the binary:
+# ffprobe, and that Escape throws a recording away on X11. ffprobe (like
+# ffmpeg) must sit next to the binary:
 # `tools/fetch-ffmpeg.sh linux64 <bin-dir> --with-ffprobe`.
 # Screenshots and logs go to the artefact directory.
 
@@ -420,6 +421,63 @@ sway_record_live() {
     rm -rf "$videos"/Windup
 }
 
+# Esc cancels a recording from anywhere: on X11 the recording's keys are
+# grabbed from its start to its end. Super+Shift+R (the Video default) opens
+# the launcher in Video, Ctrl+A takes the whole screen and Enter records it;
+# Escape, pressed with the recorded screen in front, must throw the recording
+# away and leave no file in the Videos folder.
+x11_record_cancel() {
+    local videos=$home/Videos log=$art/x11-windup.log
+    mkdir -p "$videos" "$XDG_CONFIG_HOME"
+    echo "XDG_VIDEOS_DIR=\"$videos\"" >"$XDG_CONFIG_HOME/user-dirs.dirs"
+    export XDG_VIDEOS_DIR=$videos
+    if ! wait_for 600 test -s "$XDG_CONFIG_HOME/windup/encoders.json"; then
+        bad "x11: the encoder probe did not finish; no recording case"
+        return
+    fi
+    xdotool key super+shift+r
+    sleep 2
+    xdotool key ctrl+a
+    sleep 0.4
+    xdotool key Return
+    if wait_for 150 grep -q "recording: started" "$log"; then
+        ok "x11: Super+Shift+R and Enter started a recording"
+    else
+        bad "x11: Super+Shift+R did not end in a recording"
+        grep -E "capture|recording" "$log"
+        return
+    fi
+    if grep -q "recording keys bound" "$log"; then
+        ok "x11: the recording's keys were grabbed"
+    else
+        bad "x11: the recording's keys were not grabbed"
+    fi
+    sleep 1.5
+    xdotool key Escape
+    if wait_for 150 grep -q "recording: cancelled" "$log" &&
+        wait_for 150 grep -q "recording: over (None)" "$log"; then
+        ok "x11: Escape cancelled the recording"
+    else
+        bad "x11: Escape did not cancel the recording"
+        grep -E "recording" "$log"
+        return
+    fi
+    if wait_for 50 grep -q "recording keys released" "$log"; then
+        ok "x11: the recording's keys were let go"
+    else
+        bad "x11: the recording's keys are still grabbed"
+    fi
+    if [ -z "$(ls -A "$videos"/Windup 2>/dev/null)" ]; then
+        ok "x11: the cancelled recording left no file"
+    else
+        bad "x11: the cancelled recording left $(ls "$videos"/Windup)"
+    fi
+    # Put the notice away.
+    xdotool key Escape
+    sleep 0.4
+    rm -rf "$videos"/Windup
+}
+
 wayland_session() {
     echo "== Wayland (headless sway)"
     fresh_home
@@ -788,6 +846,8 @@ x11_session() {
     else
         bad "x11: paste-plain gave '$got', wanted 'xplain-$$'"
     fi
+
+    x11_record_cancel
 
     # Started in the background, the window is hidden; `windup` shows it,
     # closing it hides it again without stopping Windup, and it comes back.

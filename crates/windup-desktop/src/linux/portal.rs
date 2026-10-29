@@ -7,6 +7,10 @@
 //! Both ask the user once. The RemoteDesktop grant is kept with a restore
 //! token in the config directory, so the question is not asked again at the
 //! next login on desktops that support persisting it.
+//!
+//! A recording's keys (pause, stop, Esc) are a second GlobalShortcuts
+//! session, open only while the recording runs ([`recording_shortcuts`]):
+//! Esc must not be taken from every app the rest of the time.
 
 use crate::capture::split::split_desktop;
 use crate::capture::{CaptureError, dbus_absent};
@@ -16,8 +20,11 @@ use ashpd::desktop::PersistMode;
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use ashpd::desktop::remote_desktop::{DeviceType, KeyState, RemoteDesktop};
 use futures_util::StreamExt;
-use std::sync::Mutex;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 use std::time::Duration;
 use windup_core::Config;
 use windup_core::Shortcut;
@@ -62,38 +69,218 @@ pub fn start_shortcuts(plan: &Plan, config: &Config) {
     }
 }
 
-async fn shortcuts(bindings: &[(Shortcut, Action)]) -> ashpd::Result<()> {
-    let portal = GlobalShortcuts::new().await?;
-    let session = portal.create_session().await?;
-    let wanted: Vec<NewShortcut> = bindings
+/// The portal's shortcuts for `bindings`, each with the id of the command it
+/// runs and the key it would like.
+fn new_shortcuts(
+    bindings: &[(Shortcut, Action)],
+    description: impl Fn(Action) -> String,
+) -> Vec<NewShortcut> {
+    bindings
         .iter()
         .map(|(shortcut, action)| {
             let new = NewShortcut::new(
                 Command::for_action(*action).as_str(),
-                action.tool().display_name(),
+                description(*action).as_str(),
             );
             match portal_trigger(shortcut) {
                 Some(trigger) => new.preferred_trigger(trigger.as_str()),
                 None => new,
             }
         })
-        .collect();
+        .collect()
+}
+
+/// Hands an activated shortcut to our own socket, so a portal shortcut is
+/// handled exactly like a desktop shortcut running `windup --popup`. Every
+/// session hears every session's activations, so each passes on only the
+/// commands it bound.
+fn deliver(id: &str, own: &[Command]) {
+    if let Some(command) = Command::parse(id)
+        && own.contains(&command)
+        && let Err(e) = super::ipc::send(command)
+    {
+        log::warn!("portal shortcut not delivered: {e}");
+    }
+}
+
+async fn shortcuts(bindings: &[(Shortcut, Action)]) -> ashpd::Result<()> {
+    let portal = GlobalShortcuts::new().await?;
+    let session = portal.create_session().await?;
+    let wanted = new_shortcuts(bindings, |a| a.tool().display_name().to_owned());
     portal
         .bind_shortcuts(&session, &wanted, None)
         .await?
         .response()?;
     log::info!("shortcuts bound through the GlobalShortcuts portal");
+    let own: Vec<Command> = bindings
+        .iter()
+        .map(|(_, a)| Command::for_action(*a))
+        .collect();
     let mut activated = portal.receive_activated().await?;
     while let Some(event) = activated.next().await {
-        // Back through our own socket, so a portal shortcut is handled
-        // exactly like a desktop shortcut running `windup --popup`.
-        if let Some(command) = Command::parse(event.shortcut_id())
-            && let Err(e) = super::ipc::send(command)
-        {
-            log::warn!("portal shortcut not delivered: {e}");
-        }
+        deliver(event.shortcut_id(), &own);
     }
     Ok(())
+}
+
+/// Set once, from any thread, and awaited in the portal thread.
+#[derive(Default)]
+struct Ending {
+    done: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl Ending {
+    fn end(&self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(w) = self.waker.lock().ok().and_then(|mut w| w.take()) {
+            w.wake();
+        }
+    }
+
+    async fn wait(&self) {
+        std::future::poll_fn(|cx| {
+            if self.done.load(Ordering::SeqCst) {
+                return Poll::Ready(());
+            }
+            if let Ok(mut w) = self.waker.lock() {
+                *w = Some(cx.waker().clone());
+            }
+            // Looked at again, in case it ended before the waker was in.
+            if self.done.load(Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// `f`'s output, or `None` once this has ended.
+    async fn or<T>(&self, f: impl Future<Output = T>) -> Option<T> {
+        use futures_util::future::{Either, select};
+        let f = std::pin::pin!(f);
+        let ended = std::pin::pin!(self.wait());
+        match select(f, ended).await {
+            Either::Left((t, _)) => Some(t),
+            Either::Right(_) => None,
+        }
+    }
+}
+
+/// A recording's keys through the GlobalShortcuts portal, bound from the
+/// recording's start until this is dropped at its end, when the session is
+/// closed. A portal that is missing or refuses leaves the recording to its
+/// bar and the commands; that is logged, nothing more.
+pub struct RecordingShortcuts {
+    ending: Arc<Ending>,
+}
+
+impl Drop for RecordingShortcuts {
+    fn drop(&mut self) {
+        self.ending.end();
+    }
+}
+
+/// Opens the recording's session with `bindings` (the ids `record-pause`,
+/// `record-stop` and `record-cancel`).
+pub fn recording_shortcuts(bindings: Vec<(Shortcut, Action)>) -> RecordingShortcuts {
+    let ending = Arc::new(Ending::default());
+    let theirs = Arc::clone(&ending);
+    let spawned = std::thread::Builder::new()
+        .name("portal-recording-keys".into())
+        .spawn(move || {
+            if let Err(e) = pollster::block_on(recording_session(&bindings, &theirs)) {
+                log::info!(
+                    "the recording's keys are not bound through the GlobalShortcuts portal ({e}); the bar and `windup --record-cancel` still work"
+                );
+            }
+        });
+    if let Err(e) = spawned {
+        log::warn!("could not start the recording keys thread: {e}");
+    }
+    RecordingShortcuts { ending }
+}
+
+async fn recording_session(bindings: &[(Shortcut, Action)], ending: &Ending) -> ashpd::Result<()> {
+    let portal = GlobalShortcuts::new().await?;
+    let Some(session) = ending.or(portal.create_session()).await.transpose()? else {
+        return Ok(());
+    };
+    let result = async {
+        let wanted = new_shortcuts(bindings, |a| {
+            match a {
+                Action::RecordPause => "Pause or resume the recording",
+                Action::RecordStop => "Stop the recording",
+                Action::RecordCancel => "Cancel the recording",
+                other => other.tool().display_name(),
+            }
+            .to_owned()
+        });
+        // GNOME may ask the user here; a recording over before the answer
+        // stops waiting for it.
+        let bound = ending
+            .or(async {
+                portal
+                    .bind_shortcuts(&session, &wanted, None)
+                    .await?
+                    .response()
+            })
+            .await
+            .transpose()?;
+        if bound.is_none() {
+            return ashpd::Result::Ok(());
+        }
+        log::info!("the recording's keys are bound through the GlobalShortcuts portal");
+        let own: Vec<Command> = bindings
+            .iter()
+            .map(|(_, a)| Command::for_action(*a))
+            .collect();
+        let mut activated = portal.receive_activated().await?;
+        while let Some(Some(event)) = ending.or(activated.next()).await {
+            deliver(event.shortcut_id(), &own);
+        }
+        ashpd::Result::Ok(())
+    }
+    .await;
+    if let Err(e) = session.close().await {
+        log::debug!("the recording's shortcuts session did not close: {e}");
+    }
+    log::info!("the recording's keys are released from the GlobalShortcuts portal");
+    result
+}
+
+/// How long `global_shortcuts_available` waits for the portal.
+const SHORTCUTS_PROBE_WAIT: Duration = Duration::from_millis(500);
+
+/// Whether the GlobalShortcuts portal is there (its `version` reads). Asks
+/// nothing of the user.
+pub fn global_shortcuts_available() -> bool {
+    let (tx, rx) = channel();
+    let spawned = std::thread::Builder::new()
+        .name("portal-shortcuts-probe".into())
+        .spawn(move || {
+            let version = pollster::block_on(async {
+                let portal = GlobalShortcuts::new().await?;
+                ashpd::Result::Ok(portal.get_property::<u32>("version").await.is_ok())
+            });
+            let _ = tx.send(version);
+        });
+    if let Err(e) = spawned {
+        log::debug!("could not start the shortcuts probe: {e}");
+        return false;
+    }
+    match rx.recv_timeout(SHORTCUTS_PROBE_WAIT) {
+        Ok(Ok(there)) => there,
+        Ok(Err(e)) => {
+            log::debug!("no GlobalShortcuts portal: {e}");
+            false
+        }
+        Err(_) => {
+            log::debug!("the GlobalShortcuts portal did not answer");
+            false
+        }
+    }
 }
 
 /// Presses Ctrl+V through the RemoteDesktop portal.

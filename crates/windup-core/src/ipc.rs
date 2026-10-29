@@ -22,8 +22,12 @@ pub enum Command {
     Screenshot,
     /// Start or stop a screen recording.
     Record,
+    /// Pause the screen recording, or resume it, if one runs.
+    RecordPause,
     /// Stop the screen recording, if one runs.
     RecordStop,
+    /// Cancel the screen recording and throw it away, if one runs.
+    RecordCancel,
     /// Bring up the settings window.
     Show,
     /// Re-read `config.json`; sent by the settings window after it saves.
@@ -31,13 +35,15 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 8] = [
+    pub const ALL: [Command; 10] = [
         Command::Popup,
         Command::PastePlain,
         Command::Capture,
         Command::Screenshot,
         Command::Record,
+        Command::RecordPause,
         Command::RecordStop,
+        Command::RecordCancel,
         Command::Show,
         Command::Reload,
     ];
@@ -50,7 +56,9 @@ impl Command {
             Command::Capture => "capture",
             Command::Screenshot => "screenshot",
             Command::Record => "record",
+            Command::RecordPause => "record-pause",
             Command::RecordStop => "record-stop",
+            Command::RecordCancel => "record-cancel",
             Command::Show => "show",
             Command::Reload => "reload",
         }
@@ -63,10 +71,11 @@ impl Command {
             Action::PastePlain => Command::PastePlain,
             Action::CaptureLauncher => Command::Capture,
             Action::Screenshot => Command::Screenshot,
-            // The recording keys are only grabbed while recording, and only
-            // where Windup can grab keys at all; a command stands in for them.
-            Action::Video | Action::RecordPause | Action::RecordCancel => Command::Record,
+            Action::Video => Command::Record,
+            // The keys that are live only while a recording runs.
+            Action::RecordPause => Command::RecordPause,
             Action::RecordStop => Command::RecordStop,
+            Action::RecordCancel => Command::RecordCancel,
         }
     }
 
@@ -122,7 +131,9 @@ Usage: windup [OPTION]
   --capture       Open the capture launcher
   --screenshot    Take a screenshot
   --record        Start or stop a screen recording
+  --record-pause  Pause or resume the screen recording
   --record-stop   Stop the screen recording
+  --record-cancel Cancel the screen recording and discard it
   --background    Start without opening the window
   --help          Show this text
 
@@ -240,7 +251,9 @@ where
             "--capture" => Launch::Send(Command::Capture),
             "--screenshot" => Launch::Send(Command::Screenshot),
             "--record" => Launch::Send(Command::Record),
+            "--record-pause" => Launch::Send(Command::RecordPause),
             "--record-stop" => Launch::Send(Command::RecordStop),
+            "--record-cancel" => Launch::Send(Command::RecordCancel),
             "--show" => Launch::Send(Command::Show),
             "--background" => Launch::Background,
             "--settings" => Launch::Settings,
@@ -516,6 +529,32 @@ mod tests {
             Some(Command::RecordStop)
         );
         assert!(USAGE.contains("--record-stop"));
+    }
+
+    #[test]
+    fn the_recording_commands_round_trip_with_their_flags() {
+        for (flag, command, word) in [
+            ("--record", Command::Record, "record"),
+            ("--record-pause", Command::RecordPause, "record-pause"),
+            ("--record-stop", Command::RecordStop, "record-stop"),
+            ("--record-cancel", Command::RecordCancel, "record-cancel"),
+        ] {
+            assert_eq!(parse_args([flag]), Launch::Send(command), "{flag}");
+            assert_eq!(command.as_str(), word);
+            assert_eq!(command.encode(), format!("{word}\n"));
+            assert_eq!(Command::parse(&command.encode()), Some(command));
+            assert!(Command::ALL.contains(&command), "{word}");
+            assert!(USAGE.contains(flag), "{flag}");
+        }
+        // Each recording key reaches the recording as its own command.
+        assert_eq!(
+            Command::for_action(Action::RecordPause),
+            Command::RecordPause
+        );
+        assert_eq!(
+            Command::for_action(Action::RecordCancel),
+            Command::RecordCancel
+        );
     }
 
     #[test]

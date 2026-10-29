@@ -74,6 +74,23 @@ pub fn recording_bindings(config: &Config) -> Vec<(Shortcut, Action)> {
     ]
 }
 
+/// What is bound right now: the tools' keys, plus while `recording` the
+/// recording's own, which come first and take a key a tool shares with them
+/// (the Video key is stop for as long as the recording runs).
+pub fn live_bindings(config: &Config, recording: bool) -> Vec<(Shortcut, Action)> {
+    let tools = bindings(config);
+    if !recording {
+        return tools;
+    }
+    let mut out = recording_bindings(config);
+    for (shortcut, action) in tools {
+        if out.iter().all(|(s, _)| *s != shortcut) {
+            out.push((shortcut, action));
+        }
+    }
+    out
+}
+
 /// Enabled tools whose shortcut an earlier enabled tool already has.
 pub fn clashes(config: &Config) -> Vec<ToolId> {
     let mut seen: Vec<&Shortcut> = Vec::new();
@@ -239,6 +256,23 @@ mod tests {
         assert!(b.contains(&(s(ShortcutModifiers::NONE, "ESCAPE"), Action::RecordCancel)));
         assert_eq!(windows_vk("ESCAPE"), Some(0x1B));
         assert_eq!(xkb_keysym_name("ESCAPE"), Some("Escape"));
+    }
+
+    #[test]
+    fn while_recording_the_recording_keys_win_and_the_rest_stay() {
+        let c = Config::default();
+        assert_eq!(live_bindings(&c, false), bindings(&c));
+        let live = live_bindings(&c, true);
+        let video = c.video.shortcut.clone();
+        // The Video key is there once, as stop.
+        assert_eq!(live.iter().filter(|(s, _)| *s == video).count(), 1);
+        assert!(live.contains(&(video, Action::RecordStop)));
+        for b in recording_bindings(&c) {
+            assert!(live.contains(&b), "{b:?}");
+        }
+        // The other tools keep their keys.
+        assert!(live.contains(&(Shortcut::ctrl_shift_s(), Action::Screenshot)));
+        assert_eq!(live.len(), bindings(&c).len() - 1 + 3);
     }
 
     #[test]

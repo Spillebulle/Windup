@@ -17,6 +17,8 @@ pub(crate) const NO_SYSTEM_SOUND: &str =
     "Computer sound could not be opened, so the recording has no computer sound.";
 pub(crate) const NOT_SAVED: &str = "The recording could not be saved.";
 pub(crate) const NOT_STARTED: &str = "The recording could not start.";
+/// Esc during a recording: it is thrown away.
+pub(crate) const CANCELLED: &str = "The recording was cancelled.";
 pub(crate) const TOO_SMALL: &str = "The area is too small to record.";
 pub(crate) const NO_FOLDER: &str = "There is no Videos folder to save the recording in.";
 /// The notice's button when there is a file to show.

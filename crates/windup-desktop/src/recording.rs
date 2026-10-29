@@ -176,6 +176,20 @@ impl WindupApp {
         self.close_bar();
     }
 
+    /// The pause key: pauses a running recording, or resumes it.
+    pub(crate) fn pause_recording(&mut self) {
+        if let Some(paused) = self.rec.live.toggle_pause() {
+            log::info!("recording: {}", if paused { "pausing" } else { "resuming" });
+        }
+    }
+
+    /// Esc: cancels the recording and discards it. The bar goes at once;
+    /// the notice says so once the recording is gone.
+    pub(crate) fn cancel_recording(&mut self) {
+        self.rec.live.cancel();
+        self.close_bar();
+    }
+
     /// Starts, polls and draws the recording. Every frame, from `update`,
     /// before the capture overlays: a Record they gave this frame starts on
     /// the next, once they are hidden.
@@ -201,6 +215,11 @@ impl WindupApp {
             }
         }
         self.draw_bar(ctx, p, mode);
+        // Pause, stop and Esc are bound from the start until it is stopped
+        // or cancelled.
+        if let Some(listener) = &self.hotkey_listener {
+            listener.set_recording(self.rec.live.keys_wanted(), &self.config);
+        }
         if self.rec.live.busy() {
             ctx.request_repaint_after(POLL);
         }

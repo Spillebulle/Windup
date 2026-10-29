@@ -18,12 +18,17 @@
 //! the gate kept shut until it is over. The layer host shows the recording
 //! bar on the Wayland thread (`wayland::recbar`); the window host shows none,
 //! and the Video hotkey (or `windup --record-stop`) stops it.
+//!
+//! While it runs, its keys (pause, stop, Esc) are bound where the desktop
+//! lets Windup bind them (`platform::recording_keys`): temporary entries in
+//! COSMIC's shortcuts, or a second GlobalShortcuts portal session. They run
+//! `windup --record-pause` and so on, like every Wayland hotkey.
 
 use super::wayland::{CaptureEnd, CaptureSetup, NoticeSetup, RecBarSetup, Service, Shared};
-use super::{Background, copy_image, popup_setup, portal, window};
+use super::{Background, copy_image, cosmic, popup_setup, portal, window};
 use crate::capture::gate::{Gate, Reply};
 use crate::capture::{CaptureError, finish, grab_all, window_rects};
-use crate::platform::{Host, PasteVia, Plan, Watch};
+use crate::platform::{Host, PasteVia, Plan, RecordingKeys, Watch, recording_keys};
 use crate::video::availability;
 use crate::video::live::{Ask, Live, LiveEvent};
 use std::path::PathBuf;
@@ -66,6 +71,20 @@ pub(super) struct Capturing {
     rec_rect: Option<DRect>,
     /// The reduced-motion answer, asked as the recording starts.
     motion: Option<Receiver<bool>>,
+    /// The recording's keys, while they are meant to be bound.
+    keys: Option<BoundKeys>,
+}
+
+/// How a recording's keys were bound, so they can be let go at its end.
+enum BoundKeys {
+    Cosmic,
+    /// Closed when dropped.
+    Portal {
+        _session: portal::RecordingShortcuts,
+    },
+    /// Nothing global here (Sway, GNOME without the portal): the bar and
+    /// the commands.
+    Nothing,
 }
 
 impl Default for Capturing {
@@ -80,6 +99,7 @@ impl Default for Capturing {
             live: Live::default(),
             rec_rect: None,
             motion: None,
+            keys: None,
         }
     }
 }
@@ -321,6 +341,60 @@ impl Background {
         self.close_recbar();
     }
 
+    /// The pause key (`windup --record-pause`): pauses a running recording,
+    /// or resumes it.
+    pub(super) fn pause_recording(&mut self) {
+        if let Some(paused) = self.capture.live.toggle_pause() {
+            log::info!("recording: {}", if paused { "pausing" } else { "resuming" });
+        }
+    }
+
+    /// Esc (`windup --record-cancel`): cancels the recording and discards
+    /// it. The bar goes at once; the notice says so once it is gone.
+    pub(super) fn cancel_recording(&mut self) {
+        self.capture.live.cancel();
+        self.close_recbar();
+    }
+
+    /// Binds the recording's keys when it starts and lets them go when it is
+    /// stopped or cancelled; every tick.
+    fn sync_recording_keys(&mut self, config: &Config) {
+        let wanted = self.capture.live.keys_wanted();
+        if wanted == self.capture.keys.is_some() {
+            return;
+        }
+        if !wanted {
+            if let Some(BoundKeys::Cosmic) = self.capture.keys.take() {
+                cosmic::remove_temporary();
+            }
+            // A portal session closes as it is dropped.
+            return;
+        }
+        let bindings = windup_core::hotkeys::recording_bindings(config);
+        // The portal is simply tried: where it is missing it says so.
+        let how = recording_keys(self.runtime.plan.hotkeys, cosmic::is_cosmic(), true);
+        self.capture.keys = Some(match how {
+            RecordingKeys::Cosmic => {
+                let keys: Vec<(windup_core::Shortcut, String)> = bindings
+                    .into_iter()
+                    .map(|(s, a)| (s, format!("--{}", Command::for_action(a).as_str())))
+                    .collect();
+                let keys: Vec<(windup_core::Shortcut, &str)> =
+                    keys.iter().map(|(s, a)| (s.clone(), a.as_str())).collect();
+                cosmic::add_temporary(&keys);
+                // Removed at the end whether or not anything was added: a
+                // stale entry may have been.
+                BoundKeys::Cosmic
+            }
+            RecordingKeys::Portal => BoundKeys::Portal {
+                _session: portal::recording_shortcuts(bindings),
+            },
+            RecordingKeys::Hook | RecordingKeys::XGrab | RecordingKeys::BarOnly => {
+                BoundKeys::Nothing
+            }
+        });
+    }
+
     /// Pause, Resume or Stop from the bar.
     pub(super) fn recbar_action(&mut self, action: RecBarAction) {
         match (action, self.capture.live.running()) {
@@ -360,6 +434,7 @@ impl Background {
                 }
             }
         }
+        self.sync_recording_keys(config);
     }
 
     /// The bar, where this desktop can keep it out of the recording.

@@ -13,6 +13,6 @@ pub mod widgets;
 
 pub use icons::Icon;
 pub use popup::{FocusedButton, PopupAction, PopupView};
-pub use settings::{HotkeyHint, SettingsView};
+pub use settings::{ESC_ONLY_ON_BAR, HotkeyHint, SettingsView};
 pub use theme::{Mode, Palette, apply_theme, install_fonts, metrics, strong, text};
 pub use themelib::CustomTheme;

@@ -4,13 +4,17 @@
 //! On X11 and macOS, uses the global-hotkey crate. On Wayland nothing can grab
 //! a key, so the events come from the socket instead (`linux::ipc`), sent
 //! through [`HotkeyListener::sender`].
+//!
+//! While a recording runs, its own keys are live too (pause, stop and Esc,
+//! `hotkeys::recording_bindings`), and only then:
+//! [`HotkeyListener::set_recording`].
 
 use crate::platform::{HotkeysVia, Plan, Target};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
-use windup_core::hotkeys::{Action, bindings, windows_vk};
+use windup_core::hotkeys::{Action, live_bindings, windows_vk};
 use windup_core::{Config, Shortcut, ShortcutModifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,12 +31,16 @@ pub enum HotkeyEvent {
     Screenshot {
         target: Target,
     },
+    /// The Video key: starts a recording, or stops the one that runs.
     Record {
         target: Target,
     },
+    /// Pause or resume the recording (`windup --record-pause`).
+    RecordPause,
     /// Stop the recording (`windup --record-stop`).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     RecordStop,
+    /// Cancel the recording and discard it: Esc (`windup --record-cancel`).
+    RecordCancel,
     /// Bring the settings window up (`windup` run a second time).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Show,
@@ -48,11 +56,10 @@ impl HotkeyEvent {
             Action::PastePlain => Self::PastePlainText { target },
             Action::CaptureLauncher => Self::Capture { target },
             Action::Screenshot => Self::Screenshot { target },
-            // Only Video starts a recording; the rest are keys for the
-            // recording itself, which has no home until it exists.
-            Action::Video | Action::RecordPause | Action::RecordStop | Action::RecordCancel => {
-                Self::Record { target }
-            }
+            Action::Video => Self::Record { target },
+            Action::RecordPause => Self::RecordPause,
+            Action::RecordStop => Self::RecordStop,
+            Action::RecordCancel => Self::RecordCancel,
         }
     }
 }
@@ -64,6 +71,8 @@ pub struct HotkeyListener {
     /// New binding lists for the grab thread (X11 and macOS).
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     rebind_tx: Option<Sender<Vec<(Shortcut, Action)>>>,
+    /// A recording runs and its keys are bound (the hook reads this).
+    recording: Arc<AtomicBool>,
     _running: Arc<AtomicBool>,
 }
 
@@ -71,15 +80,16 @@ impl HotkeyListener {
     pub fn new(plan: &Plan, config: &Config) -> Self {
         let (tx, rx) = channel();
         let running = Arc::new(AtomicBool::new(true));
+        let recording = Arc::new(AtomicBool::new(false));
         #[allow(unused_mut)]
         let mut rebind_tx = None;
-        let initial = bindings(config);
+        let initial = live_bindings(config, false);
 
         match plan.hotkeys {
             #[cfg(target_os = "windows")]
             HotkeysVia::Hook => {
-                set_windows_table(&initial);
-                start_windows_hook(tx.clone(), Arc::clone(&running));
+                set_windows_tables(config);
+                start_windows_hook(tx.clone(), Arc::clone(&running), Arc::clone(&recording));
             }
             #[cfg(not(target_os = "windows"))]
             HotkeysVia::XGrab => {
@@ -97,17 +107,32 @@ impl HotkeyListener {
             rx,
             tx,
             rebind_tx,
+            recording,
             _running: running,
         }
     }
 
     /// Replace the active shortcuts with what the config now says.
     pub fn rebind(&self, config: &Config) {
-        let list = bindings(config);
         #[cfg(target_os = "windows")]
-        set_windows_table(&list);
+        set_windows_tables(config);
         if let Some(tx) = &self.rebind_tx {
-            let _ = tx.send(list);
+            let recording = self.recording.load(Ordering::SeqCst);
+            let _ = tx.send(live_bindings(config, recording));
+        }
+    }
+
+    /// Binds the recording's keys (pause, stop, Esc) while `on`, and lets
+    /// them go again: the Windows hook matches them only while the flag is
+    /// set, and X11 grabs them for that long. On Wayland the keys are
+    /// commands, which the background host binds.
+    pub fn set_recording(&self, on: bool, config: &Config) {
+        if self.recording.swap(on, Ordering::SeqCst) == on {
+            return;
+        }
+        log::info!("recording keys {}", if on { "bound" } else { "released" });
+        if let Some(tx) = &self.rebind_tx {
+            let _ = tx.send(live_bindings(config, on));
         }
     }
 
@@ -130,6 +155,23 @@ fn windows_table(bindings: &[(Shortcut, Action)]) -> Vec<(u16, ShortcutModifiers
         .iter()
         .filter_map(|(s, a)| Some((windows_vk(&s.key)?, s.modifiers, *a)))
         .collect()
+}
+
+/// What a key press does, as the hook asks it: while `recording`, the
+/// recording's keys first (`recording_table`, Esc among them, which is why
+/// it is looked at only then), then the tools'.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn match_key(
+    table: &[(u16, ShortcutModifiers, Action)],
+    recording_table: &[(u16, ShortcutModifiers, Action)],
+    recording: bool,
+    vk: u16,
+    held: ShortcutModifiers,
+) -> Option<Action> {
+    recording
+        .then(|| match_binding(recording_table, vk, held))
+        .flatten()
+        .or_else(|| match_binding(table, vk, held))
 }
 
 /// What a key press does: the binding for this key whose modifiers are
@@ -269,6 +311,7 @@ fn code_for(key: &str) -> Option<global_hotkey::hotkey::Code> {
         windup_core::shortcut::PRINT_SCREEN => Code::PrintScreen,
         windup_core::shortcut::SCROLL_LOCK => Code::ScrollLock,
         windup_core::shortcut::PAUSE => Code::Pause,
+        windup_core::shortcut::ESCAPE => Code::Escape,
         "SPACE" => Code::Space,
         "ENTER" => Code::Enter,
         "TAB" => Code::Tab,
@@ -290,6 +333,16 @@ static EVENT_SENDER: std::sync::Mutex<Option<Sender<HotkeyEvent>>> = std::sync::
 static BINDINGS: std::sync::RwLock<Vec<(u16, ShortcutModifiers, Action)>> =
     std::sync::RwLock::new(Vec::new());
 
+/// The recording's keys, which the hook matches only while `RECORDING` says
+/// a recording runs.
+#[cfg(target_os = "windows")]
+static RECORDING_BINDINGS: std::sync::RwLock<Vec<(u16, ShortcutModifiers, Action)>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// `HotkeyListener::recording`, for the hook, which is a plain function.
+#[cfg(target_os = "windows")]
+static RECORDING: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+
 #[cfg(target_os = "windows")]
 thread_local! {
     /// Keys whose press the hook swallowed, until their release (`key_verdict`).
@@ -297,15 +350,23 @@ thread_local! {
 }
 
 #[cfg(target_os = "windows")]
-fn set_windows_table(list: &[(Shortcut, Action)]) {
+fn set_windows_tables(config: &Config) {
     if let Ok(mut table) = BINDINGS.write() {
-        *table = windows_table(list);
+        *table = windows_table(&live_bindings(config, false));
+    }
+    if let Ok(mut table) = RECORDING_BINDINGS.write() {
+        *table = windows_table(&windup_core::hotkeys::recording_bindings(config));
     }
 }
 
 #[cfg(target_os = "windows")]
-fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
+fn start_windows_hook(
+    tx: Sender<HotkeyEvent>,
+    running: Arc<AtomicBool>,
+    recording: Arc<AtomicBool>,
+) {
     *EVENT_SENDER.lock().unwrap() = Some(tx);
+    let _ = RECORDING.set(recording);
 
     thread::spawn(move || {
         use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -352,10 +413,12 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                         };
 
                         // try_read: the hook must never wait on a lock.
-                        matched = BINDINGS
-                            .try_read()
-                            .ok()
-                            .and_then(|table| match_binding(&table, vk, held));
+                        let recording = RECORDING.get().is_some_and(|r| r.load(Ordering::Relaxed));
+                        matched = match (BINDINGS.try_read(), RECORDING_BINDINGS.try_read()) {
+                            (Ok(table), Ok(rec)) => match_key(&table, &rec, recording, vk, held),
+                            (Ok(table), Err(_)) => match_binding(&table, vk, held),
+                            _ => None,
+                        };
                     }
 
                     // Only the hook thread runs this, so a thread-local needs no lock.
@@ -500,7 +563,7 @@ fn focused_window() -> Target {
 mod tests {
     use super::*;
     use windup_core::ToolId;
-    use windup_core::hotkeys::bindings;
+    use windup_core::hotkeys::{bindings, recording_bindings};
     use windup_core::{Config, Shortcut, ShortcutModifiers};
 
     const WIN: ShortcutModifiers = ShortcutModifiers {
@@ -576,6 +639,67 @@ mod tests {
         assert_eq!(match_binding(&t, 0x56, WIN_SHIFT), Some(Action::PastePlain));
     }
 
+    const ESC: u16 = 0x1B;
+
+    #[test]
+    fn esc_is_matched_only_while_recording() {
+        let c = Config::default();
+        let t = default_table();
+        let rec = windows_table(&recording_bindings(&c));
+        let none = ShortcutModifiers::NONE;
+        // Outside a recording Esc is the focused app's.
+        assert_eq!(match_key(&t, &rec, false, ESC, none), None);
+        assert_eq!(
+            match_key(&t, &rec, true, ESC, none),
+            Some(Action::RecordCancel)
+        );
+        // Only bare Esc: Ctrl+Shift+Esc is still Task Manager's.
+        assert_eq!(
+            match_key(&t, &rec, true, ESC, ShortcutModifiers::CTRL_SHIFT),
+            None
+        );
+        // Pause is live only while recording; the Video key stops.
+        assert_eq!(match_key(&t, &rec, false, 0x50, WIN_SHIFT), None);
+        assert_eq!(
+            match_key(&t, &rec, true, 0x50, WIN_SHIFT),
+            Some(Action::RecordPause)
+        );
+        assert_eq!(
+            match_key(&t, &rec, false, 0x52, WIN_SHIFT),
+            Some(Action::Video)
+        );
+        assert_eq!(
+            match_key(&t, &rec, true, 0x52, WIN_SHIFT),
+            Some(Action::RecordStop)
+        );
+        // The other tools keep working during a recording.
+        assert_eq!(
+            match_key(&t, &rec, true, 0x56, WIN),
+            Some(Action::ClipboardPopup)
+        );
+    }
+
+    #[test]
+    fn each_recording_key_reaches_the_recording_as_its_own_event() {
+        let t = Target::None;
+        assert_eq!(
+            HotkeyEvent::from_action(Action::Video, t),
+            HotkeyEvent::Record { target: t }
+        );
+        assert_eq!(
+            HotkeyEvent::from_action(Action::RecordPause, t),
+            HotkeyEvent::RecordPause
+        );
+        assert_eq!(
+            HotkeyEvent::from_action(Action::RecordStop, t),
+            HotkeyEvent::RecordStop
+        );
+        assert_eq!(
+            HotkeyEvent::from_action(Action::RecordCancel, t),
+            HotkeyEvent::RecordCancel
+        );
+    }
+
     const PRINT: u16 = 0x2C;
 
     #[test]
@@ -635,6 +759,7 @@ mod tests {
         for key in windup_core::shortcut::UNHEARD_KEYS {
             assert!(code_for(key).is_some(), "{key}");
         }
+        assert!(code_for("ESCAPE").is_some(), "the recording's cancel key");
         assert!(code_for("NOSUCHKEY").is_none());
     }
 }
