@@ -64,14 +64,21 @@ fi
 
 # Extract into a scratch folder, then copy out only what is wanted: the
 # archives hold ffplay too, and nearly 200 MB per executable.
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/ffmpeg.XXXXXX")
+#
+# The scratch folder sits beside the cache, not under /tmp: 7z.exe is a Windows
+# program that cannot read a POSIX temporary path from Git Bash. cygpath
+# (where there is one) turns what we hand it into a path it can read.
+scratch=$(mktemp -d "$cache/extract.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
+native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s
+' "$1"; fi; }
 case "$archive" in
     *.zip)
-        if command -v unzip >/dev/null 2>&1; then
+        # FFMPEG_EXTRACTOR=7z forces the fallback, to test it where unzip exists.
+        if [ "${FFMPEG_EXTRACTOR:-}" != 7z ] && command -v unzip >/dev/null 2>&1; then
             unzip -q "$archive" -d "$scratch"
         else
-            7z x -y -o"$scratch" "$archive" >/dev/null
+            7z x -y -o"$(native "$scratch")" "$(native "$archive")" >/dev/null
         fi ;;
     *.tar.xz) tar -xJf "$archive" -C "$scratch" ;;
     *) echo "do not know how to unpack $archive" >&2; exit 1 ;;

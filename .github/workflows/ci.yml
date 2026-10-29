@@ -75,6 +75,9 @@ jobs:
           sudo apt-get install -y rpm
           cargo build -p windup-desktop
           sh tools/fetch-ffmpeg.sh linux64 target/debug
+          # This runner is the oldest glibc we support: fails if the bundled
+          # build needs a newer one.
+          target/debug/ffmpeg -version | head -n 1
 
       - name: Package
         run: |
@@ -196,6 +199,9 @@ jobs:
       # the cases that inspect what they recorded.
       - name: FFmpeg
         run: sh tools/fetch-ffmpeg.sh linux64 target/debug --with-ffprobe
+
+      - name: FFmpeg starts
+        run: target/debug/ffmpeg -version | head -n 1
 
       - name: Run
         run: bash tools/linux-e2e.sh target/debug/windup all e2e-artefacts
