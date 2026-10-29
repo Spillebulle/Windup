@@ -80,6 +80,7 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
             image,
             name,
             scale: 1.0,
+            refresh_hz: None,
         });
     }
     Ok(DesktopShot { monitors })

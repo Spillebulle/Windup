@@ -708,7 +708,7 @@ fn main() -> eframe::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--record-test") {
         match windup_core::ipc::parse_args(std::env::args().skip(1)) {
             windup_core::ipc::Launch::RecordTest(test) => {
-                std::process::exit(video::run::record_test(&test))
+                std::process::exit(video::test_source::record_test(&test))
             }
             windup_core::ipc::Launch::Unknown(why) => {
                 eprintln!("windup: {why}");

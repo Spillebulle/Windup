@@ -84,6 +84,7 @@ fn session() -> Session {
         image: picture(layout, ppu, &windows),
         name: name.to_string(),
         scale: 1.0,
+        refresh_hz: None,
     })
     .collect();
     Session::new(

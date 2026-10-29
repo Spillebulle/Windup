@@ -164,6 +164,7 @@ impl OutputFacts {
             image,
             name: self.name.clone(),
             scale: 1.0,
+            refresh_hz: None,
         }
     }
 }

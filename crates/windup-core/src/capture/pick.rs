@@ -318,6 +318,7 @@ mod tests {
                 image: img,
                 name: "t".into(),
                 scale: 1.0,
+                refresh_hz: None,
             }],
         }
     }

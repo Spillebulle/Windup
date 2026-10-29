@@ -99,8 +99,8 @@ pub enum Launch {
     /// `--encoders-test`: probe the bundled ffmpeg's encoders, print one line
     /// each, exit. A test aid, so not in `USAGE`.
     EncodersTest,
-    /// `--record-test <file> --seconds N [--area x,y,w,h] [--container ext]`:
-    /// record for N seconds, write the file, exit. A test aid, so not in
+    /// `--record-test <file> --seconds N [--area x,y,w,h] [--container ext]
+    /// [--pattern]`: record the screen (or a test pattern) for N seconds, write the file, exit. A test aid, so not in
     /// `USAGE`.
     RecordTest(RecordTest),
     /// `--help`.
@@ -132,6 +132,8 @@ pub struct RecordTest {
     /// Desktop units: x, y, width, height.
     pub area: Option<(i32, i32, u32, u32)>,
     pub container: Option<Container>,
+    /// Record a generated pattern instead of the screen.
+    pub pattern: bool,
 }
 
 fn parse_record_test(rest: &[String]) -> Launch {
@@ -143,9 +145,20 @@ fn parse_record_test(rest: &[String]) -> Launch {
         seconds: 0,
         area: None,
         container: None,
+        pattern: false,
     };
     let mut seconds = None;
-    while let [flag, value, more @ ..] = opts {
+    loop {
+        if let [flag, more @ ..] = opts
+            && flag == "--pattern"
+        {
+            test.pattern = true;
+            opts = more;
+            continue;
+        }
+        let [flag, value, more @ ..] = opts else {
+            break;
+        };
         match flag.as_str() {
             "--seconds" => match value.parse::<u32>() {
                 Ok(n) if n > 0 => seconds = Some(n),
@@ -332,6 +345,7 @@ mod tests {
                 seconds: 3,
                 area: None,
                 container: None,
+                pattern: false,
             })
         );
         assert_eq!(
@@ -350,8 +364,24 @@ mod tests {
                 seconds: 2,
                 area: Some((-10, 20, 320, 240)),
                 container: Some(Container::WebM),
+                pattern: false,
             })
         );
+        // `--pattern` takes no value, and may come anywhere among the options.
+        assert_eq!(
+            parse_args(["--record-test", "o.mp4", "--pattern", "--seconds", "2"]),
+            Launch::RecordTest(RecordTest {
+                out: PathBuf::from("o.mp4"),
+                seconds: 2,
+                area: None,
+                container: None,
+                pattern: true,
+            })
+        );
+        assert!(matches!(
+            parse_args(["--record-test", "o.mp4", "--seconds", "2", "--pattern", "x"]),
+            Launch::Unknown(_)
+        ));
         for bad in [
             &["--record-test"][..],
             &["--record-test", "o.mp4"],

@@ -10,7 +10,7 @@ use crate::linux::x11::{atom, cardinals, connect};
 use windup_core::capture::geometry::{DRect, DesktopShot, MonitorShot};
 use windup_core::capture::pick::WindowRect;
 use x11rb::connection::Connection;
-use x11rb::protocol::randr::ConnectionExt as _;
+use x11rb::protocol::randr::{ConnectionExt as _, ModeFlag, ModeInfo};
 use x11rb::protocol::xproto::{
     AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, MapState, VisualClass, Window,
 };
@@ -63,7 +63,7 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
     let format = root_format(&conn, screen_num)?;
 
     // RandR's monitors; the whole root when the extension is missing.
-    let mut rects: Vec<(String, i32, i32, u32, u32)> = conn
+    let mut rects: Vec<(String, i32, i32, u32, u32, Option<u32>)> = conn
         .randr_get_monitors(root, true)
         .ok()
         .and_then(|c| c.reply().ok())
@@ -78,6 +78,7 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
                         m.y as i32,
                         m.width as u32,
                         m.height as u32,
+                        monitor_refresh(&conn, root, &m.outputs),
                     )
                 })
                 .collect()
@@ -91,13 +92,14 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
             0,
             s.width_in_pixels as u32,
             s.height_in_pixels as u32,
+            None,
         ));
     }
 
     // One scale for every monitor: X has no per-monitor one.
     let scale = resources(&conn, root).map_or(1.0, |db| xft_scale(&db));
     let mut monitors = Vec::new();
-    for (name, x, y, w, h) in rects {
+    for (name, x, y, w, h, refresh_hz) in rects {
         let reply = conn
             .get_image(
                 ImageFormat::Z_PIXMAP,
@@ -122,9 +124,51 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
             image,
             name,
             scale,
+            refresh_hz,
         });
     }
     Ok(DesktopShot { monitors })
+}
+
+/// Frames per second a RandR mode refreshes at, rounded; `None` for a mode
+/// with no timings. Interlaced modes show half the lines per pass, doublescan
+/// ones twice.
+fn mode_hz(mode: &ModeInfo) -> Option<u32> {
+    let total = u64::from(mode.htotal) * u64::from(mode.vtotal);
+    if total == 0 || mode.dot_clock == 0 {
+        return None;
+    }
+    let mut hz = f64::from(mode.dot_clock) / total as f64;
+    if mode.mode_flags.contains(ModeFlag::INTERLACE) {
+        hz *= 2.0;
+    }
+    if mode.mode_flags.contains(ModeFlag::DOUBLE_SCAN) {
+        hz /= 2.0;
+    }
+    let hz = hz.round() as u32;
+    (hz > 1).then_some(hz)
+}
+
+/// The refresh rate of the mode the monitor's first output is running.
+fn monitor_refresh(conn: &impl Connection, root: Window, outputs: &[u32]) -> Option<u32> {
+    let output = *outputs.first()?;
+    let crtc = conn
+        .randr_get_output_info(output, 0)
+        .ok()?
+        .reply()
+        .ok()?
+        .crtc;
+    let mode = conn.randr_get_crtc_info(crtc, 0).ok()?.reply().ok()?.mode;
+    let resources = conn
+        .randr_get_screen_resources_current(root)
+        .ok()?
+        .reply()
+        .ok()?;
+    resources
+        .modes
+        .iter()
+        .find(|m| m.id == mode)
+        .and_then(mode_hz)
 }
 
 /// The resource database the desktop set on the root window (`xrdb`).
@@ -218,4 +262,35 @@ fn title(conn: &impl Connection, win: Window) -> Option<String> {
         .reply()
         .ok()?;
     Some(String::from_utf8_lossy(&reply.value).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode(dot_clock: u32, htotal: u16, vtotal: u16, flags: u32) -> ModeInfo {
+        ModeInfo {
+            id: 1,
+            width: 1920,
+            height: 1080,
+            dot_clock,
+            hsync_start: 0,
+            hsync_end: 0,
+            htotal,
+            hskew: 0,
+            vsync_start: 0,
+            vsync_end: 0,
+            vtotal,
+            name_len: 0,
+            mode_flags: flags.into(),
+        }
+    }
+
+    #[test]
+    fn a_modes_refresh_comes_from_its_timings() {
+        // 1920x1080 at 60 Hz: 148.5 MHz over 2200 x 1125.
+        assert_eq!(mode_hz(&mode(148_500_000, 2200, 1125, 0)), Some(60));
+        assert_eq!(mode_hz(&mode(0, 2200, 1125, 0)), None);
+        assert_eq!(mode_hz(&mode(148_500_000, 0, 0, 0)), None);
+    }
 }

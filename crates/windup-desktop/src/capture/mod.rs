@@ -18,9 +18,9 @@ pub(crate) mod pixels;
 pub(crate) mod split;
 pub(crate) mod surfaces;
 #[cfg(target_os = "windows")]
-mod windows;
+pub(crate) mod windows;
 #[cfg(target_os = "linux")]
-mod x11;
+pub(crate) mod x11;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaptureError {
@@ -81,7 +81,7 @@ pub(crate) fn dbus_absent(error_name: &str) -> bool {
     )
 }
 
-fn facts() -> Facts {
+pub(crate) fn facts() -> Facts {
     #[cfg(target_os = "windows")]
     {
         Facts {

@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 use windup_core::capture::output::{recording_name_now, unique_path};
 use windup_core::config::{Config, VideoConfig};
-use windup_core::ipc::RecordTest;
 use windup_core::video::{
     AudioIn, Bitrate, Codec, Container, Finish, Pacer, RecState, Recorder, SegmentJob, Source,
     auto_bitrate, candidates, codecs_for, even_size, join_args, pick_encoder, segment_args,
@@ -41,6 +40,11 @@ pub(crate) trait FrameSource: Send {
 pub(crate) trait SourceFactory: Send {
     fn source(&self) -> Source;
     fn open_pipe(&self) -> Option<Box<dyn FrameSource>>;
+    /// What to try instead when `source` makes ffmpeg exit within a second
+    /// of starting (ddagrab on a machine it does not suit).
+    fn fallback(&self) -> Option<Source> {
+        None
+    }
 }
 
 /// Sound we capture ourselves, written to ffmpeg as interleaved f32le.
@@ -173,6 +177,7 @@ impl Recording {
             encoder,
             hardware,
             fell_back: false,
+            source_fell_back: false,
             bitrate,
             seg: None,
             shared: Arc::clone(&shared),
@@ -322,6 +327,8 @@ struct Run {
     encoder: &'static str,
     hardware: bool,
     fell_back: bool,
+    /// The factory's `fallback` source is in use from here on.
+    source_fell_back: bool,
     bitrate: Option<u32>,
     seg: Option<Segment>,
     shared: Arc<Shared>,
@@ -341,7 +348,11 @@ impl Run {
 
         let mut pipes = Vec::new();
         let mut video_pipe = None;
-        let source = match self.factory.source() {
+        let wanted = match self.factory.fallback() {
+            Some(fallback) if self.source_fell_back => fallback,
+            _ => self.factory.source(),
+        };
+        let source = match wanted {
             Source::RawPipe { .. } => {
                 let frames = self
                     .factory
@@ -536,7 +547,22 @@ impl Run {
                     None => "ffmpeg stopped.".into(),
                 }),
         };
-        if early && ffmpeg_failed && self.hardware && !self.fell_back {
+        // The two fallbacks are independent: a source that fails at once is
+        // tried as its fallback, and that new segment may still lose its
+        // hardware encoder next.
+        if early && ffmpeg_failed && !self.source_fell_back && self.factory.fallback().is_some() {
+            log::warn!(
+                "segment {index}: the screen source failed at once ({why}); using its fallback from here on"
+            );
+            self.source_fell_back = true;
+            match self.open_segment(index) {
+                Ok(seg) => {
+                    self.seg = Some(seg);
+                    return;
+                }
+                Err(e) => why = e,
+            }
+        } else if early && ffmpeg_failed && self.hardware && !self.fell_back {
             let sw = software(self.codec);
             log::warn!(
                 "segment {index}: {} failed at once ({why}); using {sw} from here on",
@@ -812,122 +838,9 @@ fn write_audio(
     src
 }
 
-/// A moving colour gradient: what `--record-test` records, so a test run
-/// never reads the screen.
-struct Pattern {
-    w: u32,
-    h: u32,
-    t0: Instant,
-}
-
-impl FrameSource for Pattern {
-    fn size(&self) -> (u32, u32) {
-        (self.w, self.h)
-    }
-
-    fn next_frame(&mut self, buf: &mut Vec<u8>) -> Result<bool, String> {
-        let (w, h) = (self.w as usize, self.h as usize);
-        buf.resize(w * h * 4, 0);
-        let shift = (self.t0.elapsed().as_secs_f64() * 120.0) as usize;
-        for (i, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let (x, y) = (i % w, i / w);
-            px[0] = ((x * 255 / w.max(1) + shift) % 256) as u8;
-            px[1] = (y * 255 / h.max(1)) as u8;
-            px[2] = (shift % 256) as u8;
-            px[3] = 255;
-        }
-        Ok(true)
-    }
-}
-
-struct PatternFactory {
-    w: u32,
-    h: u32,
-}
-
-impl SourceFactory for PatternFactory {
-    fn source(&self) -> Source {
-        Source::RawPipe {
-            path: String::new(),
-            w: self.w,
-            h: self.h,
-        }
-    }
-
-    fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
-        Some(Box::new(Pattern {
-            w: self.w,
-            h: self.h,
-            t0: Instant::now(),
-        }))
-    }
-}
-
-/// `windup --record-test <out> --seconds N`: records a test pattern of the
-/// area's size (320×240 without one) through the real pipeline and writes
-/// it to `<out>`. Exit 0 when the file is there and not empty, 1 when the
-/// recording failed, 2 without ffmpeg or with a bad size.
-pub(crate) fn record_test(test: &RecordTest) -> i32 {
-    if ffmpeg::locate().is_none() {
-        eprintln!("windup: no ffmpeg found (set WINDUP_FFMPEG)");
-        return 2;
-    }
-    let (w, h) = test.area.map_or((320, 240), |(_, _, w, h)| (w, h));
-    let Some((w, h)) = even_size(w, h) else {
-        eprintln!("windup: the area is too small to record");
-        return 2;
-    };
-    let mut cfg = VideoConfig::default();
-    if let Some(c) = test.container {
-        cfg.container = c;
-    }
-    cfg.name_pattern = format!("windup-record-test-{}", std::process::id());
-    let out_dir = test
-        .out
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let job = RecordJob {
-        factory: Box::new(PatternFactory { w, h }),
-        audio: Vec::new(),
-        cfg,
-        size: (w, h),
-        out_dir,
-    };
-    let mut rec = match Recording::start(job) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("windup: {e}");
-            return 1;
-        }
-    };
-    std::thread::sleep(Duration::from_secs(u64::from(test.seconds)));
-    if let Some(why) = rec.failed() {
-        eprintln!("windup: {why}");
-    }
-    let saved = match rec.stop().join() {
-        Ok(Ok(path)) => path,
-        Ok(Err(e)) => {
-            eprintln!("windup: {e}");
-            return 1;
-        }
-        Err(_) => return 1,
-    };
-    if let Err(e) = std::fs::rename(&saved, &test.out) {
-        eprintln!("windup: could not move {} into place: {e}", saved.display());
-        let _ = std::fs::remove_file(&saved);
-        return 1;
-    }
-    if std::fs::metadata(&test.out).is_ok_and(|m| m.len() > 0) {
-        println!("{}", test.out.display());
-        0
-    } else {
-        1
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::test_source::{Pattern, PatternFactory};
     use super::*;
 
     /// A folder under the system temp dir, removed at the end.
@@ -1172,6 +1085,55 @@ mod tests {
         let dir = TempDir::new("fallback-writer");
         let j = job(&dir, vec![]);
         assert_fell_back(&ff, fallback(&dir, j, true), true);
+    }
+
+    /// A screen source ffmpeg cannot open (no such X display, or no x11grab
+    /// at all), with the pattern as its fallback.
+    struct BrokenSource;
+
+    impl SourceFactory for BrokenSource {
+        fn source(&self) -> Source {
+            Source::X11grab {
+                display: "windup-no-such-display".into(),
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 64,
+            }
+        }
+        fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
+            PatternFactory { w: 64, h: 64 }.open_pipe()
+        }
+        fn fallback(&self) -> Option<Source> {
+            Some(PatternFactory { w: 64, h: 64 }.source())
+        }
+    }
+
+    #[test]
+    fn a_source_that_fails_at_once_falls_back_to_its_fallback() {
+        let Some(ff) = ffmpeg_or_skip("a_source_that_fails_at_once_falls_back") else {
+            return;
+        };
+        let dir = TempDir::new("source-fallback");
+        let mut j = job(&dir, vec![]);
+        j.factory = Box::new(BrokenSource);
+        let mut rec = start(&dir, j, ("libx264", false));
+        sleep(2.0);
+        assert!(rec.failed().is_none(), "{:?}", rec.failed());
+        let out = rec.stop().join().unwrap().unwrap();
+        let text = info(&ff, &out);
+        assert!(text.contains("64x64") && text.contains("h264"), "{text}");
+
+        // Independent of the encoder fallback: both can happen in turn.
+        let dir = TempDir::new("source-and-encoder-fallback");
+        let mut j = job(&dir, vec![]);
+        j.factory = Box::new(BrokenSource);
+        let mut rec = fallback(&dir, j, false);
+        sleep(3.0);
+        assert!(rec.failed().is_none(), "{:?}", rec.failed());
+        let out = rec.stop().join().unwrap().unwrap();
+        let text = info(&ff, &out);
+        assert!(text.contains("64x64") && text.contains("h264"), "{text}");
     }
 
     #[test]

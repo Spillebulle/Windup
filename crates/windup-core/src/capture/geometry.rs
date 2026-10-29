@@ -81,6 +81,9 @@ pub struct MonitorShot {
     /// scale where desktop units are physical pixels (Windows DPI / 96,
     /// X11 Xft.dpi / 96), and 1 on Wayland, whose layout is in points.
     pub scale: f32,
+    /// The monitor's refresh rate when the platform says; the recording
+    /// caps its frame rate at it. Wayland back ends leave it unknown.
+    pub refresh_hz: Option<u32>,
 }
 
 impl MonitorShot {
@@ -201,6 +204,7 @@ mod tests {
             image: RgbaImage::from_pixel(px.0, px.1, c),
             name: String::new(),
             scale: 1.0,
+            refresh_hz: None,
         }
     }
 

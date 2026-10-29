@@ -16,8 +16,9 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetMonitorInfoW, HDC,
-    HMONITOR, MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject,
+    DEVMODEW, DIB_RGB_COLORS, DeleteDC, DeleteObject, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors,
+    EnumDisplaySettingsW, GetDC, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::HiDpi::{
@@ -55,6 +56,21 @@ struct Monitor {
     name: String,
     /// Physical pixels (desktop units) per point: the monitor's DPI / 96.
     scale: f32,
+    refresh_hz: Option<u32>,
+}
+
+/// The rate a display runs at now. 0 and 1 are the documented "hardware
+/// default" values, so they mean unknown.
+fn refresh_of(device: &[u16]) -> Option<u32> {
+    // SAFETY: `device` is the NUL-terminated device name `GetMonitorInfoW`
+    // gave, and an all-zero DEVMODEW with dmSize set is the documented input.
+    let hz = unsafe {
+        let mut mode: DEVMODEW = std::mem::zeroed();
+        mode.dmSize = size_of::<DEVMODEW>() as u16;
+        (EnumDisplaySettingsW(device.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0)
+            .then_some(mode.dmDisplayFrequency)
+    };
+    hz.filter(|&hz| hz > 1)
 }
 
 unsafe extern "system" fn collect_monitor(
@@ -87,6 +103,7 @@ unsafe extern "system" fn collect_monitor(
             } else {
                 1.0
             },
+            refresh_hz: refresh_of(&info.szDevice),
         });
     }
     TRUE
@@ -189,12 +206,31 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
                 image: blit(screen, &m.rect)?,
                 name: m.name.clone(),
                 scale: m.scale,
+                refresh_hz: m.refresh_hz,
             })
         })
         .collect();
     // SAFETY: releases the DC taken above.
     unsafe { ReleaseDC(null_mut(), screen) };
     Ok(DesktopShot { monitors: shots? })
+}
+
+/// Each monitor's layout (physical pixels) and refresh rate, in the order
+/// `EnumDisplayMonitors` gives, without taking a picture.
+pub(crate) fn monitor_list() -> Vec<(DRect, Option<u32>)> {
+    let _dpi = DpiScope::enter();
+    monitors()
+        .into_iter()
+        .map(|m| {
+            let layout = DRect {
+                x: m.rect.left as f32,
+                y: m.rect.top as f32,
+                w: (m.rect.right - m.rect.left) as f32,
+                h: (m.rect.bottom - m.rect.top) as f32,
+            };
+            (layout, m.refresh_hz)
+        })
+        .collect()
 }
 
 unsafe extern "system" fn collect_window(hwnd: HWND, data: LPARAM) -> i32 {

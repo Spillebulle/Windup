@@ -624,12 +624,14 @@ mod tests {
                     image: RgbaImage::from_pixel(100, 100, Rgba([200, 10, 10, 255])),
                     name: "a".into(),
                     scale: 1.0,
+                    refresh_hz: None,
                 },
                 MonitorShot {
                     layout: rect(100.0, 0.0, 100.0, 100.0),
                     image: RgbaImage::from_pixel(200, 200, Rgba([10, 200, 10, 255])),
                     name: "b".into(),
                     scale: 1.0,
+                    refresh_hz: None,
                 },
             ],
         }
