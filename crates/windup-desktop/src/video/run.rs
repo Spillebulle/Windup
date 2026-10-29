@@ -93,6 +93,20 @@ struct Shared {
     t0: Instant,
     recorder: Mutex<Recorder>,
     failed: Mutex<Option<String>>,
+    /// Whether the last failure was noticed with a writer error in hand.
+    #[cfg(test)]
+    writer_error_seen: AtomicBool,
+}
+
+/// What tests change about a recording.
+#[derive(Default)]
+struct Hooks {
+    /// An encoder (name, hardware) instead of the probe's choice.
+    encoder: Option<(&'static str, bool)>,
+    /// Holds a failed segment's check back until a writer has failed too,
+    /// so the race between the two goes the writer's way.
+    #[cfg(test)]
+    hold_check_for_writer: bool,
 }
 
 impl Shared {
@@ -111,16 +125,11 @@ impl Recording {
     /// Starts recording segment 0. Segments wait in the cache folder.
     pub(crate) fn start(job: RecordJob) -> Result<Recording, String> {
         let base = Config::cache_dir().ok_or("There is no cache folder to record into.")?;
-        Self::start_in(job, &base, None)
+        Self::start_in(job, &base, Hooks::default())
     }
 
-    /// `start` with the segments under `base`, and for tests an encoder
-    /// (name, hardware) instead of the probe's choice.
-    fn start_in(
-        job: RecordJob,
-        base: &Path,
-        encoder: Option<(&'static str, bool)>,
-    ) -> Result<Recording, String> {
+    /// `start` with the segments under `base`, and the test hooks.
+    fn start_in(job: RecordJob, base: &Path, hooks: Hooks) -> Result<Recording, String> {
         let ffmpeg = ffmpeg::locate().ok_or("ffmpeg was not found.")?;
         let cfg = job.cfg;
         let container = cfg.container;
@@ -130,7 +139,7 @@ impl Recording {
         } else {
             codecs[0]
         };
-        let (encoder, hardware) = match encoder {
+        let (encoder, hardware) = match hooks.encoder {
             Some(e) => e,
             None if container == Container::Gif => (software(codec), false),
             None => choose_encoder(codec, cfg.encoder.as_deref())?,
@@ -150,6 +159,8 @@ impl Recording {
             t0: Instant::now(),
             recorder: Mutex::new(Recorder::start(0.0)),
             failed: Mutex::new(None),
+            #[cfg(test)]
+            writer_error_seen: AtomicBool::new(false),
         });
         let mut run = Run {
             ffmpeg,
@@ -165,6 +176,8 @@ impl Recording {
             bitrate,
             seg: None,
             shared: Arc::clone(&shared),
+            #[cfg(test)]
+            hold_check_for_writer: hooks.hold_check_for_writer,
         };
         match run.open_segment(0) {
             Ok(seg) => run.seg = Some(seg),
@@ -284,6 +297,9 @@ struct Segment {
     /// Pipe sources end by closing the pipes, others by `q` on stdin.
     piped: bool,
     stop: Arc<AtomicBool>,
+    /// Set once ffmpeg has exited, so writers stop waiting for it to open
+    /// their pipes.
+    gone: Arc<AtomicBool>,
     pipes: Vec<String>,
     video: Option<JoinHandle<()>>,
     /// Each sound's index in `Run::audio`, and the thread that gives it back.
@@ -309,6 +325,8 @@ struct Run {
     bitrate: Option<u32>,
     seg: Option<Segment>,
     shared: Arc<Shared>,
+    #[cfg(test)]
+    hold_check_for_writer: bool,
 }
 
 impl Run {
@@ -385,18 +403,23 @@ impl Run {
         });
 
         let stop = Arc::new(AtomicBool::new(false));
+        let gone = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
+        let flags = Flags {
+            stop: Arc::clone(&stop),
+            gone: Arc::clone(&gone),
+        };
         let video = video_pipe.map(|(server, frames)| {
-            let (stop, error) = (Arc::clone(&stop), Arc::clone(&error));
-            std::thread::spawn(move || write_video(server, frames, fps, &stop, &error))
+            let (flags, error) = (flags.clone(), Arc::clone(&error));
+            std::thread::spawn(move || write_video(server, frames, fps, &flags, &error))
         });
         let audio = audio_pipes
             .into_iter()
             .map(|(i, server)| {
                 let src = self.audio[i].take();
-                let (stop, error) = (Arc::clone(&stop), Arc::clone(&error));
+                let (flags, error) = (flags.clone(), Arc::clone(&error));
                 let h = std::thread::spawn(move || {
-                    src.map(|src| write_audio(server, src, &stop, &error))
+                    src.map(|src| write_audio(server, src, &flags, &error))
                 });
                 (i, h)
             })
@@ -408,6 +431,7 @@ impl Run {
             stdin,
             piped,
             stop,
+            gone,
             pipes,
             video,
             audio,
@@ -448,6 +472,7 @@ impl Run {
             }
         };
         // ffmpeg is gone; a writer still waiting for it to open a pipe goes.
+        seg.gone.store(true, Ordering::Relaxed);
         for p in &seg.pipes {
             pipe::unblock(p);
         }
@@ -476,24 +501,42 @@ impl Run {
             return;
         };
         let exited = seg.child.try_wait().ok().flatten();
+        #[cfg(test)]
+        if self.hold_check_for_writer
+            && seg.started.elapsed() < Duration::from_secs(3)
+            && seg.error.lock().is_ok_and(|e| e.is_none())
+        {
+            return;
+        }
         let writer = seg.error.lock().ok().and_then(|mut e| e.take());
         if exited.is_none() && writer.is_none() {
             return;
         }
+        #[cfg(test)]
+        self.shared
+            .writer_error_seen
+            .store(writer.is_some(), Ordering::Relaxed);
         let index = seg.index;
         let early = seg.started.elapsed() < FALLBACK_WINDOW;
-        let (text, _) = self.end_segment(false).unwrap_or_default();
-        let mut why = writer.clone().unwrap_or_else(|| {
-            text.lines()
+        let (text, clean) = self.end_segment(false).unwrap_or_default();
+        // ffmpeg failing is the cause whenever it failed: a writer error then
+        // is only its pipe breaking under it, and whichever of the two was
+        // noticed first must not decide. A writer error with ffmpeg ending
+        // cleanly (it read the end of input we gave it) is the writer's.
+        let ffmpeg_failed = !clean || writer.is_none();
+        let mut why = match writer {
+            Some(w) if !ffmpeg_failed => w,
+            _ => text
+                .lines()
                 .rev()
                 .find(|l| !l.trim().is_empty())
                 .map(|l| l.trim().to_owned())
                 .unwrap_or_else(|| match exited {
                     Some(s) => format!("ffmpeg stopped ({s})."),
                     None => "ffmpeg stopped.".into(),
-                })
-        });
-        if early && writer.is_none() && self.hardware && !self.fell_back {
+                }),
+        };
+        if early && ffmpeg_failed && self.hardware && !self.fell_back {
             let sw = software(self.codec);
             log::warn!(
                 "segment {index}: {} failed at once ({why}); using {sw} from here on",
@@ -648,6 +691,14 @@ impl Run {
     }
 }
 
+/// What a writer thread watches: `stop` ends its writing, `gone` (ffmpeg
+/// has exited) ends its wait for ffmpeg to open the pipe.
+#[derive(Clone)]
+struct Flags {
+    stop: Arc<AtomicBool>,
+    gone: Arc<AtomicBool>,
+}
+
 fn set_error(error: &Mutex<Option<String>>, why: String) {
     if let Ok(mut e) = error.lock()
         && e.is_none()
@@ -662,10 +713,13 @@ fn write_video(
     server: PipeServer,
     mut frames: Box<dyn FrameSource>,
     fps: u32,
-    stop: &AtomicBool,
+    flags: &Flags,
     error: &Mutex<Option<String>>,
 ) {
-    let mut file = match server.connect(stop) {
+    let stop = &*flags.stop;
+    // Opened even when stopping already, so ffmpeg sees the end of input
+    // instead of waiting in its open until it is killed.
+    let mut file = match server.connect(&flags.gone) {
         Ok(f) => f,
         Err(e) => {
             if !stop.load(Ordering::Relaxed) {
@@ -716,10 +770,11 @@ fn write_video(
 fn write_audio(
     server: PipeServer,
     mut src: Box<dyn AudioSource>,
-    stop: &AtomicBool,
+    flags: &Flags,
     error: &Mutex<Option<String>>,
 ) -> Box<dyn AudioSource> {
-    let mut file = match server.connect(stop) {
+    let stop = &*flags.stop;
+    let mut file = match server.connect(&flags.gone) {
         Ok(f) => f,
         Err(e) => {
             if !stop.load(Ordering::Relaxed) {
@@ -938,7 +993,74 @@ mod tests {
     }
 
     fn start(dir: &TempDir, job: RecordJob, encoder: (&'static str, bool)) -> Recording {
-        Recording::start_in(job, &dir.0.join("work"), Some(encoder)).unwrap()
+        let hooks = Hooks {
+            encoder: Some(encoder),
+            ..Hooks::default()
+        };
+        Recording::start_in(job, &dir.0.join("work"), hooks).unwrap()
+    }
+
+    /// The pattern, except that the first source opened stalls after its
+    /// first frame, so a dying ffmpeg is noticed before its pipe breaks.
+    struct StallOnce {
+        stalled: Arc<AtomicBool>,
+    }
+
+    struct Stalling {
+        inner: Pattern,
+        stall: bool,
+        frames: u32,
+    }
+
+    impl FrameSource for Stalling {
+        fn size(&self) -> (u32, u32) {
+            self.inner.size()
+        }
+        fn next_frame(&mut self, buf: &mut Vec<u8>) -> Result<bool, String> {
+            self.frames += 1;
+            if self.stall && self.frames == 2 {
+                sleep(1.5);
+            }
+            self.inner.next_frame(buf)
+        }
+    }
+
+    impl SourceFactory for StallOnce {
+        fn source(&self) -> Source {
+            PatternFactory { w: 64, h: 64 }.source()
+        }
+        fn open_pipe(&self) -> Option<Box<dyn FrameSource>> {
+            Some(Box::new(Stalling {
+                inner: Pattern {
+                    w: 64,
+                    h: 64,
+                    t0: Instant::now(),
+                },
+                stall: !self.stalled.swap(true, Ordering::Relaxed),
+                frames: 0,
+            }))
+        }
+    }
+
+    fn fallback(dir: &TempDir, job: RecordJob, hold_check_for_writer: bool) -> Recording {
+        let hooks = Hooks {
+            encoder: Some(("windup_no_such_encoder", true)),
+            hold_check_for_writer,
+        };
+        Recording::start_in(job, &dir.0.join("work"), hooks).unwrap()
+    }
+
+    fn assert_fell_back(ff: &Path, mut rec: Recording, writer_first: bool) {
+        sleep(2.0);
+        assert!(rec.failed().is_none(), "{:?}", rec.failed());
+        assert_eq!(
+            rec.shared.writer_error_seen.load(Ordering::Relaxed),
+            writer_first,
+            "the race went the way the test meant"
+        );
+        let out = rec.stop().join().unwrap().unwrap();
+        let info = info(ff, &out);
+        assert!(info.contains("64x64") && info.contains("h264"), "{info}");
     }
 
     /// What `ffmpeg -i` says about a file: metadata only, no frames.
@@ -1038,13 +1160,18 @@ mod tests {
         let Some(ff) = ffmpeg_or_skip("a_hardware_encoder_that_fails_at_once_falls_back") else {
             return;
         };
-        let dir = TempDir::new("fallback");
-        let mut rec = start(&dir, job(&dir, vec![]), ("windup_no_such_encoder", true));
-        sleep(1.5);
-        assert!(rec.failed().is_none(), "{:?}", rec.failed());
-        let out = rec.stop().join().unwrap().unwrap();
-        let info = info(&ff, &out);
-        assert!(info.contains("64x64") && info.contains("h264"), "{info}");
+        // ffmpeg's exit noticed first: the writer is stalled.
+        let dir = TempDir::new("fallback-exit");
+        let mut j = job(&dir, vec![]);
+        j.factory = Box::new(StallOnce {
+            stalled: Arc::new(AtomicBool::new(false)),
+        });
+        assert_fell_back(&ff, fallback(&dir, j, false), false);
+
+        // The broken pipe noticed first: the check waits for it.
+        let dir = TempDir::new("fallback-writer");
+        let j = job(&dir, vec![]);
+        assert_fell_back(&ff, fallback(&dir, j, true), true);
     }
 
     #[test]

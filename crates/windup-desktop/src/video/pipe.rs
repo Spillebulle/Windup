@@ -1,9 +1,11 @@
 //! The pipes we write frames and sound into, which ffmpeg opens by path.
 //!
 //! A named pipe on Windows and a FIFO on Linux. Either way the writer waits
-//! until ffmpeg opens its end, and a pipe ffmpeg never opens (it died first)
-//! must not hold the writer for ever: on Linux the wait polls the stop flag,
-//! on Windows `unblock` opens the other end ourselves to let it go.
+//! until ffmpeg opens its end. It keeps waiting while ffmpeg runs, even when
+//! the segment is stopping, because ffmpeg may be blocked opening this very
+//! pipe and only gets its end of input once we open ours and close it. Once
+//! ffmpeg is gone the wait must end: on Linux it polls the `gone` flag, on
+//! Windows `unblock` opens the other end ourselves to let it go.
 
 use std::fs::File;
 use std::io;
@@ -92,9 +94,10 @@ impl PipeServer {
     }
 
     /// Waits for ffmpeg to open the pipe, then gives the end to write to.
-    /// Gives up with `Interrupted` once `stop` is set.
+    /// Gives up once `gone` (ffmpeg has exited) is set, on Windows by way
+    /// of `unblock`.
     #[cfg(windows)]
-    pub(crate) fn connect(self, _stop: &AtomicBool) -> io::Result<File> {
+    pub(crate) fn connect(self, _gone: &AtomicBool) -> io::Result<File> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED;
         use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
@@ -113,7 +116,7 @@ impl PipeServer {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn connect(self, stop: &AtomicBool) -> io::Result<File> {
+    pub(crate) fn connect(self, gone: &AtomicBool) -> io::Result<File> {
         use rustix::fs::OFlags;
         use std::os::unix::fs::OpenOptionsExt;
         // A blocking open would wait for a reader with no way to give up, so
@@ -130,7 +133,7 @@ impl PipeServer {
                     return Ok(file);
                 }
                 Err(e) if e.raw_os_error() == Some(rustix::io::Errno::NXIO.raw_os_error()) => {
-                    if stop.load(Ordering::Relaxed) {
+                    if gone.load(Ordering::Relaxed) {
                         return Err(io::ErrorKind::Interrupted.into());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -141,7 +144,7 @@ impl PipeServer {
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
-    pub(crate) fn connect(self, _stop: &AtomicBool) -> io::Result<File> {
+    pub(crate) fn connect(self, _gone: &AtomicBool) -> io::Result<File> {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
@@ -153,7 +156,7 @@ pub(crate) fn unblock(path: &str) {
     let _ = std::fs::OpenOptions::new().read(true).open(path);
 }
 
-/// Elsewhere the writer's wait watches the stop flag itself.
+/// Elsewhere the writer's wait watches the `gone` flag itself.
 #[cfg(not(windows))]
 pub(crate) fn unblock(_path: &str) {}
 
@@ -164,4 +167,65 @@ pub(crate) fn close(file: File) {
     #[cfg(windows)]
     let _ = file.sync_all();
     drop(file);
+}
+
+// Both run on Windows here; on Linux they are type-checked from Windows and
+// run in CI.
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("windup-pipe-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_writer_waits_for_the_reader_and_closing_is_its_end_of_input() {
+        let dir = temp("reader");
+        let server = PipeServer::create(&dir, "video").unwrap();
+        let path = server.path().to_owned();
+        // The reader opens late, as ffmpeg does with its second input.
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            let mut text = String::new();
+            File::open(&path)
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            text
+        });
+        let mut file = server.connect(&AtomicBool::new(false)).unwrap();
+        file.write_all(b"frames").unwrap();
+        close(file);
+        assert_eq!(reader.join().unwrap(), "frames");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_writer_lets_go_once_ffmpeg_is_gone() {
+        let dir = temp("gone");
+        let server = PipeServer::create(&dir, "audio0").unwrap();
+        let path = server.path().to_owned();
+        let gone = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let g = Arc::clone(&gone);
+        std::thread::spawn(move || {
+            let _ = tx.send(server.connect(&g).is_ok());
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(rx.try_recv().is_err(), "still waiting while ffmpeg runs");
+        // What end_segment does once ffmpeg has exited.
+        gone.store(true, Ordering::Relaxed);
+        unblock(&path);
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("the writer let go");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
