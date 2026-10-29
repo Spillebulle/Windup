@@ -1,12 +1,14 @@
 //! Finding the bundled ffmpeg and asking it which encoders really work.
 //!
 //! The probe takes a second or two (a dozen ffmpeg runs), so it happens on a
-//! thread at startup and the result is cached next to `config.json`, keyed on
-//! the ffmpeg file itself. Anything that needs the answer reads `PROBE`.
+//! thread at startup, every start, because hardware encoders depend on the GPU
+//! and driver, not only on the ffmpeg file. The last result is cached next to
+//! `config.json` and shown while the fresh probe runs. Anything that needs the
+//! answer reads `PROBE`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -21,16 +23,23 @@ const PARALLEL: usize = 4;
 
 // The recorder that reads these comes in a later step.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub(crate) enum ProbeState {
     Running,
     Done(Probe),
     NoFfmpeg,
 }
 
-/// Set once by the startup thread when the probe has finished; until then
-/// the answer is `Running`.
+/// `Running` until there is any answer: the cache for this ffmpeg, then the
+/// fresh probe, which replaces it.
 #[allow(dead_code)]
-pub(crate) static PROBE: OnceLock<ProbeState> = OnceLock::new();
+pub(crate) static PROBE: RwLock<ProbeState> = RwLock::new(ProbeState::Running);
+
+fn publish(state: ProbeState) {
+    if let Ok(mut g) = PROBE.write() {
+        *g = state;
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct Cached {
@@ -125,7 +134,11 @@ fn passes(ffmpeg: &Path, name: &str, args: &[String]) -> bool {
                 log::debug!("probe {name}: timed out");
                 break false;
             }
-            Err(_) => break false,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
         }
     };
     if let Ok(text) = reader.join()
@@ -213,7 +226,6 @@ fn cache_path() -> Option<PathBuf> {
 
 /// What a previous run found, if it was for this very ffmpeg. For processes
 /// that must not wait on the probe, like the settings child.
-#[allow(dead_code)]
 pub(crate) fn read_cache() -> Option<Probe> {
     let ffmpeg = locate()?;
     let key = key_for(&ffmpeg)?;
@@ -221,37 +233,37 @@ pub(crate) fn read_cache() -> Option<Probe> {
     (cached.key == key).then_some(cached.probe)
 }
 
-/// The cached answer, or the probes run now and saved. `None` without ffmpeg.
-pub(crate) fn probe_cached() -> Option<Probe> {
-    let ffmpeg = locate()?;
-    if let Some(p) = read_cache() {
-        return Some(p);
+fn write_cache(ffmpeg: &Path, probe: &Probe) {
+    let (Some(key), Some(path)) = (key_for(ffmpeg), cache_path()) else {
+        return;
+    };
+    let cached = Cached {
+        key,
+        probe: probe.clone(),
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
-    let (probe, _) = run_probe(&ffmpeg);
-    if let (Some(key), Some(path)) = (key_for(&ffmpeg), cache_path()) {
-        let cached = Cached {
-            key,
-            probe: probe.clone(),
-        };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_vec_pretty(&cached) {
-            let _ = std::fs::write(path, json);
-        }
+    if let Ok(json) = serde_json::to_vec_pretty(&cached) {
+        let _ = std::fs::write(path, json);
     }
-    Some(probe)
 }
 
-/// Fills `PROBE` on a thread of its own. Called once, by the process that
-/// owns recording.
+/// Probes on a thread of its own, on every start. A cache for this very
+/// ffmpeg answers at once and the fresh result replaces it. Called once, by
+/// the process that owns recording.
 pub(crate) fn start_probe() {
     std::thread::spawn(|| {
-        let state = match probe_cached() {
-            Some(p) => ProbeState::Done(p),
-            None => ProbeState::NoFfmpeg,
+        let Some(ffmpeg) = locate() else {
+            publish(ProbeState::NoFfmpeg);
+            return;
         };
-        let _ = PROBE.set(state);
+        if let Some(p) = read_cache() {
+            publish(ProbeState::Done(p));
+        }
+        let (probe, _) = run_probe(&ffmpeg);
+        write_cache(&ffmpeg, &probe);
+        publish(ProbeState::Done(probe));
     });
 }
 
