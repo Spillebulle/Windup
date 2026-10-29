@@ -15,7 +15,7 @@ pub const GIF_HAS_NO_SOUND: &str = "GIF has no sound.";
 
 /// Why the sound toggles are disabled before the first look for devices is
 /// back (it can take seconds on Linux, so it never holds up the overlay).
-pub const SOUND_STILL_LOOKING: &str = "Windup is still looking for sound devices.";
+pub const SOUND_STILL_CHECKING: &str = "Windup is still checking for sound devices.";
 
 /// One 16-bit sample as f32, -32768 being exactly -1.
 pub fn i16_to_f32(s: i16) -> f32 {

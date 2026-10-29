@@ -33,9 +33,30 @@ pub(crate) enum ProbeState {
 pub(crate) static PROBE: RwLock<ProbeState> = RwLock::new(ProbeState::Running);
 
 fn publish(state: ProbeState) {
-    if let Ok(mut g) = PROBE.write() {
+    publish_to(&PROBE, state);
+}
+
+fn publish_to(slot: &RwLock<ProbeState>, state: ProbeState) {
+    if let Ok(mut g) = slot.write() {
         *g = state;
     }
+}
+
+/// Runs `probe`, and if it panics with `slot` still `Running`, publishes a
+/// probe that found nothing: Video then says no encoder works, rather than
+/// that Windup is still checking, until the next start.
+fn settled(slot: &RwLock<ProbeState>, probe: impl FnOnce()) {
+    struct Guard<'a>(&'a RwLock<ProbeState>);
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            let running = matches!(self.0.read().as_deref(), Ok(ProbeState::Running));
+            if std::thread::panicking() && running {
+                publish_to(self.0, ProbeState::Done(Probe::default()));
+            }
+        }
+    }
+    let _guard = Guard(slot);
+    probe();
 }
 
 #[derive(Serialize, Deserialize)]
@@ -251,16 +272,18 @@ fn write_cache(ffmpeg: &Path, probe: &Probe) {
 /// the process that owns recording.
 pub(crate) fn start_probe() {
     std::thread::spawn(|| {
-        let Some(ffmpeg) = locate() else {
-            publish(ProbeState::NoFfmpeg);
-            return;
-        };
-        if let Some(p) = read_cache() {
-            publish(ProbeState::Done(p));
-        }
-        let (probe, _) = run_probe(&ffmpeg);
-        write_cache(&ffmpeg, &probe);
-        publish(ProbeState::Done(probe));
+        settled(&PROBE, || {
+            let Some(ffmpeg) = locate() else {
+                publish(ProbeState::NoFfmpeg);
+                return;
+            };
+            if let Some(p) = read_cache() {
+                publish(ProbeState::Done(p));
+            }
+            let (probe, _) = run_probe(&ffmpeg);
+            write_cache(&ffmpeg, &probe);
+            publish(ProbeState::Done(probe));
+        })
     });
 }
 
@@ -286,4 +309,33 @@ pub(crate) fn encoders_test() -> i32 {
             .iter()
             .any(|e| probe.working.iter().any(|w| w == e.name)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_that_panics_ends_as_one_that_found_nothing() {
+        static SLOT: RwLock<ProbeState> = RwLock::new(ProbeState::Running);
+        let joined = std::thread::spawn(|| settled(&SLOT, || panic!("probe")));
+        assert!(joined.join().is_err());
+        match &*SLOT.read().unwrap() {
+            ProbeState::Done(p) => assert!(p.working.is_empty()),
+            _ => panic!("still running or no ffmpeg"),
+        }
+    }
+
+    #[test]
+    fn a_panic_after_an_answer_keeps_the_answer() {
+        static SLOT: RwLock<ProbeState> = RwLock::new(ProbeState::Running);
+        let joined = std::thread::spawn(|| {
+            settled(&SLOT, || {
+                publish_to(&SLOT, ProbeState::NoFfmpeg);
+                panic!("after");
+            })
+        });
+        assert!(joined.join().is_err());
+        assert!(matches!(&*SLOT.read().unwrap(), ProbeState::NoFfmpeg));
+    }
 }

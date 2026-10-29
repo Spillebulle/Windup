@@ -19,6 +19,7 @@ use super::{Background, copy_image, popup_setup, portal, window};
 use crate::capture::gate::{Gate, Reply};
 use crate::capture::{CaptureError, finish, grab_all, window_rects};
 use crate::platform::{Host, PasteVia, Plan, Watch};
+use crate::video::availability;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 use windup_core::capture::DesktopShot;
@@ -35,8 +36,8 @@ pub(super) struct Grab {
     shot: DesktopShot,
     windows: Vec<WindowRect>,
     reduced_motion: bool,
-    /// What Video may offer, asked here: the ScreenCast portal and the
-    /// PipeWire device list can each take seconds.
+    /// What Video may offer, found alongside the grab
+    /// (`video::availability`).
     availability: ModeAvailability,
 }
 
@@ -92,13 +93,14 @@ impl Background {
             .name("capture-grab".into())
             .spawn(move || {
                 let motion = portal::ask_reduced_motion();
-                let availability = crate::video::availability::ask(&video);
+                // Video's facts are found while the picture is taken; once it
+                // is in they get a moment more, then the last ones kept do,
+                // so a screenshot never opens later for them.
+                let refresh = availability::refresh();
                 let grabbed = grab_all().map(|shot| {
                     let windows = window_rects(&shot);
-                    // Never lost: a check that died falls back to the last list.
-                    let availability = availability
-                        .recv()
-                        .unwrap_or_else(|_| crate::video::availability::cached(&video));
+                    refresh.wait(availability::FRESH_WAIT);
+                    let availability = availability::current(&video);
                     Grab {
                         shot,
                         windows,

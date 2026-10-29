@@ -182,7 +182,7 @@ pub fn run_background(
         return Err(listener);
     }
     crate::video::ffmpeg::start_probe();
-    crate::video::availability::refresh_sound();
+    crate::video::availability::refresh();
 
     let (cmd_tx, commands) = channel();
     ipc::serve(listener, move |c| {

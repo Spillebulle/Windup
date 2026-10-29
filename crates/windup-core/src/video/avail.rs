@@ -4,7 +4,7 @@
 //! devices) and these decide.
 
 use super::format::{Codec, Container};
-use super::pcm::{NO_SOUND_DEVICE, SOUND_NEEDS_PIPEWIRE, SOUND_STILL_LOOKING};
+use super::pcm::{NO_SOUND_DEVICE, SOUND_NEEDS_PIPEWIRE, SOUND_STILL_CHECKING};
 use super::probe::{Probe, pick_encoder};
 use crate::capture::backend::Moving;
 
@@ -12,6 +12,7 @@ pub const NO_FFMPEG: &str = "Video needs FFmpeg, which is missing from this inst
 pub const PROBE_RUNNING: &str = "Windup is still checking which encoders work.";
 pub const NO_ENCODER: &str = "No video encoder works on this computer.";
 pub const NO_SCREEN_SOURCE: &str = "This desktop does not let applications record the screen.";
+pub const SOURCES_CHECKING: &str = "Windup is still checking how this desktop can be recorded.";
 
 /// What the encoder probe has found so far.
 #[derive(Clone, Copy, Debug)]
@@ -24,13 +25,14 @@ pub enum Probed<'a> {
 
 /// Video's reason, the first that applies: no ffmpeg, the probe still
 /// running, no working encoder for `codec` nor any H.264 one, no way to take
-/// moving pictures. A GIF is encoded by ffmpeg's own `gif`, which needs no
+/// moving pictures (`sources`, the `video_order`; `None` while it is still
+/// being found). A GIF is encoded by ffmpeg's own `gif`, which needs no
 /// probe, so only ffmpeg and the frame source matter for it.
 pub fn video(
     probed: Probed,
     container: Container,
     codec: Codec,
-    order: &[Moving],
+    sources: Option<&[Moving]>,
 ) -> Result<(), &'static str> {
     let gif = container == Container::Gif;
     match probed {
@@ -45,10 +47,11 @@ pub fn video(
         }
         _ => {}
     }
-    if order.iter().all(|m| *m == Moving::None) {
-        return Err(NO_SCREEN_SOURCE);
+    match sources {
+        None => Err(SOURCES_CHECKING),
+        Some(order) if order.iter().all(|m| *m == Moving::None) => Err(NO_SCREEN_SOURCE),
+        Some(_) => Ok(()),
     }
-    Ok(())
 }
 
 /// The sound devices as last listed, by count.
@@ -66,7 +69,7 @@ pub fn sound(
     devices: Option<SoundDevices>,
 ) -> (Result<(), &'static str>, Result<(), &'static str>) {
     let Some(d) = devices else {
-        return (Err(SOUND_STILL_LOOKING), Err(SOUND_STILL_LOOKING));
+        return (Err(SOUND_STILL_CHECKING), Err(SOUND_STILL_CHECKING));
     };
     if !d.system {
         return (Err(SOUND_NEEDS_PIPEWIRE), Err(SOUND_NEEDS_PIPEWIRE));
@@ -86,21 +89,20 @@ mod tests {
         }
     }
 
-    const WINDOWS: &[Moving] = &[Moving::Ddagrab, Moving::Gdigrab];
+    const WINDOWS: Option<&[Moving]> = Some(&[Moving::Ddagrab, Moving::Gdigrab]);
+    const NOTHING: Option<&[Moving]> = Some(&[Moving::None]);
 
     #[test]
     fn video_reasons_come_in_order() {
         let mp4 = |p, order| video(p, Container::Mp4, Codec::H264, order);
-        assert_eq!(mp4(Probed::NoFfmpeg, &[Moving::None]), Err(NO_FFMPEG));
-        assert_eq!(mp4(Probed::Running, &[Moving::None]), Err(PROBE_RUNNING));
+        assert_eq!(mp4(Probed::NoFfmpeg, NOTHING), Err(NO_FFMPEG));
+        assert_eq!(mp4(Probed::Running, NOTHING), Err(PROBE_RUNNING));
         let none = probe(&[]);
-        assert_eq!(mp4(Probed::Done(&none), &[Moving::None]), Err(NO_ENCODER));
+        assert_eq!(mp4(Probed::Done(&none), NOTHING), Err(NO_ENCODER));
         let x264 = probe(&["libx264"]);
-        assert_eq!(
-            mp4(Probed::Done(&x264), &[Moving::None]),
-            Err(NO_SCREEN_SOURCE)
-        );
+        assert_eq!(mp4(Probed::Done(&x264), NOTHING), Err(NO_SCREEN_SOURCE));
         assert_eq!(mp4(Probed::Done(&x264), WINDOWS), Ok(()));
+        assert_eq!(mp4(Probed::Done(&x264), None), Err(SOURCES_CHECKING));
     }
 
     #[test]
@@ -119,7 +121,7 @@ mod tests {
         let none = probe(&[]);
         assert_eq!(gif(Probed::Done(&none), WINDOWS), Ok(()));
         assert_eq!(gif(Probed::NoFfmpeg, WINDOWS), Err(NO_FFMPEG));
-        assert_eq!(gif(Probed::Running, &[Moving::None]), Err(NO_SCREEN_SOURCE));
+        assert_eq!(gif(Probed::Running, NOTHING), Err(NO_SCREEN_SOURCE));
     }
 
     #[test]
@@ -133,7 +135,7 @@ mod tests {
         };
         assert_eq!(
             sound(None),
-            (Err(SOUND_STILL_LOOKING), Err(SOUND_STILL_LOOKING))
+            (Err(SOUND_STILL_CHECKING), Err(SOUND_STILL_CHECKING))
         );
         assert_eq!(
             sound(d(false, 0, 0)),
