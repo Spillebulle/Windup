@@ -180,6 +180,7 @@ pub fn run_background(
     if runtime.plan.host == platform::Host::Viewport {
         return Err(listener);
     }
+    crate::video::ffmpeg::start_probe();
 
     let (cmd_tx, commands) = channel();
     ipc::serve(listener, move |c| {

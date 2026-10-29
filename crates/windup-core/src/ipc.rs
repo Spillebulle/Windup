@@ -95,6 +95,9 @@ pub enum Launch {
     /// `--window-rects-test`: print how many window rectangles the desktop
     /// reports, one line each, and exit. A test aid, so not in `USAGE`.
     WindowRectsTest,
+    /// `--encoders-test`: probe the bundled ffmpeg's encoders, print one line
+    /// each, exit. A test aid, so not in `USAGE`.
+    EncodersTest,
     /// `--help`.
     Help,
     /// Something we do not understand; the text says what.
@@ -135,6 +138,7 @@ where
             "--background" => Launch::Background,
             "--settings" => Launch::Settings,
             "--window-rects-test" => Launch::WindowRectsTest,
+            "--encoders-test" => Launch::EncodersTest,
             "--capture-test" => Launch::Unknown("--capture-test needs a file name".into()),
             "--help" | "-h" => Launch::Help,
             other => Launch::Unknown(format!("unknown option '{other}'")),
@@ -236,6 +240,12 @@ mod tests {
         assert!(USAGE.contains("--capture") && USAGE.contains("--screenshot"));
         assert_eq!(parse_args(["--record"]), Launch::Send(Command::Record));
         assert!(USAGE.contains("--record"));
+    }
+
+    #[test]
+    fn encoders_test_is_a_hidden_flag() {
+        assert_eq!(parse_args(["--encoders-test"]), Launch::EncodersTest);
+        assert!(!USAGE.contains("encoders-test"));
     }
 
     #[test]

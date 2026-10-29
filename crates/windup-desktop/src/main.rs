@@ -9,6 +9,7 @@ mod overlay;
 mod paste;
 mod platform;
 mod setup;
+mod video;
 
 use eframe::egui;
 use hotkey::{HotkeyEvent, HotkeyListener};
@@ -115,6 +116,7 @@ impl WindupApp {
         let mut monitor = None;
         let mut hotkey_listener = None;
         if !startup.settings_only {
+            video::ffmpeg::start_probe();
             #[cfg(target_os = "linux")]
             {
                 let (events, _) = std::sync::mpsc::channel();
@@ -695,6 +697,12 @@ fn main() -> eframe::Result<()> {
         std::process::exit(window_rects_test());
     }
 
+    if windup_core::ipc::parse_args(std::env::args().skip(1))
+        == windup_core::ipc::Launch::EncodersTest
+    {
+        std::process::exit(video::ffmpeg::encoders_test());
+    }
+
     #[cfg(target_os = "linux")]
     let Some(startup) = linux_startup() else {
         return Ok(());
@@ -808,7 +816,7 @@ fn linux_startup() -> Option<Startup> {
             return None;
         }
         // Handled in `main` before this runs.
-        Launch::CaptureTest(_) | Launch::WindowRectsTest => return None,
+        Launch::CaptureTest(_) | Launch::WindowRectsTest | Launch::EncodersTest => return None,
         Launch::Unknown(why) => {
             eprintln!("windup: {why}\n\n{}", ipc::USAGE);
             std::process::exit(2);
