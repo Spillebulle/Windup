@@ -48,6 +48,8 @@ pub(super) struct RecBar {
     reduced_motion: bool,
     /// The surface's size, logical.
     size: (u32, u32),
+    /// The output the surface is on.
+    output: wayland_client::protocol::wl_output::WlOutput,
     pub(super) had_keyboard: bool,
     wake_at: Option<Instant>,
 }
@@ -141,6 +143,7 @@ impl State {
                     rect,
                     reduced_motion,
                     size,
+                    output: output.clone(),
                     had_keyboard: false,
                     wake_at: None,
                 });
@@ -158,12 +161,29 @@ impl State {
     }
 
     /// The bar's width changes once, when the timer reaches an hour: the
-    /// surface is sized and placed again.
+    /// surface is sized and placed again. A layer surface cannot change
+    /// output, so a slot on another output means a new surface there.
     fn resize_recbar(&mut self, size: (u32, u32)) {
-        let Some(rect) = self.recbar.as_ref().map(|b| b.rect) else {
+        let Some((rect, current)) = self.recbar.as_ref().map(|b| (b.rect, b.output.clone())) else {
             return;
         };
         match self.bar_spot(rect, size) {
+            Some((output, _, _)) if output != current => {
+                log::info!("recording: the wider bar goes to another output");
+                if let Some(b) = self.recbar.take() {
+                    let setup = RecBarSetup {
+                        clock: b.clock,
+                        fps: b.fps,
+                        label: b.label,
+                        rect: b.rect,
+                        palette: b.canvas.palette,
+                        mode: b.canvas.mode,
+                        reduced_motion: b.reduced_motion,
+                    };
+                    let _ = self.conn.flush();
+                    self.open_recbar(setup);
+                }
+            }
             Some((_, Spot::At { margin, .. }, _)) => {
                 if let Some(b) = self.recbar.as_mut()
                     && let Shell::Layer(layer) = &b.pane._shell

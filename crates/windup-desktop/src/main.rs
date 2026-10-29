@@ -325,8 +325,8 @@ impl eframe::App for WindupApp {
                         paste::paste_current_clipboard_as_plain(target);
                     }
                 }
-                // Phase 1 has one mode, so both open the same overlay; the
-                // launcher's mode buttons arrive with Video and Steps.
+                // Both open the launcher in Screenshot; its mode buttons
+                // switch to Video from there.
                 HotkeyEvent::Capture { target } => self.start_capture(
                     ctx,
                     CaptureMode::Screenshot,

@@ -19,9 +19,8 @@ use windup_core::capture::output::{recording_name_now, unique_path};
 use windup_core::config::{Config, VideoConfig};
 use windup_core::video::pcm::put_f32le;
 use windup_core::video::{
-    AudioIn, Bitrate, Codec, Container, Finish, Pacer, RecState, Recorder, SegmentJob, Source,
-    auto_bitrate, candidates, codecs_for, even_size, join_args, pick_encoder, segment_args,
-    segment_ext,
+    AudioIn, Codec, Container, Finish, Pacer, RecState, Recorder, SegmentJob, Source, candidates,
+    job_rate, join_args, pick_encoder, segment_args, segment_ext,
 };
 
 use super::ffmpeg::{self, PROBE, ProbeState};
@@ -157,22 +156,14 @@ impl Recording {
         let ffmpeg = ffmpeg::locate().ok_or("ffmpeg was not found.")?;
         let cfg = job.cfg;
         let container = cfg.container;
-        let codecs = codecs_for(container);
-        let codec = if codecs.contains(&cfg.codec) || codecs.is_empty() {
-            cfg.codec
-        } else {
-            codecs[0]
-        };
+        // The same numbers the recording bar's chip shows.
+        let rate = job_rate(container, cfg.codec, cfg.bitrate, cfg.fps, job.size)
+            .ok_or("The area is too small to record.")?;
+        let (codec, bitrate) = (rate.codec, rate.kbps);
         let (encoder, hardware) = match hooks.encoder {
             Some(e) => e,
             None if container == Container::Gif => (software(codec), false),
             None => choose_encoder(codec, cfg.encoder.as_deref())?,
-        };
-        let (w, h) = even_size(job.size.0, job.size.1).ok_or("The area is too small to record.")?;
-        let bitrate = match (container, cfg.bitrate) {
-            (Container::Gif, _) => None,
-            (_, Bitrate::Auto) => Some(auto_bitrate(w, h, cfg.fps, codec)),
-            (_, Bitrate::Kbps(n)) => Some(n),
         };
         let n = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
         let dir = base.join(format!("recording-{}-{n}", std::process::id()));
@@ -269,6 +260,31 @@ impl Recording {
     /// Set when a segment died; what was recorded before it is still kept.
     pub(crate) fn failed(&self) -> Option<String> {
         self.shared.failed.lock().ok().and_then(|f| f.clone())
+    }
+
+    /// The supervisor ended though nobody stopped or cancelled it: it
+    /// panicked, and nothing records any more.
+    pub(crate) fn finished(&self) -> bool {
+        self.thread.as_ref().is_some_and(|t| t.is_finished())
+    }
+
+    /// A recording whose supervisor is `body`, for tests of its handling.
+    #[cfg(test)]
+    pub(crate) fn with_supervisor(
+        body: impl FnOnce() -> Result<PathBuf, String> + Send + 'static,
+    ) -> Recording {
+        let (tx, _rx) = mpsc::channel();
+        Recording {
+            shared: Arc::new(Shared {
+                t0: Instant::now(),
+                recorder: Mutex::new(Recorder::start(0.0)),
+                failed: Mutex::new(None),
+                sound_lost: Vec::new(),
+                writer_error_seen: AtomicBool::new(false),
+            }),
+            tx,
+            thread: Some(std::thread::spawn(body)),
+        }
     }
 
     /// A sound device went away during the recording, which goes on

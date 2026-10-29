@@ -13,6 +13,11 @@
 //!   2004) it moves outside the recorded area as on X11, or goes.
 //! - X11 (`BarHost::Outside`): outside the recorded area (`place_bar`), or
 //!   none when there is no room for it.
+//!
+//! On Windows the tooltip room lies over the recorded area, and a
+//! transparent window still takes clicks, so the window's region
+//! (`SetWindowRgn`) is the bar alone, widened to the room only while a
+//! button is hovered and its tooltip due ([`hit_rect`]).
 
 use crate::overlay::{
     hide_overlay, make_tool_window, monitor_scale, place_overlay, points_rect, reduced_motion,
@@ -28,7 +33,7 @@ use windup_core::capture::DRect;
 use windup_core::capture::backend::{BarHost, record_bar_host};
 use windup_core::capture::session::{CaptureMode, Session, VideoChoice};
 use windup_core::video::{place_bar, top_centre};
-use windup_ui::capture::recbar::{RecBarAction, RecBarState, RecBarView, host_size};
+use windup_ui::capture::recbar::{RecBarAction, RecBarState, RecBarView, bar_size, host_size};
 use windup_ui::{Mode, Palette, metrics};
 
 /// The bar's window title (also how Win32 finds its window).
@@ -69,6 +74,17 @@ struct Bar {
     ppp: f32,
     /// Its size in points, as last measured.
     size: egui::Vec2,
+    /// The window region last set (Windows), in window pixels.
+    region: Option<(i32, i32)>,
+}
+
+/// The part of the bar's window that takes the pointer, as a width and
+/// height in window pixels from its top-left: the bar alone, or the whole
+/// window (bar and tooltip room) while a tooltip is due. `bar` and `host`
+/// are in points.
+pub(crate) fn hit_rect(bar: egui::Vec2, host: egui::Vec2, tip: bool, ppp: f32) -> (i32, i32) {
+    let size = if tip { host } else { bar };
+    ((size.x * ppp).ceil() as i32, (size.y * ppp).ceil() as i32)
 }
 
 impl BarPlan {
@@ -215,6 +231,7 @@ impl WindupApp {
                 self.rec.bar = Some(Bar {
                     view: RecBarView::new(),
                     frames: 0,
+                    region: None,
                     excluded,
                     slot,
                     ppp,
@@ -282,6 +299,16 @@ impl WindupApp {
                 .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
                 .show(vctx, |ui| action = b.view.show(ui, p, mode, &state));
             measured = host_size(vctx, &state);
+            // The window exists from frame 0; the region follows the hover.
+            let hit = hit_rect(
+                bar_size(vctx, &state),
+                measured,
+                b.view.tip_pending(),
+                vctx.pixels_per_point(),
+            );
+            if b.region != Some(hit) && limit_hits(BAR_TITLE, hit) {
+                b.region = Some(hit);
+            }
         });
         b.frames += 1;
 
@@ -379,6 +406,36 @@ fn glass(title: &str) {
 #[cfg(not(target_os = "windows"))]
 fn glass(_title: &str) {}
 
+/// Limits where the window takes (and paints) anything to `w` x `h` window
+/// pixels from its top-left. True once set.
+#[cfg(target_os = "windows")]
+fn limit_hits(title: &str, (w, h): (i32, i32)) -> bool {
+    use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn};
+    let Some(hwnd) = crate::overlay::own_window(title) else {
+        return false;
+    };
+    // SAFETY: one of this process's windows. On success the system owns the
+    // region; on failure it is ours to delete.
+    unsafe {
+        let rgn = CreateRectRgn(0, 0, w, h);
+        if rgn.is_null() {
+            return false;
+        }
+        if SetWindowRgn(hwnd, rgn, 1) == 0 {
+            DeleteObject(rgn);
+            return false;
+        }
+    }
+    true
+}
+
+/// X11 places the bar outside the recorded area, so the room covers nothing
+/// recorded.
+#[cfg(not(target_os = "windows"))]
+fn limit_hits(_title: &str, _hit: (i32, i32)) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +444,20 @@ mod tests {
         DRect { x, y, w, h }
     }
     const BAR: (f32, f32) = (300.0, 80.0);
+
+    #[test]
+    fn the_region_is_the_bar_until_a_tooltip_is_due() {
+        let bar = egui::vec2(300.0, 40.0);
+        let host = egui::vec2(300.0, 72.0);
+        assert_eq!(hit_rect(bar, host, false, 1.0), (300, 40));
+        assert_eq!(hit_rect(bar, host, true, 1.0), (300, 72));
+        // In window pixels, rounded out.
+        assert_eq!(hit_rect(bar, host, false, 1.25), (375, 50));
+        assert_eq!(
+            hit_rect(egui::vec2(300.5, 40.1), host, false, 2.0),
+            (601, 81)
+        );
+    }
     const M: DRect = DRect {
         x: 0.0,
         y: 0.0,

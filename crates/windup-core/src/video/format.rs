@@ -117,9 +117,81 @@ pub fn even_size(w: u32, h: u32) -> Option<(u32, u32)> {
     (w >= 2 && h >= 2).then_some((w, h))
 }
 
+/// What a recording is encoded with, worked out once for ffmpeg and the
+/// recording bar's chip alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobRate {
+    /// The configured codec if the container takes it, else the container's
+    /// usual one (the configured one for a GIF, which has none).
+    pub codec: Codec,
+    /// The area's size, rounded down to even sides.
+    pub size: (u32, u32),
+    /// The bitrate in kb/s (Auto worked out for the size), `None` for a GIF.
+    pub kbps: Option<u32>,
+}
+
+/// The codec and bitrate a recording of `size` runs with. `None` when the
+/// area is too small to record.
+pub fn job_rate(
+    container: Container,
+    codec: Codec,
+    bitrate: Bitrate,
+    fps: u32,
+    size: (u32, u32),
+) -> Option<JobRate> {
+    let codecs = codecs_for(container);
+    let codec = if codecs.contains(&codec) || codecs.is_empty() {
+        codec
+    } else {
+        codecs[0]
+    };
+    let (w, h) = even_size(size.0, size.1)?;
+    let kbps = match (container, bitrate) {
+        (Container::Gif, _) => None,
+        (_, Bitrate::Auto) => Some(auto_bitrate(w, h, fps, codec)),
+        (_, Bitrate::Kbps(n)) => Some(n),
+    };
+    Some(JobRate {
+        codec,
+        size: (w, h),
+        kbps,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_job_rate_falls_back_to_the_containers_codec_and_works_out_auto() {
+        // WebM does not take H.264: VP9, at 0.6 of H.264's rate.
+        let r = job_rate(
+            Container::WebM,
+            Codec::H264,
+            Bitrate::Auto,
+            30,
+            (1921, 1081),
+        )
+        .unwrap();
+        assert_eq!(r.codec, Codec::Vp9);
+        assert_eq!(r.size, (1920, 1080));
+        assert_eq!(r.kbps, Some(auto_bitrate(1920, 1080, 30, Codec::Vp9)));
+        let fixed = job_rate(
+            Container::Mp4,
+            Codec::H265,
+            Bitrate::Kbps(4000),
+            60,
+            (640, 480),
+        );
+        assert_eq!(fixed.unwrap().kbps, Some(4000));
+        assert_eq!(fixed.unwrap().codec, Codec::H265);
+        let gif = job_rate(Container::Gif, Codec::H264, Bitrate::Auto, 15, (640, 480));
+        assert_eq!(gif.unwrap().kbps, None);
+        assert_eq!(
+            job_rate(Container::Mp4, Codec::H264, Bitrate::Auto, 30, (1, 480)),
+            None
+        );
+    }
 
     #[test]
     fn mp4_takes_h264_h265_av1_and_aac() {

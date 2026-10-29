@@ -19,8 +19,8 @@ pub use place::{place_bar, top_centre};
 pub use recorder::{Finish, RecState, Recorder};
 
 pub use format::{
-    AudioCodec, Bitrate, Codec, Container, FIXED_BITRATES, GIF_COLOURS, audio_for, auto_bitrate,
-    codecs_for, even_size, frame_rates,
+    AudioCodec, Bitrate, Codec, Container, FIXED_BITRATES, GIF_COLOURS, JobRate, audio_for,
+    auto_bitrate, codecs_for, even_size, frame_rates, job_rate,
 };
 pub use probe::{
     Encoder, Probe, audio_encoder, audio_probe_args, cache_key, candidates, pick_encoder,

@@ -19,10 +19,10 @@ use windup_core::capture::backend::video_order;
 use windup_core::capture::geometry::DRect;
 use windup_core::capture::session::VideoChoice;
 use windup_core::config::VideoConfig;
-use windup_core::video::{Bitrate, Container, auto_bitrate, codecs_for, even_size};
+use windup_core::video::{Bitrate, even_size, job_rate};
 use windup_ui::capture::bar::{bitrate_label, colours_label};
 
-use super::outcome::{self, Ended};
+use super::outcome::{self, Ended, Unopened};
 use super::run::{AudioSource, RecClock, RecordJob, Recording, SourceFactory, out_dir};
 use crate::capture::gate::Reply;
 
@@ -122,21 +122,13 @@ fn size_of(rect: DRect) -> (u32, u32) {
 /// recording really runs at (Auto worked out as `Recording::start` does it)
 /// or a GIF's colour count.
 pub(crate) fn chips(cfg: &VideoConfig, size: (u32, u32)) -> (u32, String) {
-    if cfg.container == Container::Gif {
-        return (cfg.fps, colours_label(cfg.gif_colours));
-    }
-    let codecs = codecs_for(cfg.container);
-    let codec = if codecs.contains(&cfg.codec) || codecs.is_empty() {
-        cfg.codec
-    } else {
-        codecs[0]
+    let rate = job_rate(cfg.container, cfg.codec, cfg.bitrate, cfg.fps, size);
+    let label = match rate.and_then(|r| r.kbps) {
+        Some(kbps) => bitrate_label(Bitrate::Kbps(kbps)),
+        // A GIF; or an area too small, which never starts.
+        None => colours_label(cfg.gif_colours),
     };
-    let (w, h) = even_size(size.0, size.1).unwrap_or(size);
-    let kbps = match cfg.bitrate {
-        Bitrate::Auto => auto_bitrate(w, h, cfg.fps, codec),
-        Bitrate::Kbps(n) => n,
-    };
-    (cfg.fps, bitrate_label(Bitrate::Kbps(kbps)))
+    (cfg.fps, label)
 }
 
 /// What to record, from the launcher's Record.
@@ -150,6 +142,8 @@ pub(crate) struct Ask {
 /// The recording, once ffmpeg runs.
 pub(crate) struct Running {
     rec: Recording,
+    /// The sound sources asked for that did not open.
+    unopened: Unopened,
     pub clock: RecClock,
     pub fps: u32,
     /// The second chip: a bitrate, or a GIF's colours.
@@ -166,7 +160,7 @@ impl Running {
     }
 }
 
-type Started = (Recording, Option<TokenSlot>);
+type Started = (Recording, Option<TokenSlot>, Unopened);
 /// Why it did not start, and the token slot if the portal was asked: the
 /// token sent is spent either way, so the next one is still saved.
 type NotStarted = (String, Option<TokenSlot>);
@@ -264,7 +258,7 @@ impl Live {
             Phase::Starting { stop, .. } => *stop = true,
             Phase::Running(_) => {
                 if let Phase::Running(running) = std::mem::take(&mut self.phase) {
-                    self.phase = Phase::Joining(join(running.rec));
+                    self.phase = Phase::Joining(join(running.rec, running.unopened));
                 }
             }
             Phase::Idle | Phase::Joining(_) => {}
@@ -283,17 +277,18 @@ impl Live {
                 fps,
                 label,
             } => match rx.try_recv() {
-                Ok(Ok((rec, token))) => {
+                Ok(Ok((rec, token, unopened))) => {
                     log::info!("recording: started");
                     self.token = token;
                     let running = Running {
                         clock: rec.clock(),
                         rec,
+                        unopened,
                         fps: *fps,
                         label: std::mem::take(label),
                     };
                     if *stop {
-                        self.phase = Phase::Joining(join(running.rec));
+                        self.phase = Phase::Joining(join(running.rec, running.unopened));
                         events.push(LiveEvent::Stopping);
                     } else {
                         self.phase = Phase::Running(running);
@@ -323,6 +318,11 @@ impl Live {
                 // recorded before it is joined and saved.
                 if let Some(why) = running.rec.failed() {
                     log::warn!("recording: {why}");
+                    failed = true;
+                } else if running.rec.finished() {
+                    // Its thread ended with nobody asking: it panicked.
+                    // Stopping joins it, which says nothing was saved.
+                    log::error!("recording: the recording thread ended by itself");
                     failed = true;
                 }
             }
@@ -375,7 +375,7 @@ fn begin(rect: DRect, size: (u32, u32), cfg: VideoConfig) -> Result<Started, Not
     }
     let out_dir = out_dir(&cfg).ok_or((outcome::NO_FOLDER.to_owned(), None))?;
     let picked = screen_factory(rect, cfg.screencast_token.clone()).map_err(|e| (e, None))?;
-    let audio = open_audio(&cfg);
+    let (audio, unopened) = open_audio(&cfg);
     let job = RecordJob {
         factory: picked.factory,
         audio,
@@ -384,7 +384,7 @@ fn begin(rect: DRect, size: (u32, u32), cfg: VideoConfig) -> Result<Started, Not
         out_dir,
     };
     match Recording::start(job) {
-        Ok(rec) => Ok((rec, picked.token)),
+        Ok(rec) => Ok((rec, picked.token, unopened)),
         Err(e) => Err((e, picked.token)),
     }
 }
@@ -393,36 +393,43 @@ type Opener = fn(Option<&str>) -> Result<Box<dyn AudioSource>, String>;
 
 /// The sound sources asked for. One that will not open is left out (the
 /// launcher offered it, so this is a device gone since): the picture is
-/// still recorded.
-fn open_audio(cfg: &VideoConfig) -> Vec<Box<dyn AudioSource>> {
+/// still recorded, and the notice at the end says which sound is missing.
+fn open_audio(cfg: &VideoConfig) -> (Vec<Box<dyn AudioSource>>, Unopened) {
     let mut audio = Vec::new();
-    for (wanted, device, what, open) in [
+    let mut unopened = Unopened::default();
+    let system = (cfg.system_audio, cfg.system_device.as_deref());
+    let mic = (cfg.mic, cfg.mic_device.as_deref());
+    for (i, ((wanted, device), what, open)) in [
         (
-            cfg.system_audio,
-            cfg.system_device.as_deref(),
+            system,
             "computer sound",
             super::audio::open_system as Opener,
         ),
-        (
-            cfg.mic,
-            cfg.mic_device.as_deref(),
-            "the microphone",
-            super::audio::open_mic,
-        ),
-    ] {
+        (mic, "the microphone", super::audio::open_mic),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         if !wanted {
             continue;
         }
         match open(device) {
             Ok(src) => audio.push(src),
-            Err(e) => log::warn!("recording: {what} did not open, recording without it: {e}"),
+            Err(e) => {
+                log::warn!("recording: {what} did not open, recording without it: {e}");
+                if i == 0 {
+                    unopened.system = true;
+                } else {
+                    unopened.mic = true;
+                }
+            }
         }
     }
-    audio
+    (audio, unopened)
 }
 
 /// Stops `rec` and joins it on a worker; the receiver gets the notice.
-fn join(mut rec: Recording) -> Receiver<Ended> {
+fn join(mut rec: Recording, unopened: Unopened) -> Receiver<Ended> {
     let (tx, rx) = channel();
     let reply = Reply::new(
         tx,
@@ -442,7 +449,12 @@ fn join(mut rec: Recording) -> Receiver<Ended> {
                 log::warn!("recording: {e}");
             }
             let failed = rec.failed();
-            reply.send(outcome::ended(&result, failed.as_deref(), rec.sound_lost()));
+            reply.send(outcome::ended(
+                &result,
+                failed.as_deref(),
+                rec.sound_lost(),
+                unopened,
+            ));
         });
     if let Err(e) = spawned {
         log::error!("recording: no thread for the join: {e}");
@@ -453,6 +465,7 @@ fn join(mut rec: Recording) -> Receiver<Ended> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windup_core::video::{Codec, Container};
 
     fn choice() -> VideoChoice {
         VideoChoice {
@@ -497,6 +510,57 @@ mod tests {
             ..cfg
         };
         assert_eq!(chips(&gif, (640, 480)).1, "128 colours");
+    }
+
+    #[test]
+    fn the_chip_shows_what_ffmpeg_is_given() {
+        // WebM takes no H.264: the recording falls back to VP9, and so does
+        // the chip's Auto figure.
+        let cfg = VideoConfig {
+            container: Container::WebM,
+            codec: Codec::H264,
+            ..VideoConfig::default()
+        };
+        let given = job_rate(cfg.container, cfg.codec, cfg.bitrate, cfg.fps, (1921, 1081))
+            .and_then(|r| r.kbps)
+            .unwrap();
+        assert_eq!(
+            chips(&cfg, (1921, 1081)).1,
+            bitrate_label(Bitrate::Kbps(given))
+        );
+        assert_ne!(
+            given,
+            windup_core::video::auto_bitrate(1920, 1080, 30, Codec::H264)
+        );
+    }
+
+    #[test]
+    fn a_recording_thread_that_dies_stops_the_recording() {
+        let rec = Recording::with_supervisor(|| panic!("in the supervisor"));
+        let mut live = Live {
+            phase: Phase::Running(Running {
+                clock: rec.clock(),
+                rec,
+                unopened: Unopened::default(),
+                fps: 30,
+                label: String::new(),
+            }),
+            ..Live::default()
+        };
+        let mut events = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !events.iter().any(|e| matches!(e, LiveEvent::Over(_)))
+            && std::time::Instant::now() < deadline
+        {
+            events.extend(live.poll());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(events.contains(&LiveEvent::Stopping), "{events:?}");
+        match events.last() {
+            Some(LiveEvent::Over(e)) => assert_eq!(e.message, outcome::NOT_SAVED),
+            other => panic!("{other:?}"),
+        }
+        assert!(!live.busy());
     }
 
     #[test]

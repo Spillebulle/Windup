@@ -142,6 +142,13 @@ impl RecBarView {
         Self::default()
     }
 
+    /// Whether a button is hovered, so its tooltip is due or showing under
+    /// the bar: a host that limits where its window takes the pointer
+    /// widens that to the tooltip room meanwhile.
+    pub fn tip_pending(&self) -> bool {
+        self.tip.is_some()
+    }
+
     /// Paints the bar at the top-left of `ui`'s space and returns what the
     /// user asked for this frame.
     pub fn show(
@@ -435,6 +442,23 @@ mod tests {
         };
         assert_eq!(at(0.0), at(3599.0));
         assert!(at(3600.0).x > at(0.0).x);
+    }
+
+    #[test]
+    fn hovering_a_button_makes_a_tip_pending_and_leaving_ends_it() {
+        let mut rig = Rig::new();
+        let s = state();
+        let size = bar_size(&rig.ctx, &s);
+        let stop = pos2(
+            size.x - metrics::S2 - metrics::SEG_ICON_W / 2.0,
+            size.y / 2.0,
+        );
+        // Hover is known from the frame after the pointer arrives.
+        rig.frame(&s, false, vec![Event::PointerMoved(stop)]);
+        rig.frame(&s, false, vec![]);
+        assert!(rig.view.tip_pending());
+        rig.frame(&s, false, vec![Event::PointerMoved(pos2(1.0, 1.0))]);
+        assert!(!rig.view.tip_pending());
     }
 
     #[test]

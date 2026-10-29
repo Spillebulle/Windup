@@ -11,6 +11,10 @@ pub(crate) const SHARING_STOPPED: &str = "The screen sharing was stopped.";
 pub(crate) const ENCODER_FAILED: &str = "Recording stopped because the encoder failed.";
 pub(crate) const NOTHING: &str = "Nothing was recorded.";
 pub(crate) const SOUND_LOST: &str = "The sound device was lost during the recording.";
+pub(crate) const NO_MIC: &str =
+    "The microphone could not be opened, so the recording has no microphone sound.";
+pub(crate) const NO_SYSTEM_SOUND: &str =
+    "Computer sound could not be opened, so the recording has no computer sound.";
 pub(crate) const NOT_SAVED: &str = "The recording could not be saved.";
 pub(crate) const NOT_STARTED: &str = "The recording could not start.";
 pub(crate) const TOO_SMALL: &str = "The area is too small to record.";
@@ -41,6 +45,14 @@ pub(crate) fn start_text(raw: &str) -> &'static str {
     }
 }
 
+/// The sound sources asked for that would not open when the recording
+/// started; it went on without them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Unopened {
+    pub system: bool,
+    pub mic: bool,
+}
+
 /// The end of a recording, for the notice.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Ended {
@@ -57,12 +69,13 @@ fn name_of(path: &Path) -> String {
 }
 
 /// The notice for a stopped recording: the join's `result`, the failure the
-/// recording ended on if any (`Recording::failed`, raw), and whether a sound
-/// device went away.
+/// recording ended on if any (`Recording::failed`, raw), whether a sound
+/// device went away, and which never opened.
 pub(crate) fn ended(
     result: &Result<PathBuf, String>,
     failed: Option<&str>,
     sound_lost: bool,
+    unopened: Unopened,
 ) -> Ended {
     let mut lines: Vec<String> = Vec::new();
     if let Some(raw) = failed {
@@ -76,6 +89,12 @@ pub(crate) fn ended(
         )),
         (Err(e), _) if e.trim() == NOTHING => lines.push(NOTHING.to_owned()),
         (Err(_), _) => lines.push(NOT_SAVED.to_owned()),
+    }
+    if unopened.system {
+        lines.push(NO_SYSTEM_SOUND.to_owned());
+    }
+    if unopened.mic {
+        lines.push(NO_MIC.to_owned());
     }
     if sound_lost {
         lines.push(SOUND_LOST.to_owned());
@@ -134,7 +153,7 @@ mod tests {
 
     #[test]
     fn a_clean_stop_says_where_it_went_and_offers_the_folder() {
-        let e = ended(&saved(), None, false);
+        let e = ended(&saved(), None, false, Unopened::default());
         assert_eq!(e.message, "Saved to Recording 2026-10-29 101500.mp4");
         assert_eq!(e.saved, saved().ok());
     }
@@ -143,7 +162,7 @@ mod tests {
     fn an_encoder_failure_keeps_ffmpegs_line_out_of_the_notice() {
         let raw = "Recording stopped: [h264_nvenc @ 0x1] OpenEncodeSessionEx failed: out of memory";
         assert_eq!(failure_text(raw), ENCODER_FAILED);
-        let e = ended(&saved(), Some(raw), false);
+        let e = ended(&saved(), Some(raw), false, Unopened::default());
         assert_eq!(
             e.message,
             "Recording stopped because the encoder failed.\n\
@@ -168,13 +187,19 @@ mod tests {
             &Err("Nothing was recorded.".into()),
             Some("Recording stopped: A monitor was disconnected."),
             false,
+            Unopened::default(),
         );
         assert_eq!(
             e.message,
             "A monitor was disconnected.\nNothing was recorded."
         );
         assert_eq!(e.saved, None);
-        let e = ended(&Err("Nothing was recorded.".into()), None, false);
+        let e = ended(
+            &Err("Nothing was recorded.".into()),
+            None,
+            false,
+            Unopened::default(),
+        );
         assert_eq!(e.message, "Nothing was recorded.");
     }
 
@@ -184,6 +209,7 @@ mod tests {
             &Err("The recording could not be saved: Invalid data found".into()),
             None,
             false,
+            Unopened::default(),
         );
         assert_eq!(e.message, NOT_SAVED);
         assert_eq!(e.saved, None);
@@ -191,12 +217,34 @@ mod tests {
 
     #[test]
     fn a_lost_sound_device_adds_a_line() {
-        let e = ended(&saved(), None, true);
+        let e = ended(&saved(), None, true, Unopened::default());
         assert_eq!(
             e.message,
             "Saved to Recording 2026-10-29 101500.mp4\n\
              The sound device was lost during the recording."
         );
+    }
+
+    #[test]
+    fn a_sound_that_never_opened_gets_a_line_each() {
+        let both = Unopened {
+            system: true,
+            mic: true,
+        };
+        let e = ended(&saved(), None, false, both);
+        assert_eq!(
+            e.message,
+            "Saved to Recording 2026-10-29 101500.mp4\n\
+             Computer sound could not be opened, so the recording has no computer sound.\n\
+             The microphone could not be opened, so the recording has no microphone sound."
+        );
+        let mic = Unopened {
+            mic: true,
+            ..Unopened::default()
+        };
+        let e = ended(&saved(), None, false, mic);
+        assert!(e.message.ends_with(NO_MIC));
+        assert!(!e.message.contains(NO_SYSTEM_SOUND));
     }
 
     #[test]
