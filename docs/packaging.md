@@ -63,8 +63,26 @@ the capture design: `WINDUP_FFMPEG`, next to the executable, then
 To update FFmpeg: pick a newer `autobuild-*` release of
 `BtbN/FFmpeg-Builds` with version-named assets (the `latest` names move), put
 the three URLs and the tag in the lock, recompute the sums from the downloaded
-files, and run `--encoders-test` (CI does, on Windows). The Windows packages
-grow by about 60 MB compressed for it.
+files, and run `--encoders-test` (CI does, on Windows). Then mirror the new
+archives (below). The Windows packages grow by about 60 MB compressed for it.
+
+BtbN prunes old autobuild tags, which would leave a pinned URL dead and the
+next release unbuildable. So the same three archives are kept as the assets
+of a release `ffmpeg-<tag>` in this repository, and the fetch script tries
+that mirror first and BtbN second; the lock's sums decide either way, so the
+mirror cannot change what ships. In the workflows the mirror is read through
+`gh` with the job's token (`GH_TOKEN`), which works while the repository is
+private; elsewhere it is a plain download, and `FFMPEG_MIRROR=none` skips it.
+To make the mirror for the current lock:
+
+```sh
+sh tools/mirror-ffmpeg.sh            # downloads and checks the archives, prints the gh command and notes
+sh tools/mirror-ffmpeg.sh --publish  # gh release create ffmpeg-<tag> --latest=false ... <the three archives>
+```
+
+Its tag does not match `v*`, so it starts no release build, and `--latest=false`
+keeps Windup's own release the latest one. The notes name BtbN's tag and
+build scripts (the GPL source offer) and the sums.
 
 ## Windows
 

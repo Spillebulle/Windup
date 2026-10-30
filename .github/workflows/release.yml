@@ -87,9 +87,12 @@ jobs:
 
       # Pinned in packaging/ffmpeg.lock and checked against its SHA-256. It
       # goes beside the built program so the bare archive and the packagers
-      # all pick it up from there.
+      # all pick it up from there. The token reads the repository's own
+      # mirror of the archives (docs/packaging.md).
       - name: FFmpeg
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: sh tools/fetch-ffmpeg.sh "${{ matrix.ffmpeg }}" "target/${{ matrix.target }}/release"
 
       # The bare program, for anybody who wants it without an installer.

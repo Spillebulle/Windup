@@ -203,6 +203,26 @@ mod tests {
     }
 
     #[test]
+    fn a_discrete_card_beats_intel_on_a_hybrid_laptop() {
+        for linux in [false, true] {
+            for codec in [Codec::H264, Codec::H265, Codec::Av1] {
+                let names = |suffix: &str| {
+                    candidates(codec, linux)
+                        .iter()
+                        .map(|e| e.name)
+                        .filter(|n| n.ends_with(suffix))
+                        .collect::<Vec<_>>()
+                };
+                let (nvenc, amf, qsv) = (names("_nvenc")[0], names("_amf")[0], names("_qsv")[0]);
+                let p = probe_with(&[qsv, amf, nvenc]);
+                assert_eq!(pick_encoder(codec, None, &p), Some(nvenc));
+                let p = probe_with(&[qsv, amf]);
+                assert_eq!(pick_encoder(codec, None, &p), Some(amf));
+            }
+        }
+    }
+
+    #[test]
     fn no_encoder_for_the_codec_is_none() {
         let p = probe_with(&["libx264"]);
         assert_eq!(pick_encoder(Codec::Av1, None, &p), None);

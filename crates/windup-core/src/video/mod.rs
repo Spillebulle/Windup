@@ -13,8 +13,8 @@ pub mod recorder;
 pub mod screencast;
 
 pub use command::{
-    AudioIn, GIF_MAX_FPS, SegmentJob, Source, gif_fps, join_passes, palette_path, segment_args,
-    segment_ext,
+    AudioIn, Failed, GIF_MAX_FPS, Retry, SegmentJob, Source, gif_fps, join_passes, palette_path,
+    retry, segment_args, segment_ext,
 };
 pub use compose::Composer;
 pub use pacing::Pacer;

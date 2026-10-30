@@ -19,8 +19,8 @@ use windup_core::capture::output::{recording_name_now, unique_path};
 use windup_core::config::{Config, VideoConfig};
 use windup_core::video::pcm::put_f32le;
 use windup_core::video::{
-    AudioIn, Codec, Container, Finish, Pacer, RecState, Recorder, SegmentJob, Source, candidates,
-    job_rate, join_passes, pick_encoder, segment_args, segment_ext,
+    AudioIn, Codec, Container, Failed, Finish, Pacer, RecState, Recorder, Retry, SegmentJob,
+    Source, candidates, job_rate, join_passes, pick_encoder, retry, segment_args, segment_ext,
 };
 
 use super::ffmpeg::{self, PROBE, ProbeState};
@@ -182,7 +182,9 @@ impl Recording {
 
         let shared = Arc::new(Shared {
             t0: Instant::now(),
-            recorder: Mutex::new(Recorder::start(0.0)),
+            // The clock starts once segment 0 is open: the ScreenCast
+            // portal's dialog, answered meanwhile, recorded nothing.
+            recorder: Mutex::new(Recorder::start_waiting()),
             failed: Mutex::new(None),
             sound_lost: job.audio.iter().filter_map(|a| a.lost()).collect(),
             abort: AtomicBool::new(false),
@@ -200,6 +202,7 @@ impl Recording {
             encoder,
             hardware,
             fell_back: false,
+            download: false,
             source_fell_back: false,
             first_size: None,
             bitrate,
@@ -209,7 +212,10 @@ impl Recording {
             hold_check_for_writer: hooks.hold_check_for_writer,
         };
         match run.open_segment(0) {
-            Ok(seg) => run.seg = Some(seg),
+            Ok(seg) => {
+                run.seg = Some(seg);
+                run.begin_clock();
+            }
             Err(e) => {
                 run.remove_dir();
                 return Err(e);
@@ -431,6 +437,8 @@ struct Run {
     encoder: &'static str,
     hardware: bool,
     fell_back: bool,
+    /// Ddagrab's frames are downloaded for the hardware encoder from here on.
+    download: bool,
     /// The factory's `fallback` source is in use from here on.
     source_fell_back: bool,
     /// Segment 0's picture size. The join copies the segments into one
@@ -449,17 +457,30 @@ impl Run {
             .join(format!("seg-{index}.{}", segment_ext(self.cfg.container)))
     }
 
+    /// The open segment's source is giving its picture, so the timer runs.
+    fn begin_clock(&self) {
+        let now = self.shared.now();
+        if let Ok(mut r) = self.shared.recorder.lock() {
+            r.begin(now);
+        }
+    }
+
+    /// The source segments use now: the factory's, or its fallback once
+    /// that took over.
+    fn wanted_source(&self) -> Source {
+        match self.factory.fallback() {
+            Some(fallback) if self.source_fell_back => fallback,
+            _ => self.factory.source(),
+        }
+    }
+
     fn open_segment(&mut self, index: u32) -> Result<Segment, String> {
         let fps = self.cfg.fps.max(1);
         let gif = self.cfg.container == Container::Gif;
 
         let mut pipes = Vec::new();
         let mut video_pipe = None;
-        let wanted = match self.factory.fallback() {
-            Some(fallback) if self.source_fell_back => fallback,
-            _ => self.factory.source(),
-        };
-        let source = match wanted {
+        let source = match self.wanted_source() {
             Source::RawPipe { .. } => {
                 let frames = self.factory.open_pipe()?;
                 let (w, h) = frames.size();
@@ -507,6 +528,7 @@ impl Run {
             bitrate_kbps: self.bitrate,
             audio: audio_in,
             out: self.segment_path(index),
+            download: self.download,
         };
         let args = segment_args(&job, self.cfg.container);
         log::debug!("segment {index}: ffmpeg {}", args.join(" "));
@@ -639,8 +661,9 @@ impl Run {
     }
 
     /// Notices a segment that died on its own. A hardware encoder that died
-    /// at once is swapped for the software one and the segment started
-    /// again; anything else ends the recording, keeping what was recorded.
+    /// at once is given ddagrab's frames through memory, then swapped for the
+    /// software one, and the segment started again (`retry` has the order);
+    /// anything else ends the recording, keeping what was recorded.
     fn check(&mut self) {
         let Some(seg) = self.seg.as_mut() else {
             return;
@@ -681,38 +704,57 @@ impl Run {
                     None => "ffmpeg stopped.".into(),
                 }),
         };
-        // The two fallbacks are independent, and the encoder is the likelier
-        // culprit, so a hardware encoder that failed at once is swapped first
-        // with the source kept. Only a failure after that (or with no
-        // hardware encoder to blame) moves to the source's fallback.
-        if early && ffmpeg_failed && self.hardware && !self.fell_back {
-            let sw = software(self.codec);
-            log::warn!(
-                "segment {index}: {} failed at once ({why}); using {sw} from here on",
-                self.encoder
-            );
-            self.encoder = sw;
-            self.hardware = false;
-            self.fell_back = true;
-            match self.open_segment(index) {
-                Ok(seg) => {
-                    self.seg = Some(seg);
-                    return;
+        // The fallbacks are independent, and the encoder is the likelier
+        // culprit, so a hardware encoder that failed at once is tried with
+        // ddagrab's frames downloaded, then swapped, with the source kept.
+        // Only a failure after that (or with no hardware encoder to blame)
+        // moves to the source's fallback.
+        let next = (early && ffmpeg_failed)
+            .then(|| {
+                retry(Failed {
+                    ddagrab: matches!(self.wanted_source(), Source::Ddagrab { .. }),
+                    hardware: self.hardware && !self.fell_back,
+                    downloaded: self.download,
+                    source_fallback: !self.source_fell_back && self.factory.fallback().is_some(),
+                })
+            })
+            .flatten();
+        if let Some(next) = next {
+            match next {
+                Retry::Download => {
+                    log::warn!(
+                        "segment {index}: {} failed at once on the GPU's frames ({why}); \
+                         copying them through memory from here on",
+                        self.encoder
+                    );
+                    self.download = true;
                 }
-                Err(e) => why = e,
+                Retry::Software => {
+                    let sw = software(self.codec);
+                    log::warn!(
+                        "segment {index}: {} failed at once ({why}); using {sw} from here on",
+                        self.encoder
+                    );
+                    self.encoder = sw;
+                    self.hardware = false;
+                    self.fell_back = true;
+                }
+                Retry::Source => {
+                    log::warn!(
+                        "segment {index}: the screen source failed at once ({why}); using its fallback from here on"
+                    );
+                    self.source_fell_back = true;
+                }
             }
-        } else if early
-            && ffmpeg_failed
-            && !self.source_fell_back
-            && self.factory.fallback().is_some()
-        {
-            log::warn!(
-                "segment {index}: the screen source failed at once ({why}); using its fallback from here on"
-            );
-            self.source_fell_back = true;
+            // The failed attempt recorded nothing, and the retry may wait on
+            // its source again (the portal), so the timer holds until then.
+            if let Ok(mut r) = self.shared.recorder.lock() {
+                r.rewait();
+            }
             match self.open_segment(index) {
                 Ok(seg) => {
                     self.seg = Some(seg);
+                    self.begin_clock();
                     return;
                 }
                 Err(e) => why = e,
@@ -742,15 +784,20 @@ impl Run {
                     }
                 }
                 Ok(Ctl::Resume(t)) => {
+                    // Not paused any more, but the timer holds until the
+                    // source gives a picture again (the portal may ask).
                     let next = self.shared.recorder.lock().ok().and_then(|mut r| {
                         (r.state() == RecState::Paused).then(|| {
-                            r.resume(t);
+                            r.resume_waiting();
                             r.next_segment()
                         })
                     });
                     if let Some(index) = next {
                         match self.open_segment(index) {
-                            Ok(seg) => self.seg = Some(seg),
+                            Ok(seg) => {
+                                self.seg = Some(seg);
+                                self.begin_clock();
+                            }
                             Err(e) => {
                                 if let Ok(mut r) = self.shared.recorder.lock() {
                                     r.segment_failed(t);
@@ -1297,8 +1344,8 @@ mod tests {
         };
         let dir = TempDir::new("pause");
         let mut rec = start(&dir, job(&dir, vec![]), ("libx264", false));
-        // The clock may already have run while `start` waited for the first
-        // segment, so measure the second from here.
+        // The clock runs from the first segment's opening, a moment before
+        // `start` returns, so measure the second from here.
         let before = rec.elapsed();
         sleep(1.0);
         rec.pause();
@@ -1326,6 +1373,54 @@ mod tests {
         assert!((1.6..2.6).contains(&d), "two segments joined, got {d} s");
         assert!(rec.failed().is_none());
         assert_eq!(files_in(&dir.0.join("work")), 0, "segments removed");
+    }
+
+    /// The pattern behind a source that takes a while to open, as the
+    /// ScreenCast portal does while its dialog is up.
+    struct SlowToOpen;
+
+    impl SourceFactory for SlowToOpen {
+        fn source(&self) -> Source {
+            PatternFactory { w: 64, h: 64 }.source()
+        }
+        fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
+            sleep(1.5);
+            PatternFactory { w: 64, h: 64 }.open_pipe()
+        }
+    }
+
+    #[test]
+    fn the_timer_does_not_count_a_source_that_is_slow_to_open() {
+        let _turn = one_at_a_time();
+        if ffmpeg_or_skip("the_timer_does_not_count_a_source_that_is_slow_to_open").is_none() {
+            return;
+        }
+        let dir = TempDir::new("slow-source");
+        let mut j = job(&dir, vec![]);
+        j.factory = Box::new(SlowToOpen);
+        let mut rec = start(&dir, j, ("libx264", false));
+        assert!(rec.elapsed() < 0.5, "{}", rec.elapsed());
+        sleep(0.5);
+        rec.pause();
+        for _ in 0..50 {
+            if rec.clock().paused() {
+                break;
+            }
+            sleep(0.1);
+        }
+        let paused_at = rec.elapsed();
+        rec.resume();
+        // The resume waits on the source; the timer holds meanwhile.
+        sleep(1.0);
+        assert!(!rec.clock().paused());
+        assert!(
+            rec.elapsed() - paused_at < 0.1,
+            "{paused_at} -> {}",
+            rec.elapsed()
+        );
+        sleep(1.0);
+        assert!(rec.elapsed() > paused_at, "running again");
+        rec.cancel();
     }
 
     #[test]

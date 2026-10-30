@@ -121,6 +121,29 @@ pub fn clashes(config: &Config) -> Vec<ToolId> {
     out
 }
 
+/// The recording's rebindable keys (pause, stop) that an enabled tool also
+/// has, with the first such tool. While a recording runs the recording's key
+/// wins (`live_bindings`), so that tool cannot be reached until it stops.
+/// Stop is the Video key itself, so Video holding it is no clash. Nothing
+/// clashes with Video off: no recording can start.
+pub fn recording_clashes(config: &Config) -> Vec<(Action, ToolId)> {
+    if !config.is_tool_enabled(ToolId::Video) {
+        return Vec::new();
+    }
+    recording_bindings(config)
+        .into_iter()
+        .filter(|(_, action)| *action != Action::RecordCancel)
+        .filter_map(|(shortcut, action)| {
+            ToolId::ALL
+                .into_iter()
+                .filter(|tool| config.is_tool_enabled(*tool))
+                .filter(|tool| !(action == Action::RecordStop && *tool == ToolId::Video))
+                .find(|tool| *config.tool_shortcut(*tool) == shortcut)
+                .map(|tool| (action, tool))
+        })
+        .collect()
+}
+
 /// "F1".."F24" -> 1..=24 (no leading zeros, no sign).
 fn function_key(key: &str) -> Option<u16> {
     let digits = key.strip_prefix('F')?;
@@ -311,6 +334,40 @@ mod tests {
         assert!(
             recording_keys_untaken(&c).contains(&(c.video.shortcut.clone(), Action::RecordStop))
         );
+    }
+
+    #[test]
+    fn a_recording_key_a_tool_has_is_a_clash() {
+        assert!(recording_clashes(&Config::default()).is_empty());
+        // Pause on the Screenshot key.
+        let mut c = Config::default();
+        c.video.pause_shortcut = Shortcut::ctrl_shift_s();
+        assert_eq!(
+            recording_clashes(&c),
+            [(Action::RecordPause, ToolId::Screenshot)]
+        );
+        // Pause on the Video key itself: it would pause, never stop.
+        let mut c = Config::default();
+        c.video.pause_shortcut = c.video.shortcut.clone();
+        assert_eq!(
+            recording_clashes(&c),
+            [(Action::RecordPause, ToolId::Video)]
+        );
+        // Stop (the Video key) on the capture launcher's key.
+        let mut c = Config::default();
+        c.video.shortcut = Shortcut::print_screen();
+        assert_eq!(
+            recording_clashes(&c),
+            [(Action::RecordStop, ToolId::CaptureLauncher)]
+        );
+        // A disabled tool holds nothing.
+        c.capture.enabled = false;
+        assert!(recording_clashes(&c).is_empty());
+        // With Video off nothing is recorded, so nothing clashes.
+        let mut c = Config::default();
+        c.video.pause_shortcut = Shortcut::ctrl_shift_s();
+        c.video.enabled = false;
+        assert!(recording_clashes(&c).is_empty());
     }
 
     #[test]
