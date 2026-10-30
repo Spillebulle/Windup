@@ -197,6 +197,72 @@ pub fn record_bar_host(f: &Facts) -> BarHost {
     }
 }
 
+/// How a Wayland route learns where the pointer was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WlPointer {
+    /// The capture protocol's cursor session.
+    CursorSession,
+    Hyprland,
+    /// Sway only says which output has focus.
+    SwayFocus,
+    Unknown,
+}
+
+/// How Steps takes the picture for each click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepRoute {
+    Gdi,
+    X11,
+    Screencopy { ext: bool, pointer: WlPointer },
+    KWin,
+    ScreenCast,
+    None,
+}
+
+/// The order to try the Steps back ends in; never empty. Protocols are
+/// detected as `video_order` does. The standard one always has a cursor
+/// session; the wlroots one needs the compositor's own way to find the pointer.
+pub fn steps_order(f: &Facts) -> Vec<StepRoute> {
+    if f.windows {
+        return vec![StepRoute::Gdi];
+    }
+    if f.x11_only {
+        return vec![StepRoute::X11];
+    }
+    let mut order = Vec::new();
+    if f.has("ext_image_copy_capture_manager_v1")
+        && f.has("ext_output_image_capture_source_manager_v1")
+    {
+        order.push(StepRoute::Screencopy {
+            ext: true,
+            pointer: WlPointer::CursorSession,
+        });
+    }
+    if f.has("zwlr_screencopy_manager_v1") {
+        let pointer = if f.hyprland {
+            WlPointer::Hyprland
+        } else if f.swaysock {
+            WlPointer::SwayFocus
+        } else {
+            WlPointer::Unknown
+        };
+        order.push(StepRoute::Screencopy {
+            ext: false,
+            pointer,
+        });
+    }
+    if f.kde() {
+        order.push(StepRoute::KWin);
+    }
+    if f.portal_screencast {
+        order.push(StepRoute::ScreenCast);
+    }
+    if order.is_empty() {
+        order.push(StepRoute::None);
+    }
+    order
+}
+
 /// How windows are found.
 pub fn rects(f: &Facts) -> Rects {
     if f.windows {
@@ -396,6 +462,50 @@ mod tests {
             video_order(&all_globals("COSMIC", false)),
             [Moving::ExtImageCopy, Moving::WlrScreencopy]
         );
+    }
+
+    #[test]
+    fn steps_order_per_desktop() {
+        let sc = |ext, pointer| StepRoute::Screencopy { ext, pointer };
+        let f = Facts {
+            windows: true,
+            ..Facts::default()
+        };
+        assert_eq!(steps_order(&f), [StepRoute::Gdi]);
+        let f = Facts {
+            x11_only: true,
+            ..Facts::default()
+        };
+        assert_eq!(steps_order(&f), [StepRoute::X11]);
+        let f = wl(&[EXT[0], EXT[1]], "COSMIC", false);
+        assert_eq!(steps_order(&f), [sc(true, WlPointer::CursorSession)]);
+        let mut f = wl(
+            &[EXT[0], EXT[1], "zwlr_screencopy_manager_v1"],
+            "sway",
+            false,
+        );
+        f.swaysock = true;
+        assert_eq!(
+            steps_order(&f),
+            [
+                sc(true, WlPointer::CursorSession),
+                sc(false, WlPointer::SwayFocus)
+            ]
+        );
+        let mut f = wl(&["zwlr_screencopy_manager_v1"], "sway", false);
+        f.swaysock = true;
+        assert_eq!(steps_order(&f), [sc(false, WlPointer::SwayFocus)]);
+        let mut f = wl(&["zwlr_screencopy_manager_v1"], "Hyprland", false);
+        f.hyprland = true;
+        assert_eq!(steps_order(&f), [sc(false, WlPointer::Hyprland)]);
+        let f = wl(&["zwlr_screencopy_manager_v1"], "river", false);
+        assert_eq!(steps_order(&f), [sc(false, WlPointer::Unknown)]);
+        let f = wl(&["wl_compositor"], "KDE", true);
+        assert_eq!(steps_order(&f), [StepRoute::KWin, StepRoute::ScreenCast]);
+        let f = wl(&["wl_compositor"], "ubuntu:GNOME", true);
+        assert_eq!(steps_order(&f), [StepRoute::ScreenCast]);
+        let f = wl(&["wl_compositor", "xdg_wm_base"], "", false);
+        assert_eq!(steps_order(&f), [StepRoute::None]);
     }
 
     #[test]
