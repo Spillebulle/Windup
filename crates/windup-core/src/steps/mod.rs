@@ -3,6 +3,7 @@
 
 pub mod avail;
 pub mod clicks;
+pub mod export;
 pub mod glyphs;
 pub mod marker;
 pub mod model;
