@@ -4,6 +4,7 @@
 
 - The Video settings warn when the Pause shortcut is also another tool's shortcut, with the same caution keycap as a clashing tool shortcut: while a recording runs, those keys pause it instead.
 - On Windows laptops with Intel graphics and an NVIDIA or AMD card, recordings stay on the NVIDIA or AMD encoder. When it cannot read the screen straight from the Intel card, Windup copies the frames over instead of falling back to the much slower software encoder.
+- The recording bar's timer starts at 0:00 when the recording really starts. On KDE and GNOME it no longer counts the time the screen-sharing dialog was open, at the start or when resuming from a pause.
 
 ## 0.3.1
 

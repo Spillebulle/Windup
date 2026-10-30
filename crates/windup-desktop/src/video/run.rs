@@ -182,7 +182,9 @@ impl Recording {
 
         let shared = Arc::new(Shared {
             t0: Instant::now(),
-            recorder: Mutex::new(Recorder::start(0.0)),
+            // The clock starts once segment 0 is open: the ScreenCast
+            // portal's dialog, answered meanwhile, recorded nothing.
+            recorder: Mutex::new(Recorder::start_waiting()),
             failed: Mutex::new(None),
             sound_lost: job.audio.iter().filter_map(|a| a.lost()).collect(),
             abort: AtomicBool::new(false),
@@ -210,7 +212,10 @@ impl Recording {
             hold_check_for_writer: hooks.hold_check_for_writer,
         };
         match run.open_segment(0) {
-            Ok(seg) => run.seg = Some(seg),
+            Ok(seg) => {
+                run.seg = Some(seg);
+                run.begin_clock();
+            }
             Err(e) => {
                 run.remove_dir();
                 return Err(e);
@@ -450,6 +455,14 @@ impl Run {
     fn segment_path(&self, index: u32) -> PathBuf {
         self.dir
             .join(format!("seg-{index}.{}", segment_ext(self.cfg.container)))
+    }
+
+    /// The open segment's source is giving its picture, so the timer runs.
+    fn begin_clock(&self) {
+        let now = self.shared.now();
+        if let Ok(mut r) = self.shared.recorder.lock() {
+            r.begin(now);
+        }
     }
 
     /// The source segments use now: the factory's, or its fallback once
@@ -765,15 +778,20 @@ impl Run {
                     }
                 }
                 Ok(Ctl::Resume(t)) => {
+                    // Not paused any more, but the timer holds until the
+                    // source gives a picture again (the portal may ask).
                     let next = self.shared.recorder.lock().ok().and_then(|mut r| {
                         (r.state() == RecState::Paused).then(|| {
-                            r.resume(t);
+                            r.resume_waiting();
                             r.next_segment()
                         })
                     });
                     if let Some(index) = next {
                         match self.open_segment(index) {
-                            Ok(seg) => self.seg = Some(seg),
+                            Ok(seg) => {
+                                self.seg = Some(seg);
+                                self.begin_clock();
+                            }
                             Err(e) => {
                                 if let Ok(mut r) = self.shared.recorder.lock() {
                                     r.segment_failed(t);
@@ -1320,8 +1338,8 @@ mod tests {
         };
         let dir = TempDir::new("pause");
         let mut rec = start(&dir, job(&dir, vec![]), ("libx264", false));
-        // The clock may already have run while `start` waited for the first
-        // segment, so measure the second from here.
+        // The clock runs from the first segment's opening, a moment before
+        // `start` returns, so measure the second from here.
         let before = rec.elapsed();
         sleep(1.0);
         rec.pause();
@@ -1349,6 +1367,54 @@ mod tests {
         assert!((1.6..2.6).contains(&d), "two segments joined, got {d} s");
         assert!(rec.failed().is_none());
         assert_eq!(files_in(&dir.0.join("work")), 0, "segments removed");
+    }
+
+    /// The pattern behind a source that takes a while to open, as the
+    /// ScreenCast portal does while its dialog is up.
+    struct SlowToOpen;
+
+    impl SourceFactory for SlowToOpen {
+        fn source(&self) -> Source {
+            PatternFactory { w: 64, h: 64 }.source()
+        }
+        fn open_pipe(&self) -> Result<Box<dyn FrameSource>, String> {
+            sleep(1.5);
+            PatternFactory { w: 64, h: 64 }.open_pipe()
+        }
+    }
+
+    #[test]
+    fn the_timer_does_not_count_a_source_that_is_slow_to_open() {
+        let _turn = one_at_a_time();
+        if ffmpeg_or_skip("the_timer_does_not_count_a_source_that_is_slow_to_open").is_none() {
+            return;
+        }
+        let dir = TempDir::new("slow-source");
+        let mut j = job(&dir, vec![]);
+        j.factory = Box::new(SlowToOpen);
+        let mut rec = start(&dir, j, ("libx264", false));
+        assert!(rec.elapsed() < 0.5, "{}", rec.elapsed());
+        sleep(0.5);
+        rec.pause();
+        for _ in 0..50 {
+            if rec.clock().paused() {
+                break;
+            }
+            sleep(0.1);
+        }
+        let paused_at = rec.elapsed();
+        rec.resume();
+        // The resume waits on the source; the timer holds meanwhile.
+        sleep(1.0);
+        assert!(!rec.clock().paused());
+        assert!(
+            rec.elapsed() - paused_at < 0.1,
+            "{paused_at} -> {}",
+            rec.elapsed()
+        );
+        sleep(1.0);
+        assert!(rec.elapsed() > paused_at, "running again");
+        rec.cancel();
     }
 
     #[test]
