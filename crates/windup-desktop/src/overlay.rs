@@ -46,7 +46,29 @@ pub(crate) struct Overlay {
     notice: Option<Notice>,
 }
 
+/// The notice when a step cannot be edited because a capture is open.
+pub(crate) const EDIT_CAPTURE_OPEN: &str = "Close the capture before editing a step.";
+/// The notice when a step cannot be edited because Steps is recording.
+pub(crate) const EDIT_STEPS_BUSY: &str = "Stop recording steps before editing a step.";
+
+/// Why the editor cannot open on a step now, as the notice says it.
+pub(crate) fn edit_refusal(overlay_open: bool, steps_busy: bool) -> Option<&'static str> {
+    if overlay_open {
+        Some(EDIT_CAPTURE_OPEN)
+    } else if steps_busy {
+        Some(EDIT_STEPS_BUSY)
+    } else {
+        None
+    }
+}
+
 impl Overlay {
+    /// Whether a capture overlay (or the step editor) is open, or its
+    /// outcome is still to be handled.
+    pub(crate) fn open(&self) -> bool {
+        self.capture.is_some() || self.finishing.is_some()
+    }
+
     /// Whether a capture or its notice is on the screen.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn busy(&self) -> bool {
@@ -237,9 +259,12 @@ impl WindupApp {
     /// Ctrl+S writes the edits back into the file; Esc leaves it alone.
     /// Refused while a capture is open: one overlay at a time.
     pub(crate) fn edit_step(&mut self, ctx: &egui::Context, path: PathBuf, monitor: &str) {
-        let o = &self.overlay;
-        if o.capture.is_some() || o.finishing.is_some() || self.host != Host::Viewport {
-            log::debug!("steps: the editor cannot open now");
+        if self.host != Host::Viewport {
+            log::debug!("steps: no editor on this host");
+            return;
+        }
+        if let Some(why) = edit_refusal(self.overlay.open(), self.rec.steps_busy()) {
+            self.open_notice(ctx, why, None);
             return;
         }
         let image = match image::open(&path) {
@@ -878,6 +903,14 @@ mod tests {
         assert!(fullscreen_now(steps(2)), "mapped: the message");
         assert!(fullscreen_now(steps(FOCUS_FRAMES - 1)));
         assert!(!fullscreen_now(steps(FOCUS_FRAMES)), "not every frame");
+    }
+
+    #[test]
+    fn a_step_is_not_edited_under_a_capture_or_while_steps_record() {
+        assert_eq!(edit_refusal(false, false), None);
+        assert_eq!(edit_refusal(true, false), Some(EDIT_CAPTURE_OPEN));
+        assert_eq!(edit_refusal(false, true), Some(EDIT_STEPS_BUSY));
+        assert_eq!(edit_refusal(true, true), Some(EDIT_CAPTURE_OPEN));
     }
 
     #[test]

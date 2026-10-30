@@ -300,6 +300,12 @@ impl WindupApp {
     /// Esc, for whichever session runs.
     pub(crate) fn cancel_live(&mut self) {
         if self.rec.steps_busy() {
+            // Stopped means kept: a cancel that comes after (the command;
+            // Esc is let go at the stop) does not throw the steps away.
+            if !self.rec.steps_cancellable() {
+                log::info!("steps: stopping already, the cancel is ignored");
+                return;
+            }
             self.cancel_steps();
         } else {
             self.cancel_recording();
@@ -338,13 +344,26 @@ impl WindupApp {
         if !self.config.is_tool_enabled(ToolId::Steps) || self.host != Host::Viewport {
             return;
         }
-        if self.rec.live.busy() || self.rec.steps.is_some() || self.rec.steps_opening.is_some() {
-            log::debug!("steps: a recording or Steps session is under way");
-            return;
-        }
-        if self.review.is_some() {
-            self.open_notice(ctx, FINISH_REVIEW_FIRST, None);
-            return;
+        let block = steps_start_block(
+            self.rec.live.busy(),
+            self.rec.steps.is_some() || self.rec.steps_opening.is_some(),
+            self.overlay.open(),
+            self.review.is_some(),
+        );
+        match block {
+            Some(StartBlock::Busy) => {
+                log::debug!("steps: a recording or Steps session is under way");
+                return;
+            }
+            Some(StartBlock::Overlay) => {
+                log::debug!("steps: the capture overlay or the step editor is open");
+                return;
+            }
+            Some(StartBlock::Review) => {
+                self.open_notice(ctx, FINISH_REVIEW_FIRST, None);
+                return;
+            }
+            None => {}
         }
         if let Err(why) = availability::cached(&self.config.video).steps {
             self.open_notice(ctx, why, None);
@@ -748,6 +767,41 @@ impl Rec {
     pub(crate) fn steps_busy(&self) -> bool {
         self.steps.is_some() || self.steps_opening.is_some() || self.steps_pending.is_some()
     }
+
+    /// Whether a cancel may still throw the session away: not once it was
+    /// stopped, which keeps the steps for the review.
+    fn steps_cancellable(&self) -> bool {
+        !self.steps_stopping
+    }
+}
+
+/// Why a Steps session cannot start now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartBlock {
+    /// A recording or another Steps session is under way.
+    Busy,
+    /// The capture overlay or the step editor is open: its frozen picture
+    /// would be what the steps show.
+    Overlay,
+    /// A review is open: one at a time.
+    Review,
+}
+
+pub(crate) fn steps_start_block(
+    video_busy: bool,
+    steps_live: bool,
+    overlay_open: bool,
+    review_open: bool,
+) -> Option<StartBlock> {
+    if video_busy || steps_live {
+        Some(StartBlock::Busy)
+    } else if overlay_open {
+        Some(StartBlock::Overlay)
+    } else if review_open {
+        Some(StartBlock::Review)
+    } else {
+        None
+    }
 }
 
 /// Opens a Steps camera and plans its bar; on the worker, since a portal
@@ -930,6 +984,38 @@ mod tests {
         DRect { x, y, w, h }
     }
     const BAR: (f32, f32) = (300.0, 80.0);
+
+    #[test]
+    fn steps_do_not_start_under_the_overlay_or_beside_a_review() {
+        assert_eq!(steps_start_block(false, false, false, false), None);
+        assert_eq!(
+            steps_start_block(false, false, true, false),
+            Some(StartBlock::Overlay),
+            "the launcher or the step editor is open"
+        );
+        assert_eq!(
+            steps_start_block(false, false, false, true),
+            Some(StartBlock::Review)
+        );
+        assert_eq!(
+            steps_start_block(true, false, true, true),
+            Some(StartBlock::Busy)
+        );
+        assert_eq!(
+            steps_start_block(false, true, false, false),
+            Some(StartBlock::Busy)
+        );
+    }
+
+    #[test]
+    fn a_stopped_session_is_not_cancelled() {
+        assert!(Rec::default().steps_cancellable());
+        let stopping = Rec {
+            steps_stopping: true,
+            ..Rec::default()
+        };
+        assert!(!stopping.steps_cancellable());
+    }
 
     #[test]
     fn a_close_waits_only_for_a_recording_it_would_end() {

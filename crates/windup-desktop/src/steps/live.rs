@@ -392,14 +392,10 @@ impl CameraThread {
             };
             let at_ms = self.started.elapsed().as_millis() as u64;
             match self.shoot(at, &facts) {
-                Ok(mut shot) => {
+                Ok(shot) => {
                     failures = 0;
                     if shot.image.width() > 0 {
                         units_per_point = shot.scale * shot.monitor.w / shot.image.width() as f32;
-                    }
-                    // A key press has no point to mark.
-                    if cause == StepCause::Hotkey {
-                        shot.pointer = None;
                     }
                     if self.jobs.send(Job { shot, cause, at_ms }).is_err() {
                         // The writer has given up; its reason ends the session.
@@ -705,7 +701,8 @@ mod tests {
         let files: Vec<_> = doc.steps.iter().map(|s| s.file.as_str()).collect();
         assert_eq!(files, ["01.png", "02.png"]);
         assert_eq!(doc.steps[0].cause, StepCause::Hotkey);
-        assert_eq!(doc.steps[0].pointer, None);
+        // A key step marks where the pointer was, as a click does.
+        assert_eq!(doc.steps[0].pointer, Some([3.0, 4.0]));
         assert_eq!(doc.steps[1].cause, StepCause::Click(Button::Left));
         assert_eq!(doc.steps[1].pointer, Some([3.0, 4.0]));
         assert_eq!(doc.steps[1].monitor, "A");

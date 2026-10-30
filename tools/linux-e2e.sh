@@ -527,16 +527,15 @@ x11_steps() {
         return
     fi
     dir=$(find "$root" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-    # A step taken with the key has no pointer to mark; the clicks do.
+    # Every step marks the pointer, the one taken with the key too.
     if [ -n "$dir" ] && python3 - "$dir/steps.json" <<'PY'
 import json, sys
 steps = json.load(open(sys.argv[1]))["steps"]
-clicks = [s for s in steps if s["cause"] != "Hotkey"]
 assert len(steps) == 3, len(steps)
-assert len(clicks) == 2 and all(s["pointer"] is not None for s in clicks), steps
+assert all(s["pointer"] is not None for s in steps), steps
 PY
     then
-        ok "x11: steps.json holds the three steps, the clicks with the pointer"
+        ok "x11: steps.json holds the three steps, each with the pointer"
     else
         bad "x11: steps.json is not the three steps (${dir:-no folder})"
     fi
@@ -572,7 +571,7 @@ PY
     else
         bad "x11: a second Steps session did not start"
     fi
-    if wait_for 50 grep -q "steps keys released" "$log"; then
+    if wait_for 50 sh -c "[ \$(grep -c 'steps keys released' '$log') -ge 2 ]"; then
         ok "x11: the Steps keys were let go"
     else
         bad "x11: the Steps keys are still grabbed"

@@ -30,7 +30,7 @@ pub struct Step {
     /// `01.png`, relative to the session folder.
     pub file: String,
     pub cause: StepCause,
-    /// In the image's pixels; none for a hotkey picture.
+    /// In the image's pixels; none when the pointer was not found.
     pub pointer: Option<[f32; 2]>,
     /// Image pixels per point, used to size the marker.
     pub scale: f32,
