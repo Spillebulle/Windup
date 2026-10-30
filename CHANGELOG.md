@@ -1,15 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Steps, a click-by-click recorder for step-by-step guides. Win+Shift+G (Super+Shift+G on Linux) starts it from anywhere, or choose Steps on the capture bar. Each click takes a picture of the monitor under the pointer with a marker where you clicked, a ring, a numbered badge or an arrow in the colour and size you choose, and Win+Shift+X takes a step by hand. A small bar counts the steps, with pause and stop, and is never in a picture. Win+Shift+P pauses, as for Video; the same keys again stop; Esc throws the steps away and leaves no files.
 - Stopping opens a review: number, caption and remove each step, or open one in the editor to draw on it or blur part of it. Export as one web page with the pictures inside, a PDF, Markdown with an images folder, or the numbered pictures, to Documents, Windup unless you choose another folder. Markdown and Images will not write into a folder that is not empty.
 - A Steps settings pane: the keys, whether clicks, the hotkey or both take a step, the marker with a preview, and the export format, folder and file name. A choice that cannot work on this desktop is greyed out and says why.
 - On Linux, `windup --steps`, `--step` and `--steps-stop`, for desktops where the keys are bound in their own settings; `--record-pause`, `--record-stop` and `--record-cancel` act on Steps too. Wayland does not let applications see clicks in other windows: the deb, rpm and Arch packages install a udev rule that lets Windup read mice and touchpads, never keyboards, and the AppImage offers "Capture clicks too", which adds you to the input group once you give your password. KDE's installed package takes the pictures through KWin with no dialog; the AppImage on KDE, and GNOME, ask once to share the screen, as for Video. Sway does not say where the pointer is, so its steps show the pointer itself and no marker. The Linux page of the docs has the details.
-
 - The Video settings warn when the Pause shortcut is also another tool's shortcut, with the same caution keycap as a clashing tool shortcut: while a recording runs, those keys pause it instead.
 - On Windows laptops with Intel graphics and an NVIDIA or AMD card, recordings stay on the NVIDIA or AMD encoder. When it cannot read the screen straight from the Intel card, Windup copies the frames over instead of falling back to the much slower software encoder.
 - The recording bar's timer starts at 0:00 when the recording really starts. On KDE and GNOME it no longer counts the time the screen-sharing dialog was open, at the start or when resuming from a pause.
+- On X11, a shortcut pressed right after a recording starts or ends is no longer lost: Windup used to let go of every key for about a second while it rebound them.
 
 ## 0.3.1
 
