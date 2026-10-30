@@ -118,6 +118,11 @@ pub mod metrics {
     pub const NOTICE_W: f32 = 320.0;
     /// Width of a step's thumbnail in the Steps review.
     pub const REVIEW_THUMB_W: f32 = 240.0;
+    /// A review thumbnail not drawn yet keeps a screen's shape: its height
+    /// over its width.
+    pub const REVIEW_PLACEHOLDER_ASPECT: f32 = 9.0 / 16.0;
+    /// §7.6: the danger button's edge is `critical` at 40 %.
+    pub const DANGER_EDGE_ALPHA: f32 = 0.4;
     /// The Steps review window: §7.17's standard dialog width, and tall
     /// enough for a few rows.
     pub const REVIEW_W: f32 = 760.0;

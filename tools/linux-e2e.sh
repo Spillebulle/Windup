@@ -37,7 +37,7 @@ bad() { echo "  FAIL  $*"; fail=$((fail + 1)); }
 # A fresh home for every session, so config and history start empty.
 fresh_home() {
     home=$(mktemp -d)
-    export HOME=$home XDG_CONFIG_HOME=$home/.config XDG_DATA_HOME=$home/.local/share
+    export HOME=$home XDG_CONFIG_HOME=$home/.config XDG_DATA_HOME=$home/.local/share XDG_CACHE_HOME=$home/.cache
     history=$XDG_CONFIG_HOME/windup/clipboard_history.json
     runtime=$(mktemp -d)
     chmod 700 "$runtime"
@@ -509,7 +509,9 @@ x11_steps() {
     sleep 0.5
     xdotool mousemove 300 400 click 1
     sleep 0.6
-    xdotool click 3
+    # Not a right click: that lands on the bare root, where openbox opens
+    # its menu and grabs the keyboard, so the keys after it never arrive.
+    xdotool click 1
     sleep 0.6
     xdotool key super+shift+x
     if wait_for 100 grep -q "steps: step 3 written" "$log"; then

@@ -142,10 +142,6 @@ impl ReviewModel {
 }
 
 const CONFIRM: &str = "Discard these steps? They have not been exported.";
-/// A thumbnail not drawn yet keeps a screen's shape.
-const PLACEHOLDER_ASPECT: f32 = 9.0 / 16.0;
-/// §7.6: the danger button's edge is `critical` at 40 %.
-const DANGER_EDGE: f32 = 0.4;
 
 /// A control the pointer is over, for its tooltip.
 type Tip = Option<(Id, Rect, &'static str)>;
@@ -264,7 +260,7 @@ impl ReviewView {
     ) {
         let step = &m.doc.steps[i];
         let thumb_w = metrics::REVIEW_THUMB_W;
-        let thumb_h = thumb.map_or(thumb_w * PLACEHOLDER_ASPECT, |t| {
+        let thumb_h = thumb.map_or(thumb_w * metrics::REVIEW_PLACEHOLDER_ASPECT, |t| {
             let s = t.size_vec2();
             thumb_w * s.y / s.x.max(1.0)
         });
@@ -641,7 +637,10 @@ fn danger(ui: &mut Ui, p: &Palette, label: &str) -> bool {
     painter.rect_stroke(
         rect,
         metrics::RADIUS,
-        Stroke::new(metrics::HAIRLINE, p.critical.gamma_multiply(DANGER_EDGE)),
+        Stroke::new(
+            metrics::HAIRLINE,
+            p.critical.gamma_multiply(metrics::DANGER_EDGE_ALPHA),
+        ),
         StrokeKind::Inside,
     );
     painter.text(

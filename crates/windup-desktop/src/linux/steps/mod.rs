@@ -3,10 +3,6 @@
 //! rule does, and the cameras: screencopy (COSMIC, wlroots), KWin (KDE's
 //! installed package) and the ScreenCast portal (GNOME, the KDE AppImage).
 
-// The settings pane's "Capture clicks too" is not in yet; remove this once
-// it is.
-#![allow(dead_code)]
-
 pub(crate) mod evdev;
 pub(crate) mod kwin;
 pub(crate) mod screencast;

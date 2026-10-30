@@ -35,6 +35,16 @@ pub fn usermod_args(user: &str) -> Result<[String; 4], String> {
     Ok(["usermod", "-aG", INPUT_GROUP, user].map(String::from))
 }
 
+/// Where usermod is, of `USERMOD_PATHS`, by `exists`. By path: /usr/sbin is
+/// not on an ordinary user's PATH on Debian, and pkexec looks a bare name up
+/// in the caller's; then fails with the same code as a refused password.
+fn usermod_path(exists: impl Fn(&str) -> bool) -> Result<&'static str, String> {
+    USERMOD_PATHS
+        .into_iter()
+        .find(|p| exists(p))
+        .ok_or_else(|| "usermod was not found on this system.".to_owned())
+}
+
 /// Adds this user to the input group through pkexec, which asks for the
 /// password. `Err("Cancelled.")` when the user said no.
 pub fn join_input_group() -> Result<(), String> {
@@ -43,13 +53,8 @@ pub fn join_input_group() -> Result<(), String> {
         .ok()
         .and_then(|p| user_name(&p, uid))
         .ok_or("Your user name was not found.")?;
-    let [usermod, args @ ..] = usermod_args(&user)?;
-    // By path: /usr/sbin is not on an ordinary user's PATH on Debian, and
-    // pkexec looks the program up in the caller's.
-    let usermod = USERMOD_PATHS
-        .iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .map_or(usermod, |p| (*p).to_owned());
+    let [_, args @ ..] = usermod_args(&user)?;
+    let usermod = usermod_path(|p| std::path::Path::new(p).exists())?;
     let status = Command::new("pkexec")
         .arg(usermod)
         .args(&args)
@@ -77,6 +82,20 @@ mod tests {
         for bad in ["an:na", "../anna", "anna/x", "", "-anna", "an na"] {
             assert!(usermod_args(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn usermod_is_run_by_its_path_or_not_at_all() {
+        assert_eq!(usermod_path(|_| true), Ok("/usr/sbin/usermod"));
+        assert_eq!(
+            usermod_path(|p| p == "/usr/bin/usermod"),
+            Ok("/usr/bin/usermod")
+        );
+        // Never the bare name: pkexec's 127 for it reads as "Cancelled.".
+        assert_eq!(
+            usermod_path(|_| false),
+            Err("usermod was not found on this system.".to_owned())
+        );
     }
 
     #[test]

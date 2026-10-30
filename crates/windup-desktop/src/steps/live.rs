@@ -498,14 +498,14 @@ fn encode_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
 /// Called once at startup.
 pub fn remove_stale_sessions() {
     if let Some(root) = steps_root() {
-        remove_stale_in(&root, crate::video::run::process_running);
+        remove_stale_in(&root, windup_running);
     }
 }
 
 /// Removes every folder in `root` but those whose owner is this process or
-/// another that still runs (a second Windup on Windows, which has no single
-/// instance). A folder with no readable owner is a leftover. Anything that
-/// is not a folder is left.
+/// another Windup that still runs (a second Windup on Windows, which has no
+/// single instance). A folder with no readable owner is a leftover. Anything
+/// that is not a folder is left.
 fn remove_stale_in(root: &Path, running: impl Fn(u32) -> bool) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
@@ -529,6 +529,87 @@ fn remove_stale_in(root: &Path, running: impl Fn(u32) -> bool) {
             Err(e) => log::warn!("could not remove {}: {e}", path.display()),
         }
     }
+}
+
+/// Whether `theirs`, a running process's program, is `ours`: the same file
+/// name, so a Windup of another version or install counts. Linux marks a
+/// program replaced since it started " (deleted)"; Windows ignores case.
+fn same_program(ours: &Path, theirs: &Path) -> bool {
+    let name = |p: &Path| {
+        let name = p.file_name()?.to_string_lossy().into_owned();
+        let name = match name.strip_suffix(" (deleted)") {
+            Some(kept) => kept.to_owned(),
+            None => name,
+        };
+        Some(if cfg!(windows) {
+            name.to_lowercase()
+        } else {
+            name
+        })
+    };
+    name(ours).is_some_and(|n| Some(n) == name(theirs))
+}
+
+/// Whether process `pid` runs and is a Windup, so that a crashed session's
+/// folder is not kept for whatever process later gets its id. Where the
+/// program cannot be told but the process runs, it is taken to be one.
+#[cfg(target_os = "linux")]
+fn windup_running(pid: u32) -> bool {
+    let proc = Path::new("/proc").join(pid.to_string());
+    if !proc.exists() {
+        return false;
+    }
+    if let Ok(ours) = std::env::current_exe()
+        && let Ok(theirs) = std::fs::read_link(proc.join("exe"))
+    {
+        return same_program(&ours, &theirs);
+    }
+    // No exe to read: the names, as `comm` keeps them.
+    match (
+        std::fs::read_to_string("/proc/self/comm"),
+        std::fs::read_to_string(proc.join("comm")),
+    ) {
+        (Ok(ours), Ok(theirs)) => ours.trim() == theirs.trim(),
+        _ => true,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windup_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    if !crate::video::run::process_running(pid) {
+        return false;
+    }
+    let Ok(ours) = std::env::current_exe() else {
+        return true;
+    };
+    // SAFETY: plain calls into a buffer of the size given; the handle is
+    // closed before returning.
+    let theirs = unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            // Runs, as another user or elevated: cannot be told.
+            return true;
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) != 0;
+        CloseHandle(h);
+        if !ok {
+            return true;
+        }
+        PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]))
+    };
+    same_program(&ours, &theirs)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn windup_running(pid: u32) -> bool {
+    crate::video::run::process_running(pid)
 }
 
 #[cfg(test)]
@@ -951,9 +1032,68 @@ mod tests {
         assert!(ours.is_dir() && other.is_dir());
         assert!(!dead.exists());
         // The real check: no process has this id.
-        remove_stale_in(&root, crate::video::run::process_running);
+        remove_stale_in(&root, windup_running);
         assert!(ours.is_dir());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A running process that is not a Windup: one that waits for its
+    /// input to end.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn waiting_child() -> std::process::Child {
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", "pause"]);
+            c
+        } else {
+            std::process::Command::new("cat")
+        };
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn a_reused_id_does_not_keep_a_folder() {
+        let root = std::env::temp_dir().join(format!("windup-steps-reused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("2026-10-30 142501");
+        std::fs::create_dir_all(&dir).unwrap();
+        // The crashed Windup's id, now another program's.
+        let mut child = waiting_child();
+        std::fs::write(dir.join(OWNER_FILE), child.id().to_string()).unwrap();
+        assert!(windup_running(std::process::id()));
+        assert!(!windup_running(child.id()));
+        remove_stale_in(&root, windup_running);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!dir.exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_program_is_known_by_its_file_name() {
+        let p = Path::new;
+        assert!(same_program(p("/usr/bin/windup"), p("/opt/windup/windup")));
+        assert!(same_program(
+            p("/usr/bin/windup"),
+            p("/usr/bin/windup (deleted)")
+        ));
+        assert!(!same_program(p("/usr/bin/windup"), p("/usr/bin/bash")));
+        assert!(!same_program(
+            p("/usr/bin/windup"),
+            p("/usr/bin/windup-old")
+        ));
+        assert!(!same_program(p("/usr/bin/windup"), p("")));
+        assert_eq!(
+            same_program(
+                p("C:/Program Files/Windup/windup.exe"),
+                p("C:/x/WINDUP.EXE")
+            ),
+            cfg!(windows)
+        );
     }
 
     #[test]

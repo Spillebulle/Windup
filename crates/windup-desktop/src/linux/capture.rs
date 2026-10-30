@@ -144,6 +144,14 @@ pub(super) struct Stepping {
     editing: Option<PathBuf>,
 }
 
+impl Stepping {
+    /// Whether a cancel may still throw the session away: not once it was
+    /// stopped, which keeps the steps for the review.
+    fn cancellable(&self) -> bool {
+        !self.stopping
+    }
+}
+
 /// A Steps camera opened by the worker, and what the bar is placed from.
 struct Opened {
     camera: Box<dyn Camera>,
@@ -509,6 +517,12 @@ impl Background {
     /// Esc, for whichever session runs.
     pub(super) fn cancel_live(&mut self) {
         if self.steps_busy() {
+            // Stopped means kept: a cancel that comes after (Esc not yet
+            // let go, or the command) does not throw the steps away.
+            if !self.capture.stepping.cancellable() {
+                log::info!("steps: stopping already, the cancel is ignored");
+                return;
+            }
             self.cancel_steps();
         } else {
             self.cancel_recording();
@@ -1196,6 +1210,16 @@ mod tests {
         assert_eq!(live_kind(false, true), Some(LiveKind::Steps));
         // Never both; Steps is the one that answers if it were.
         assert_eq!(live_kind(true, true), Some(LiveKind::Steps));
+    }
+
+    #[test]
+    fn a_stopped_session_is_not_cancelled() {
+        assert!(Stepping::default().cancellable());
+        let stopping = Stepping {
+            stopping: true,
+            ..Stepping::default()
+        };
+        assert!(!stopping.cancellable());
     }
 
     #[test]
