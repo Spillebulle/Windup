@@ -94,6 +94,10 @@ fn open(route: StepRoute) -> Result<Box<dyn Camera>, String> {
         StepRoute::Gdi => Ok(Box::new(super::windows::GdiCamera)),
         #[cfg(target_os = "linux")]
         StepRoute::X11 => Ok(Box::new(super::x11::X11Camera::open()?)),
+        #[cfg(target_os = "linux")]
+        StepRoute::Screencopy { ext, pointer } => Ok(Box::new(
+            crate::linux::steps::screencopy::ScreencopyCamera::new(ext, pointer),
+        )),
         other => Err(format!("no camera exists for {other:?}")),
     }
 }

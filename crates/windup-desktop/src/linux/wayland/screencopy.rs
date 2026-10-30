@@ -9,7 +9,8 @@
 //! (the overlay is drawn there afterwards); `--capture-test` calls it
 //! directly. Outputs go one at a time into a shared-memory buffer that is
 //! read back with `pread`, so nothing here is mapped or `unsafe`. The cursor
-//! is not painted (`options = 0`, `overlay_cursor = 0`).
+//! is not painted (`options = 0`, `overlay_cursor = 0`), except in a step's
+//! picture whose pointer place is not known (`grab_output`).
 
 use crate::capture::CaptureError;
 use crate::capture::pixels::{ShmFormat, Transform, to_rgba, untransform};
@@ -79,14 +80,43 @@ pub fn grab_by(
     globals: &GlobalList,
     method: Method,
 ) -> Result<DesktopShot, CaptureError> {
+    let monitors = grab_outputs(conn, globals, method, None, false)?;
+    Ok(DesktopShot { monitors })
+}
+
+/// The output called `name` alone, on a connection of its own, with the
+/// cursor painted in when `paint_cursor` (a step whose pointer place is not
+/// known shows the cursor this way instead).
+pub fn grab_output(
+    method: Method,
+    name: &str,
+    paint_cursor: bool,
+) -> Result<MonitorShot, CaptureError> {
+    let (conn, globals, _queue) = connect::<super::Probe>()?;
+    grab_outputs(&conn, &globals, method, Some(name), paint_cursor)?
+        .pop()
+        .ok_or_else(|| failed(format!("the compositor has no output called {name}")))
+}
+
+/// Every output, or only the one called `only`, by `method`.
+fn grab_outputs(
+    conn: &Connection,
+    globals: &GlobalList,
+    method: Method,
+    only: Option<&str>,
+    paint_cursor: bool,
+) -> Result<Vec<MonitorShot>, CaptureError> {
     let (queue, state) = learn_outputs(conn, globals)?;
     let qh = queue.handle();
     let shm: wl_shm::WlShm = globals
         .bind(&qh, 1..=1, ())
         .map_err(|_| CaptureError::Unsupported)?;
-    let outputs = outputs_of(&state.output_state);
+    let mut outputs = outputs_of(&state.output_state);
     if outputs.is_empty() {
         return Err(failed("the compositor reports no outputs"));
+    }
+    if let Some(name) = only {
+        outputs.retain(|o| o.name == name);
     }
     let mut cx = Cx { queue, state, shm };
     let mut monitors = Vec::new();
@@ -98,8 +128,13 @@ pub fn grab_by(
             let copy: ExtImageCopyCaptureManagerV1 = globals
                 .bind(&qh, 1..=1, ())
                 .map_err(|_| CaptureError::Unsupported)?;
+            let options = if paint_cursor {
+                Options::PaintCursors
+            } else {
+                Options::empty()
+            };
             for out in &outputs {
-                let image = cx.grab_ext(&source, &copy, out)?;
+                let image = cx.grab_ext(&source, &copy, out, options)?;
                 monitors.push(out.shot(image));
             }
             source.destroy();
@@ -111,14 +146,14 @@ pub fn grab_by(
                 .map_err(|_| CaptureError::Unsupported)?;
             let has_buffer_done = manager.version() >= 3;
             for out in &outputs {
-                let image = cx.grab_wlr(&manager, has_buffer_done, out)?;
+                let image = cx.grab_wlr(&manager, has_buffer_done, out, paint_cursor)?;
                 monitors.push(out.shot(image));
             }
             manager.destroy();
         }
     }
     let _ = conn.flush();
-    Ok(DesktopShot { monitors })
+    Ok(monitors)
 }
 
 /// A queue and state that know every output.
@@ -319,12 +354,13 @@ impl Cx {
         source: &ExtOutputImageCaptureSourceManagerV1,
         copy: &ExtImageCopyCaptureManagerV1,
         out: &OutputFacts,
+        options: Options,
     ) -> Result<image::RgbaImage, CaptureError> {
         let qh = self.queue.handle();
         let deadline = Instant::now() + OUTPUT_TIMEOUT;
         self.state.job = Job::default();
         let src = source.create_source(&out.output, &qh, ());
-        let session = copy.create_session(&src, Options::empty(), &qh, ());
+        let session = copy.create_session(&src, options, &qh, ());
         let result = self.ext_frame(&session, deadline, out);
         session.destroy();
         src.destroy();
@@ -371,11 +407,12 @@ impl Cx {
         manager: &ZwlrScreencopyManagerV1,
         has_buffer_done: bool,
         out: &OutputFacts,
+        paint_cursor: bool,
     ) -> Result<image::RgbaImage, CaptureError> {
         let qh = self.queue.handle();
         let deadline = Instant::now() + OUTPUT_TIMEOUT;
         self.state.job = Job::default();
-        let frame = manager.capture_output(0, &out.output, &qh, ());
+        let frame = manager.capture_output(i32::from(paint_cursor), &out.output, &qh, ());
         let result = self.wlr_frame(&frame, has_buffer_done, deadline, out);
         frame.destroy();
         result

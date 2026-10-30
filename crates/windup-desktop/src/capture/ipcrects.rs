@@ -231,6 +231,31 @@ pub(crate) fn hyprland_rects(clients_json: &str, monitors_json: &str) -> Vec<Win
     found.into_iter().map(|(_, w)| w).collect()
 }
 
+/// The focused output's name and rectangle from Sway's `GET_OUTPUTS` reply.
+/// Checked against sway/ipc-json.c: every output carries `focused`, and an
+/// enabled one `active` and its `rect` in the layout (logical units). A
+/// disabled output is never the answer.
+pub(crate) fn sway_focused_output(json: &str) -> Option<(String, DRect)> {
+    let Ok(Value::Array(outputs)) = serde_json::from_str::<Value>(json) else {
+        return None;
+    };
+    let flag = |o: &Value, k: &str| o.get(k).and_then(Value::as_bool) == Some(true);
+    let o = outputs
+        .iter()
+        .find(|o| flag(o, "active") && flag(o, "focused"))?;
+    let r = o.get("rect");
+    let field = |k: &str| r.and_then(|r| r.get(k)).and_then(num);
+    let rect = rect(field("x"), field("y"), field("width"), field("height"))?;
+    Some((o.get("name").and_then(Value::as_str)?.to_owned(), rect))
+}
+
+/// The pointer in the global layout from Hyprland's `j/cursorpos` reply
+/// (src/ipc/s1/Commands.cpp writes `{"x": .., "y": ..}`).
+pub(crate) fn hyprland_cursor(json: &str) -> Option<(f32, f32)> {
+    let v = serde_json::from_str::<Value>(json).ok()?;
+    Some((num(v.get("x")?)?, num(v.get("y")?)?))
+}
+
 // ---- the sockets ----------------------------------------------------------
 
 /// How long a compositor gets to answer before edges are used instead.
@@ -240,7 +265,7 @@ const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 /// Sway's windows, asked over `$SWAYSOCK`. Empty on any failure.
 #[cfg(target_os = "linux")]
 pub(crate) fn sway_live() -> Vec<WindowRect> {
-    match sway_get_tree() {
+    match sway_request(GET_TREE) {
         Ok(json) => sway_rects(&json),
         Err(e) => {
             log::debug!("sway get_tree: {e}");
@@ -249,13 +274,29 @@ pub(crate) fn sway_live() -> Vec<WindowRect> {
     }
 }
 
+/// Sway's focused output, asked over `$SWAYSOCK`; `None` on any failure.
 #[cfg(target_os = "linux")]
-fn sway_get_tree() -> std::io::Result<String> {
+pub(crate) fn sway_focused_live() -> Option<(String, DRect)> {
+    match sway_request(GET_OUTPUTS) {
+        Ok(json) => sway_focused_output(&json),
+        Err(e) => {
+            log::debug!("sway get_outputs: {e}");
+            None
+        }
+    }
+}
+
+/// i3-ipc message types.
+#[cfg(target_os = "linux")]
+const GET_OUTPUTS: u32 = 3;
+#[cfg(target_os = "linux")]
+const GET_TREE: u32 = 4;
+
+#[cfg(target_os = "linux")]
+fn sway_request(kind: u32) -> std::io::Result<String> {
     use std::io::{Error, ErrorKind, Read, Write};
     use std::os::unix::net::UnixStream;
-    /// i3-ipc message type GET_TREE.
-    const GET_TREE: u32 = 4;
-    /// A tree larger than this is not believed.
+    /// A reply larger than this is not believed.
     const MAX_REPLY: usize = 64 << 20;
 
     let path = std::env::var_os("SWAYSOCK")
@@ -266,7 +307,7 @@ fn sway_get_tree() -> std::io::Result<String> {
     let mut msg = Vec::with_capacity(14);
     msg.extend_from_slice(b"i3-ipc");
     msg.extend_from_slice(&0u32.to_le_bytes());
-    msg.extend_from_slice(&GET_TREE.to_le_bytes());
+    msg.extend_from_slice(&kind.to_le_bytes());
     s.write_all(&msg)?;
     let mut head = [0u8; 14];
     s.read_exact(&mut head)?;
@@ -291,6 +332,18 @@ pub(crate) fn hyprland_live() -> Vec<WindowRect> {
         Err(e) => {
             log::debug!("hyprland clients: {e}");
             Vec::new()
+        }
+    }
+}
+
+/// The pointer in Hyprland's global layout; `None` on any failure.
+#[cfg(target_os = "linux")]
+pub(crate) fn hyprland_cursor_live() -> Option<(f32, f32)> {
+    match hypr_request("j/cursorpos") {
+        Ok(json) => hyprland_cursor(&json),
+        Err(e) => {
+            log::debug!("hyprland cursorpos: {e}");
+            None
         }
     }
 }
@@ -345,6 +398,7 @@ mod tests {
     const SWAY: &str = include_str!("../../tests/fixtures/sway_tree.json");
     const CLIENTS: &str = include_str!("../../tests/fixtures/hypr_clients.json");
     const MONITORS: &str = include_str!("../../tests/fixtures/hypr_monitors.json");
+    const SWAY_OUTPUTS: &str = include_str!("../../tests/fixtures/sway_outputs.json");
 
     fn titles(v: &[WindowRect]) -> Vec<&str> {
         v.iter().map(|w| w.title.as_str()).collect()
@@ -427,6 +481,35 @@ mod tests {
         let r = sway_rects(tree);
         assert_eq!(titles(&r), ["a"]);
         assert_eq!((r[0].rect.y, r[0].rect.h), (0.0, 200.0));
+    }
+
+    #[test]
+    fn sway_focused_output_is_the_one_marked_focused() {
+        let rect = DRect {
+            x: 1920.0,
+            y: 0.0,
+            w: 2560.0,
+            h: 1440.0,
+        };
+        assert_eq!(
+            sway_focused_output(SWAY_OUTPUTS),
+            Some(("DP-2".to_owned(), rect))
+        );
+        // A disabled output is never the answer, even marked focused.
+        let mut outputs: serde_json::Value = serde_json::from_str(SWAY_OUTPUTS).unwrap();
+        outputs[1]["active"] = false.into();
+        assert_eq!(sway_focused_output(&outputs.to_string()), None);
+        assert_eq!(sway_focused_output("nope"), None);
+    }
+
+    #[test]
+    fn hyprland_cursorpos_parses() {
+        assert_eq!(
+            hyprland_cursor(r#"{"x": 2100, "y": 300}"#),
+            Some((2100.0, 300.0))
+        );
+        assert_eq!(hyprland_cursor("unknown request"), None);
+        assert_eq!(hyprland_cursor(r#"{"x": 1}"#), None);
     }
 
     #[test]

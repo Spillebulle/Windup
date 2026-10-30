@@ -245,6 +245,20 @@ sway_capture() {
         bad "wayland: --capture-test failed (see wayland-capture.log)"
     fi
 
+    # One Steps picture: HEADLESS-1 alone. A headless Sway has no pointer
+    # device, so the place may be unknown (the cursor painted in instead).
+    local step_out
+    if step_out=$("$bin" --step-shot-test "$art/wayland-step.png" 2>"$art/wayland-step.log"); then
+        size=$(png_size "$art/wayland-step.png")
+        if [ "$size" = 1600x1000 ] && echo "$step_out" | grep -Eqx 'pointer (unknown|-?[0-9]+,-?[0-9]+)'; then
+            ok "wayland: --step-shot-test pictured HEADLESS-1 ($size, $step_out)"
+        else
+            bad "wayland: --step-shot-test wrote $size and said '$step_out', wanted 1600x1000 and a pointer line"
+        fi
+    else
+        bad "wayland: --step-shot-test failed (see wayland-step.log)"
+    fi
+
     python3 "$(dirname "$0")/marker.py" 120 >"$art/wayland-marker.log" 2>&1 &
     local marker=$!
     wait_for 100 sh -c 'swaymsg -t get_tree | grep -q "\"name\": \"windup-marker\""' ||
