@@ -155,3 +155,11 @@ impl Conceal for X11Conceal {
         }
     }
 }
+
+impl Drop for X11Conceal {
+    /// A session that ends mid-shot (a camera thread that panicked) still
+    /// puts the bar back.
+    fn drop(&mut self) {
+        self.show();
+    }
+}

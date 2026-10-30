@@ -2,6 +2,16 @@
 //! launcher's Record, its bar, and the notice at its end. The recording
 //! itself is `video::live`; this is where the eframe app hosts it.
 //!
+//! A Steps session is hosted here too, with the same bar showing its step
+//! count: started from the Steps key or the launcher, its camera opened on
+//! a worker (`steps::camera::open_camera` can wait on a portal), then
+//! `steps::live` takes the pictures. Its bar goes where the steps are not
+//! pictured: on Windows where the launcher's was, left out of captures; on
+//! X11 on a monitor the pointer is not on (`steps_bar_slot`), moved away by
+//! `X11Conceal` for a shot of its own monitor. Stop opens the review
+//! (`review_host`); Esc throws everything away at once, without waiting for
+//! the camera thread.
+//!
 //! The bar is a small borderless, always-on-top immediate viewport, drawn
 //! like the notice: frames 0 and 1 hidden, shown from frame 2, never
 //! focused (the recorded window keeps the keyboard). Its window is the bar
@@ -22,16 +32,26 @@
 use crate::overlay::{
     hide_overlay, make_tool_window, monitor_scale, place_overlay, points_rect, reduced_motion,
 };
-use crate::platform::Target;
+use crate::platform::{Host, Target};
+use crate::review_host::FINISH_REVIEW_FIRST;
+use crate::steps::camera::{Camera, Conceal, NoConceal, open_camera};
+use crate::steps::clicks::ClickWatch;
+use crate::steps::live::{BarFacts, StepsEnd, StepsEvent, StepsLive, Trigger};
 use crate::video::availability;
 use crate::video::live::{Ask, LiveEvent};
 use crate::{WindupApp, capture};
 use eframe::egui;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use windup_core::ToolId;
 use windup_core::capture::DRect;
-use windup_core::capture::backend::{BarHost, record_bar_host};
-use windup_core::capture::session::{CaptureMode, Session, VideoChoice};
+use windup_core::capture::backend::{BarHost, record_bar_host, steps_order};
+use windup_core::capture::session::{CaptureMode, Session, StepsChoice, VideoChoice};
+use windup_core::hotkeys::LiveKind;
+use windup_core::steps::clicks::takes;
+use windup_core::steps::options::StepTrigger;
+use windup_core::steps::place::steps_bar_slot;
 use windup_core::video::{place_bar, top_centre};
 use windup_ui::capture::recbar::{RecBarAction, RecBarState, RecBarView, bar_size, host_size};
 use windup_ui::{Mode, Palette, metrics};
@@ -53,6 +73,25 @@ pub(crate) struct Rec {
     /// The window was closed while recording: the recording was stopped,
     /// and the app closes once it is saved.
     quit_when_over: bool,
+    /// The Steps session that runs, or is stopping.
+    pub(crate) steps: Option<StepsLive>,
+    /// The launcher's Steps, started next frame.
+    steps_pending: Option<StepsChoice>,
+    /// The camera opening on a worker.
+    steps_opening: Option<Receiver<Result<Opened, String>>>,
+    /// What the session's camera thread knows of the bar.
+    steps_facts: Option<Arc<Mutex<BarFacts>>>,
+    clicks: Option<ClickWatch>,
+    /// Stop was asked: the bar and the keys are gone, `Over` is to come.
+    steps_stopping: bool,
+}
+
+/// A Steps camera opened by the worker, and where its bar goes.
+struct Opened {
+    camera: Box<dyn Camera>,
+    conceal: Arc<dyn Conceal>,
+    plan: BarPlan,
+    trigger: StepTrigger,
 }
 
 /// Whether a close of the main window waits for the recording: one that
@@ -69,8 +108,10 @@ struct BarPlan {
     /// The recorded area, and the monitors, in desktop units.
     rect: DRect,
     monitors: Vec<DRect>,
-    /// The monitor the launcher bar was on.
+    /// The monitor the launcher bar was on; for Steps, the pointer's.
     launcher: DRect,
+    /// A Steps bar: nothing is recorded but the pointer's monitor.
+    steps: bool,
 }
 
 struct Bar {
@@ -104,10 +145,11 @@ impl BarPlan {
     fn slot(&self, excluded: bool, size: (f32, f32), top: f32, gap: f32) -> Option<DRect> {
         match self.host {
             BarHost::ExcludedWindow if excluded => Some(top_centre(self.launcher, size, top)),
+            BarHost::Hidden => None,
+            _ if self.steps => steps_bar_slot(self.host, self.launcher, &self.monitors, size, top),
             BarHost::ExcludedWindow | BarHost::Outside => {
                 place_bar(self.rect, &self.monitors, size, gap)
             }
-            BarHost::Hidden => None,
         }
     }
 
@@ -153,6 +195,7 @@ impl WindupApp {
             rect,
             monitors,
             launcher,
+            steps: false,
         };
         let ask = Ask {
             rect,
@@ -170,6 +213,10 @@ impl WindupApp {
             return;
         }
         if self.rec.live.busy() || !self.config.is_tool_enabled(ToolId::Video) {
+            return;
+        }
+        if self.rec.steps_busy() {
+            log::debug!("recording: a Steps session is under way");
             return;
         }
         if let Err(why) = availability::cached(&self.config.video).video {
@@ -190,17 +237,30 @@ impl WindupApp {
     /// the recording is stopped (a join already under way goes on), and
     /// the app closes when it is over. `hides` is a close that only hides
     /// the window (Linux with "close to tray"), which the recording outlives.
+    ///
+    /// A Steps session is stopped too, but the app stays: its review opens,
+    /// which asks before steps that were not exported are lost. A review
+    /// that is open is asked to close, likewise.
     pub(crate) fn hold_close_while_recording(&mut self, ctx: &egui::Context, hides: bool) {
         let requested = ctx.input(|i| i.viewport().close_requested());
-        if !hold_close(requested, hides, self.rec.live.busy()) {
+        let steps = self.rec.steps_busy() || self.review.is_some();
+        if !hold_close(requested, hides, self.rec.live.busy() || steps) {
             return;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        if !self.rec.quit_when_over {
-            log::info!("recording: the window was closed, stopping first");
+        if self.rec.live.busy() {
+            if !self.rec.quit_when_over {
+                log::info!("recording: the window was closed, stopping first");
+            }
+            self.rec.quit_when_over = true;
+            self.stop_recording();
         }
-        self.rec.quit_when_over = true;
-        self.stop_recording();
+        if self.rec.steps_busy() {
+            log::info!("steps: the window was closed, stopping first");
+            self.stop_steps();
+        } else if self.review.is_some() {
+            self.ask_review_to_close(ctx);
+        }
     }
 
     /// The pause key: pauses a running recording, or resumes it.
@@ -217,6 +277,241 @@ impl WindupApp {
         self.close_bar();
     }
 
+    /// The pause key, for whichever session runs.
+    pub(crate) fn pause_live(&mut self) {
+        match self.rec.steps.as_ref() {
+            Some(s) if !self.rec.steps_stopping => {
+                s.toggle_pause();
+            }
+            Some(_) => {}
+            None => self.pause_recording(),
+        }
+    }
+
+    /// The stop key, for whichever session runs.
+    pub(crate) fn stop_live(&mut self) {
+        if self.rec.steps_busy() {
+            self.stop_steps();
+        } else {
+            self.stop_recording();
+        }
+    }
+
+    /// Esc, for whichever session runs.
+    pub(crate) fn cancel_live(&mut self) {
+        if self.rec.steps_busy() {
+            self.cancel_steps();
+        } else {
+            self.cancel_recording();
+        }
+    }
+
+    /// The launcher's Steps: remembered, and started next frame.
+    pub(crate) fn steps_from(&mut self, choice: StepsChoice) {
+        self.rec.steps_pending = Some(choice);
+    }
+
+    /// The Steps key: stops the session that runs, else starts one at once
+    /// with the saved choices.
+    pub(crate) fn steps_hotkey(&mut self, ctx: &egui::Context) {
+        let r = &self.rec;
+        if r.steps_opening.is_some() || (r.steps.is_some() && !r.steps_stopping) {
+            self.stop_steps();
+        } else if r.steps.is_none() {
+            self.start_steps(ctx, None);
+        }
+    }
+
+    /// The step key: one step, now.
+    pub(crate) fn take_step(&mut self) {
+        if let Some(s) = &self.rec.steps
+            && !self.rec.steps_stopping
+        {
+            s.trigger(Trigger::Hotkey);
+        }
+    }
+
+    /// Starts a Steps session: `choice` from the launcher, or `None` for
+    /// the key, with the saved choices. The camera is opened on a worker;
+    /// the session and its bar start once it is.
+    pub(crate) fn start_steps(&mut self, ctx: &egui::Context, choice: Option<StepsChoice>) {
+        if !self.config.is_tool_enabled(ToolId::Steps) || self.host != Host::Viewport {
+            return;
+        }
+        if self.rec.live.busy() || self.rec.steps.is_some() || self.rec.steps_opening.is_some() {
+            log::debug!("steps: a recording or Steps session is under way");
+            return;
+        }
+        if self.review.is_some() {
+            self.open_notice(ctx, FINISH_REVIEW_FIRST, None);
+            return;
+        }
+        if let Err(why) = availability::cached(&self.config.video).steps {
+            self.open_notice(ctx, why, None);
+            return;
+        }
+        let trigger = choice.map_or(self.config.steps.trigger, |c| c.trigger);
+        let (tx, rx) = channel();
+        let wake = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("steps-open".into())
+            .spawn(move || {
+                let _ = tx.send(open_steps(trigger));
+                wake.request_repaint();
+            });
+        match spawned {
+            Ok(_) => {
+                log::info!("steps: starting");
+                self.rec.steps_opening = Some(rx);
+            }
+            Err(e) => {
+                let text = format!("Steps could not start: {e}");
+                self.open_notice(ctx, &text, None);
+            }
+        }
+    }
+
+    /// The camera is open (or not): the session, its click watch and its
+    /// bar start.
+    fn steps_opened(&mut self, ctx: &egui::Context, opened: Result<Opened, String>) {
+        let Opened {
+            camera,
+            conceal,
+            plan,
+            trigger,
+        } = match opened {
+            Ok(o) => o,
+            Err(why) => {
+                log::warn!("steps: no camera: {why}");
+                let text = format!("Steps could not start: {why}");
+                self.open_notice(ctx, &text, None);
+                return;
+            }
+        };
+        let (tx, rx) = channel();
+        let watch = (trigger != StepTrigger::HotkeyOnly)
+            .then(|| ClickWatch::start(tx.clone()))
+            .flatten();
+        let clicks = if watch.is_some() {
+            Ok(())
+        } else {
+            Err("clicks cannot be seen")
+        };
+        let facts = Arc::new(Mutex::new(BarFacts {
+            rect: None,
+            pointer_on_bar: false,
+            host: plan.host,
+            excluded: false,
+        }));
+        let cfg = windup_core::config::StepsConfig {
+            trigger,
+            ..self.config.steps.clone()
+        };
+        let takes = takes(trigger, clicks);
+        match StepsLive::start(&cfg, takes, camera, conceal, facts.clone(), (tx, rx)) {
+            Ok(live) => {
+                self.rec.steps = Some(live);
+                self.rec.steps_facts = Some(facts);
+                self.rec.clicks = watch;
+                self.rec.plan = Some(plan);
+                self.open_bar(ctx);
+            }
+            Err(why) => {
+                let text = format!("Steps could not start: {why}");
+                self.open_notice(ctx, &text, None);
+            }
+        }
+    }
+
+    /// Stop, from the bar or a key: the bar and the keys go at once, the
+    /// review opens once the last step is written.
+    pub(crate) fn stop_steps(&mut self) {
+        if self.rec.steps_opening.take().is_some() {
+            // Not started yet: nothing was taken. The worker's camera is
+            // dropped when it finds nobody listening.
+            log::info!("steps: stopped before the first step");
+        }
+        self.rec.steps_pending = None;
+        if let Some(s) = self.rec.steps.as_mut()
+            && !self.rec.steps_stopping
+        {
+            s.stop();
+            self.rec.steps_stopping = true;
+        }
+        self.rec.clicks = None;
+        self.close_bar();
+    }
+
+    /// Esc: the session is thrown away. Everything of it on the screen goes
+    /// now: its camera thread removes the folder whenever it is done (even
+    /// a shot that hangs ends some time), and whatever it says then is not
+    /// listened to.
+    pub(crate) fn cancel_steps(&mut self) {
+        self.rec.steps_opening = None;
+        self.rec.steps_pending = None;
+        if let Some(mut s) = self.rec.steps.take() {
+            s.cancel();
+        }
+        self.rec.steps_stopping = false;
+        self.rec.steps_facts = None;
+        self.rec.clicks = None;
+        self.close_bar();
+        self.rec.plan = None;
+    }
+
+    /// The session ended: the review, a notice, or both.
+    fn steps_over(&mut self, ctx: &egui::Context, end: StepsEnd) {
+        self.rec.steps = None;
+        self.rec.steps_stopping = false;
+        self.rec.steps_facts = None;
+        self.rec.clicks = None;
+        self.close_bar();
+        self.rec.plan = None;
+        match end {
+            StepsEnd::Review(dir) => self.open_review(ctx, dir),
+            StepsEnd::Discarded => {}
+            StepsEnd::Empty => self.open_notice(ctx, NO_STEPS, None),
+            StepsEnd::Failed { why, review } => {
+                self.open_notice(ctx, &format!("Steps stopped: {why}"), None);
+                if let Some(dir) = review {
+                    self.open_review(ctx, dir);
+                }
+            }
+        }
+    }
+
+    /// Starts, polls and follows a Steps session. Every frame, before the
+    /// bar is drawn.
+    fn drive_steps(&mut self, ctx: &egui::Context) {
+        if let Some(choice) = self.rec.steps_pending.take() {
+            self.start_steps(ctx, Some(choice));
+        }
+        let opened = match self.rec.steps_opening.as_ref().map(Receiver::try_recv) {
+            Some(Ok(opened)) => Some(opened),
+            Some(Err(TryRecvError::Disconnected)) => {
+                Some(Err("the camera could not be opened".to_string()))
+            }
+            Some(Err(TryRecvError::Empty)) | None => None,
+        };
+        if let Some(opened) = opened {
+            self.rec.steps_opening = None;
+            self.steps_opened(ctx, opened);
+        }
+        let events = self.rec.steps.as_mut().map(StepsLive::poll);
+        for event in events.into_iter().flatten() {
+            match event {
+                StepsEvent::Step(_) => ctx.request_repaint(),
+                StepsEvent::Over(end) => self.steps_over(ctx, end),
+            }
+        }
+    }
+
+    /// Whether Steps is starting, running or stopping.
+    fn steps_keys_wanted(&self) -> bool {
+        let r = &self.rec;
+        r.steps_opening.is_some() || (r.steps.is_some() && !r.steps_stopping)
+    }
+
     /// Starts, polls and draws the recording. Every frame, from `update`,
     /// before the capture overlays: a Record they gave this frame starts on
     /// the next, once they are hidden.
@@ -226,6 +521,7 @@ impl WindupApp {
         {
             self.rec.plan = Some(plan);
         }
+        self.drive_steps(ctx);
         for event in self.rec.live.poll() {
             match event {
                 LiveEvent::Started => self.open_bar(ctx),
@@ -248,17 +544,41 @@ impl WindupApp {
             }
         }
         self.draw_bar(ctx, p, mode);
-        // Pause, stop and Esc are bound from the start until it is stopped
-        // or cancelled.
-        if let Some(listener) = &self.hotkey_listener {
-            listener.set_recording(self.rec.live.keys_wanted(), &self.config);
+        // The camera thread decides from these whether a click was on the
+        // bar and whether the bar must be hidden for a shot.
+        if let Some(facts) = &self.rec.steps_facts {
+            let mut f = facts.lock().unwrap_or_else(|e| e.into_inner());
+            f.rect = self.rec.bar.as_ref().map(|b| b.slot);
+            f.excluded = self.rec.bar.as_ref().is_some_and(|b| b.excluded);
         }
-        if self.rec.live.busy() {
+        // Pause, stop and Esc (and the step key) are bound from the start
+        // until it is stopped or cancelled.
+        let live = if self.steps_keys_wanted() {
+            Some(LiveKind::Steps)
+        } else if self.rec.live.keys_wanted() {
+            Some(LiveKind::Video)
+        } else {
+            None
+        };
+        if let Some(listener) = &self.hotkey_listener {
+            listener.set_live(live, &self.config);
+        }
+        if self.rec.live.busy() || self.rec.steps_busy() {
             ctx.request_repaint_after(POLL);
         }
     }
 
     fn bar_state(&self) -> Option<RecBarState> {
+        if let Some(s) = &self.rec.steps {
+            return (!self.rec.steps_stopping).then(|| RecBarState {
+                elapsed: 0.0,
+                paused: s.paused(),
+                fps: 0,
+                bitrate_label: String::new(),
+                reduced_motion: reduced_motion(),
+                steps: Some(s.count()),
+            });
+        }
         let running = self.rec.live.running()?;
         Some(RecBarState {
             elapsed: running.clock.elapsed(),
@@ -390,6 +710,19 @@ impl WindupApp {
             }
         }
 
+        if let Some(s) = &self.rec.steps {
+            match action {
+                Some(RecBarAction::Pause) if !s.paused() => {
+                    s.toggle_pause();
+                }
+                Some(RecBarAction::Resume) if s.paused() => {
+                    s.toggle_pause();
+                }
+                Some(RecBarAction::Stop) => self.stop_steps(),
+                _ => {}
+            }
+            return;
+        }
         match (action, self.rec.live.running()) {
             (Some(RecBarAction::Pause), Some(r)) => r.pause(),
             (Some(RecBarAction::Resume), Some(r)) => r.resume(),
@@ -397,6 +730,106 @@ impl WindupApp {
             _ => {}
         }
     }
+}
+
+/// A bar plan's rectangle where there is no monitor at all.
+const NOWHERE: DRect = DRect {
+    x: 0.0,
+    y: 0.0,
+    w: 0.0,
+    h: 0.0,
+};
+
+/// The notice when a Steps session stopped before any step.
+pub(crate) const NO_STEPS: &str = "No steps were taken.";
+
+impl Rec {
+    /// Whether Steps is asked for, starting, running or stopping.
+    pub(crate) fn steps_busy(&self) -> bool {
+        self.steps.is_some() || self.steps_opening.is_some() || self.steps_pending.is_some()
+    }
+}
+
+/// Opens a Steps camera and plans its bar; on the worker, since a portal
+/// may keep `open_camera` waiting for a long time. The ScreenCast restore
+/// token is saved afterwards whether or not a camera opened, as video does.
+fn open_steps(trigger: StepTrigger) -> Result<Opened, String> {
+    let facts = capture::facts();
+    let host = record_bar_host(&facts);
+    let saved = windup_core::config::Config::load_screencast_token();
+    let token = Arc::new(Mutex::new(saved.clone()));
+    let opened = open_camera(&steps_order(&facts), &token);
+    let next = token.lock().ok().and_then(|t| t.clone());
+    if next != saved {
+        windup_core::config::Config::save_screencast_token(next.as_deref());
+    }
+    let (mut camera, route) = opened?;
+    let mut monitors = monitor_layouts();
+    let pointer = camera.monitor(None).or_else(|| monitors.first().copied());
+    let Some(launcher) = pointer else {
+        // Nowhere to place a bar: the keys still stop the session.
+        log::info!("steps: no monitor for the bar");
+        return Ok(Opened {
+            camera,
+            conceal: Arc::new(NoConceal),
+            plan: BarPlan {
+                host: BarHost::Hidden,
+                rect: NOWHERE,
+                monitors,
+                launcher: NOWHERE,
+                steps: true,
+            },
+            trigger,
+        });
+    };
+    if monitors.is_empty() {
+        monitors.push(launcher);
+    }
+    log::info!("steps: camera {route:?}, bar {host:?}");
+    Ok(Opened {
+        camera,
+        conceal: conceal_for(host),
+        plan: BarPlan {
+            host,
+            rect: launcher,
+            monitors,
+            launcher,
+            steps: true,
+        },
+        trigger,
+    })
+}
+
+/// Every monitor's layout in desktop units, without a picture.
+fn monitor_layouts() -> Vec<DRect> {
+    #[cfg(target_os = "windows")]
+    {
+        capture::windows::monitor_list()
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        capture::x11::monitor_list()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        Vec::new()
+    }
+}
+
+/// What hides the bar for a shot of its own monitor: X11 moves it away;
+/// Windows leaves it out of captures, so nothing is needed there.
+fn conceal_for(host: BarHost) -> Arc<dyn Conceal> {
+    #[cfg(target_os = "linux")]
+    if host == BarHost::Outside
+        && let Some(c) = crate::steps::x11::X11Conceal::open()
+    {
+        return Arc::new(c);
+    }
+    let _ = host;
+    Arc::new(NoConceal)
 }
 
 /// Leaves the window out of screenshots and recordings (Windows 10 2004
@@ -501,6 +934,13 @@ mod tests {
     #[test]
     fn a_close_waits_only_for_a_recording_it_would_end() {
         assert!(hold_close(true, false, true), "quitting mid-recording");
+        let steps_busy = Rec {
+            steps_pending: Some(StepsChoice::default()),
+            ..Rec::default()
+        }
+        .steps_busy();
+        assert!(hold_close(true, false, steps_busy), "quitting mid-steps");
+        assert!(!Rec::default().steps_busy());
         assert!(!hold_close(true, true, true), "the window only hides");
         assert!(!hold_close(true, false, false), "nothing recording");
         assert!(!hold_close(false, false, true), "no close asked");
@@ -532,7 +972,40 @@ mod tests {
             rect,
             monitors: vec![M],
             launcher: M,
+            steps: false,
         }
+    }
+
+    #[test]
+    fn a_steps_bar_goes_off_the_pointers_monitor_unless_excluded() {
+        let other = r(1920.0, 0.0, 1920.0, 1080.0);
+        let steps = |host| BarPlan {
+            host,
+            rect: M,
+            monitors: vec![M, other],
+            launcher: M,
+            steps: true,
+        };
+        // X11: the top centre of the other monitor.
+        assert_eq!(
+            steps(BarHost::Outside).slot(false, BAR, 16.0, 8.0),
+            Some(r(2730.0, 16.0, 300.0, 80.0))
+        );
+        // Windows: where the launcher's bar was, out of every picture.
+        assert_eq!(
+            steps(BarHost::ExcludedWindow).slot(true, BAR, 16.0, 8.0),
+            Some(r(810.0, 16.0, 300.0, 80.0))
+        );
+        // One monitor: on it all the same, hidden for each shot.
+        let one = BarPlan {
+            monitors: vec![M],
+            ..steps(BarHost::Outside)
+        };
+        assert_eq!(
+            one.slot(false, BAR, 16.0, 8.0),
+            Some(r(810.0, 16.0, 300.0, 80.0))
+        );
+        assert_eq!(steps(BarHost::Hidden).slot(false, BAR, 16.0, 8.0), None);
     }
 
     #[test]

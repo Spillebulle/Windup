@@ -94,6 +94,9 @@ struct Shared {
 
 /// One running session.
 pub struct StepsLive {
+    // Read only by `dir`, which the hosts do not need yet (the Wayland
+    // host may); the tests do.
+    #[allow(dead_code)]
     dir: PathBuf,
     triggers: Sender<Trigger>,
     shared: Arc<Shared>,
@@ -103,16 +106,19 @@ pub struct StepsLive {
 
 impl StepsLive {
     /// Creates the session folder and starts the threads. `camera` is open
-    /// already (`open_camera`).
+    /// already (`open_camera`). `triggers` is the channel the session reads
+    /// its triggers from: made by the host, so a click watcher can be
+    /// started on it first and `takes` say whether it did.
     pub fn start(
         cfg: &StepsConfig,
         takes: Takes,
         camera: Box<dyn Camera>,
         conceal: Arc<dyn Conceal>,
         bar: Arc<Mutex<BarFacts>>,
+        triggers: (Sender<Trigger>, Receiver<Trigger>),
     ) -> Result<StepsLive, String> {
         let root = steps_root().ok_or("there is no cache folder for the steps")?;
-        Self::start_in(&root, cfg, takes, camera, conceal, bar)
+        Self::start_in(&root, cfg, takes, camera, conceal, bar, triggers)
     }
 
     fn start_in(
@@ -122,6 +128,7 @@ impl StepsLive {
         camera: Box<dyn Camera>,
         conceal: Arc<dyn Conceal>,
         bar: Arc<Mutex<BarFacts>>,
+        (triggers, trigger_rx): (Sender<Trigger>, Receiver<Trigger>),
     ) -> Result<StepsLive, String> {
         let now = jiff::Zoned::now();
         let dir = new_session_dir(root, &now)
@@ -131,7 +138,6 @@ impl StepsLive {
             return Err(format!("cannot write to the steps folder: {e}"));
         }
         let shared = Arc::new(Shared::default());
-        let (triggers, trigger_rx) = channel();
         let (events_tx, events) = channel();
         let (jobs, job_rx) = sync_channel(WRITE_QUEUE);
 
@@ -185,11 +191,14 @@ impl StepsLive {
     }
 
     /// The session folder.
+    #[allow(dead_code)]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    /// For a watcher on its own thread (the click hook).
+    /// For a watcher on its own thread. The viewport host makes the channel
+    /// itself (`start`); kept for the Wayland host.
+    #[allow(dead_code)]
     pub fn sender(&self) -> Sender<Trigger> {
         self.triggers.clone()
     }
@@ -203,6 +212,11 @@ impl StepsLive {
         let paused = !self.shared.paused.fetch_xor(true, Ordering::SeqCst);
         log::info!("steps: {}", if paused { "paused" } else { "resumed" });
         paused
+    }
+
+    /// Whether it is paused now.
+    pub fn paused(&self) -> bool {
+        self.shared.paused.load(Ordering::SeqCst)
     }
 
     /// Steps written so far.
@@ -629,6 +643,7 @@ mod tests {
             Box::new(camera),
             Arc::new(FakeConceal { log: log.clone() }),
             bar.clone(),
+            channel(),
         )
         .unwrap();
         Rig { live, log, bar }
@@ -758,7 +773,9 @@ mod tests {
     #[test]
     fn pause_ignores_triggers() {
         let mut r = rig(BOTH, vec![], None);
+        assert!(!r.live.paused());
         assert!(r.live.toggle_pause());
+        assert!(r.live.paused());
         r.live.trigger(Trigger::Hotkey);
         r.live.trigger(click(10.0, 0.0));
         r.live.stop();

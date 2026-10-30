@@ -26,7 +26,9 @@ pub struct ClickWatch {
     _inner: LinuxWatch,
 }
 
+// Held only so that dropping it stops watching.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 enum LinuxWatch {
     X11(x11::Watch),
     Evdev(crate::linux::steps::evdev::EvdevWatch),

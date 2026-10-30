@@ -159,11 +159,11 @@ Usage: windup [OPTION]
   --record-cancel Cancel the screen recording and discard it
   --steps         Start or stop recording steps
   --step          Add a step by hand while recording steps
-  --steps-stop    Stop recording steps and export them
+  --steps-stop    Stop recording steps and review them
   --background    Start without opening the window
   --help          Show this text
 
-Bind --popup, --paste-plain, --capture, --screenshot and --record to keys in your desktop's keyboard settings
+Bind --popup, --paste-plain, --capture, --screenshot, --record and --steps to keys in your desktop's keyboard settings
 where Windup cannot grab them itself (most Wayland desktops).";
 
 /// What `--record-test` was asked for.

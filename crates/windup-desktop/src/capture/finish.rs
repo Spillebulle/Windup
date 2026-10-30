@@ -152,6 +152,25 @@ pub(crate) fn deliver(
     })
 }
 
+/// Writes a step's edited picture over its file: a PNG beside it first,
+/// then renamed over it, so a failed write leaves the step as it was. The
+/// error is the text for the notice.
+pub(crate) fn write_step(img: &RgbaImage, path: &Path) -> Result<(), String> {
+    let fail = |e: &dyn std::fmt::Display| format!("The edited step could not be saved ({e}).");
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".edit");
+    let tmp = PathBuf::from(tmp);
+    img.save_with_format(&tmp, image::ImageFormat::Png)
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            fail(&e)
+        })?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        fail(&e)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +200,24 @@ mod tests {
 
     fn files(dir: &Path) -> usize {
         std::fs::read_dir(dir).map_or(0, |d| d.count())
+    }
+
+    #[test]
+    fn an_edited_step_replaces_its_file_and_leaves_nothing_beside_it() {
+        let dir = temp("write-step");
+        let path = dir.join("01.png");
+        RgbaImage::new(4, 3).save(&path).unwrap();
+        let edited = RgbaImage::from_pixel(8, 6, image::Rgba([200, 10, 10, 255]));
+        write_step(&edited, &path).unwrap();
+        let back = image::open(&path).unwrap().to_rgba8();
+        assert_eq!(back.dimensions(), (8, 6));
+        assert_eq!(back.get_pixel(1, 1).0, [200, 10, 10, 255]);
+        assert_eq!(files(&dir), 1);
+        // Nowhere to write: the error says so, and nothing is left behind.
+        let gone = dir.join("missing").join("02.png");
+        assert!(write_step(&edited, &gone).is_err());
+        assert_eq!(files(&dir), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

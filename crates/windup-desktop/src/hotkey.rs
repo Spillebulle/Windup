@@ -5,16 +5,16 @@
 //! a key, so the events come from the socket instead (`linux::ipc`), sent
 //! through [`HotkeyListener::sender`].
 //!
-//! While a recording runs, its own keys are live too (pause, stop and Esc,
-//! `hotkeys::recording_bindings`), and only then:
-//! [`HotkeyListener::set_recording`].
+//! While a recording or a Steps session runs, its own keys are live too
+//! (`hotkeys::session_bindings`: pause, stop and Esc, plus the step key for
+//! Steps), and only then: [`HotkeyListener::set_live`].
 
 use crate::platform::{HotkeysVia, Plan, Target};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
-use windup_core::hotkeys::{Action, live_bindings, windows_vk};
+use windup_core::hotkeys::{Action, LiveKind, live_bindings_for, windows_vk};
 use windup_core::{Config, Shortcut, ShortcutModifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,11 +36,13 @@ pub enum HotkeyEvent {
         target: Target,
     },
     /// The Steps key: starts a Steps session, or stops the one that runs.
-    Steps {
-        target: Target,
-    },
+    /// No target: Steps opens nothing over the focused window.
+    Steps,
     /// Add a step by hand (`windup --step`).
     Step,
+    /// Stop a Steps session, and only that (`windup --steps-stop`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    StepsStop,
     /// Pause or resume the recording (`windup --record-pause`).
     RecordPause,
     /// Stop the recording (`windup --record-stop`).
@@ -63,7 +65,7 @@ impl HotkeyEvent {
             Action::CaptureLauncher => Self::Capture { target },
             Action::Screenshot => Self::Screenshot { target },
             Action::Video => Self::Record { target },
-            Action::Steps => Self::Steps { target },
+            Action::Steps => Self::Steps,
             Action::Step => Self::Step,
             Action::RecordPause => Self::RecordPause,
             Action::RecordStop => Self::RecordStop,
@@ -79,8 +81,8 @@ pub struct HotkeyListener {
     /// New binding lists for the grab thread (X11 and macOS).
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     rebind_tx: Option<Sender<Vec<(Shortcut, Action)>>>,
-    /// A recording runs and its keys are bound (the hook reads this).
-    recording: Arc<AtomicBool>,
+    /// Which session's keys are bound, as [`live_code`] gives it.
+    live: AtomicU8,
     _running: Arc<AtomicBool>,
 }
 
@@ -88,16 +90,15 @@ impl HotkeyListener {
     pub fn new(plan: &Plan, config: &Config) -> Self {
         let (tx, rx) = channel();
         let running = Arc::new(AtomicBool::new(true));
-        let recording = Arc::new(AtomicBool::new(false));
         #[allow(unused_mut)]
         let mut rebind_tx = None;
-        let initial = live_bindings(config, false);
+        let initial = live_bindings_for(config, None);
 
         match plan.hotkeys {
             #[cfg(target_os = "windows")]
             HotkeysVia::Hook => {
                 set_windows_tables(config);
-                start_windows_hook(tx.clone(), Arc::clone(&running), Arc::clone(&recording));
+                start_windows_hook(tx.clone(), Arc::clone(&running));
             }
             #[cfg(not(target_os = "windows"))]
             HotkeysVia::XGrab => {
@@ -115,7 +116,7 @@ impl HotkeyListener {
             rx,
             tx,
             rebind_tx,
-            recording,
+            live: AtomicU8::new(live_code(None)),
             _running: running,
         }
     }
@@ -125,22 +126,32 @@ impl HotkeyListener {
         #[cfg(target_os = "windows")]
         set_windows_tables(config);
         if let Some(tx) = &self.rebind_tx {
-            let recording = self.recording.load(Ordering::SeqCst);
-            let _ = tx.send(live_bindings(config, recording));
+            let live = live_kind(self.live.load(Ordering::SeqCst));
+            let _ = tx.send(live_bindings_for(config, live));
         }
     }
 
-    /// Binds the recording's keys (pause, stop, Esc) while `on`, and lets
-    /// them go again: the Windows hook matches them only while the flag is
-    /// set, and X11 grabs them for that long. On Wayland the keys are
-    /// commands, which the background host binds.
-    pub fn set_recording(&self, on: bool, config: &Config) {
-        if self.recording.swap(on, Ordering::SeqCst) == on {
+    /// Binds the keys of the session `live` names (pause, stop, Esc, and
+    /// the step key for Steps), and lets them go again with `None`: the
+    /// Windows hook matches that kind's table only while `LIVE` names it,
+    /// and X11 grabs them for that long. On Wayland the keys are commands,
+    /// which the background host binds.
+    pub fn set_live(&self, live: Option<LiveKind>, config: &Config) {
+        let code = live_code(live);
+        let was = self.live.swap(code, Ordering::SeqCst);
+        if was == code {
             return;
         }
-        log::info!("recording keys {}", if on { "bound" } else { "released" });
+        #[cfg(target_os = "windows")]
+        LIVE.store(code, Ordering::SeqCst);
+        match (live, live_kind(was)) {
+            (Some(LiveKind::Video), _) => log::info!("recording keys bound"),
+            (Some(LiveKind::Steps), _) => log::info!("steps keys bound"),
+            (None, Some(LiveKind::Steps)) => log::info!("steps keys released"),
+            (None, _) => log::info!("recording keys released"),
+        }
         if let Some(tx) = &self.rebind_tx {
-            let _ = tx.send(live_bindings(config, on));
+            let _ = tx.send(live_bindings_for(config, live));
         }
     }
 
@@ -165,20 +176,46 @@ fn windows_table(bindings: &[(Shortcut, Action)]) -> Vec<(u16, ShortcutModifiers
         .collect()
 }
 
-/// What a key press does, as the hook asks it: while `recording`, the
-/// recording's keys first (`recording_table`, Esc among them, which is why
-/// it is looked at only then), then the tools'.
+/// `HotkeyListener::live` and the hook's `LIVE`: 0 for no session, 1 for
+/// a recording, 2 for Steps.
+fn live_code(live: Option<LiveKind>) -> u8 {
+    match live {
+        None => 0,
+        Some(LiveKind::Video) => 1,
+        Some(LiveKind::Steps) => 2,
+    }
+}
+
+fn live_kind(code: u8) -> Option<LiveKind> {
+    match code {
+        1 => Some(LiveKind::Video),
+        2 => Some(LiveKind::Steps),
+        _ => None,
+    }
+}
+
+/// Keys as the hook matches them: virtual-key code, exact modifiers, action.
+type Table = [(u16, ShortcutModifiers, Action)];
+
+/// What a key press does, as the hook asks it: while a session is `live`,
+/// that kind's keys first (`video` or `steps`, Esc among them, which is why
+/// they are looked at only then), then the tools'.
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 fn match_key(
-    table: &[(u16, ShortcutModifiers, Action)],
-    recording_table: &[(u16, ShortcutModifiers, Action)],
-    recording: bool,
+    table: &Table,
+    video: &Table,
+    steps: &Table,
+    live: Option<LiveKind>,
     vk: u16,
     held: ShortcutModifiers,
 ) -> Option<Action> {
-    recording
-        .then(|| match_binding(recording_table, vk, held))
-        .flatten()
+    let session = match live {
+        Some(LiveKind::Video) => Some(video),
+        Some(LiveKind::Steps) => Some(steps),
+        None => None,
+    };
+    session
+        .and_then(|t| match_binding(t, vk, held))
         .or_else(|| match_binding(table, vk, held))
 }
 
@@ -341,15 +378,21 @@ static EVENT_SENDER: std::sync::Mutex<Option<Sender<HotkeyEvent>>> = std::sync::
 static BINDINGS: std::sync::RwLock<Vec<(u16, ShortcutModifiers, Action)>> =
     std::sync::RwLock::new(Vec::new());
 
-/// The recording's keys, which the hook matches only while `RECORDING` says
-/// a recording runs.
+/// The recording's keys, which the hook matches only while `LIVE` says a
+/// recording runs.
 #[cfg(target_os = "windows")]
 static RECORDING_BINDINGS: std::sync::RwLock<Vec<(u16, ShortcutModifiers, Action)>> =
     std::sync::RwLock::new(Vec::new());
 
-/// `HotkeyListener::recording`, for the hook, which is a plain function.
+/// Steps' keys, which the hook matches only while `LIVE` says Steps runs.
 #[cfg(target_os = "windows")]
-static RECORDING: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+static STEPS_BINDINGS: std::sync::RwLock<Vec<(u16, ShortcutModifiers, Action)>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// `HotkeyListener::live`, for the hook, which is a plain function. One
+/// hook per process, so one flag.
+#[cfg(target_os = "windows")]
+static LIVE: AtomicU8 = AtomicU8::new(0);
 
 #[cfg(target_os = "windows")]
 thread_local! {
@@ -359,24 +402,23 @@ thread_local! {
 
 #[cfg(target_os = "windows")]
 fn set_windows_tables(config: &Config) {
+    use windup_core::hotkeys::session_bindings;
     if let Ok(mut table) = BINDINGS.write() {
-        *table = windows_table(&live_bindings(config, false));
+        *table = windows_table(&live_bindings_for(config, None));
     }
     if let Ok(mut table) = RECORDING_BINDINGS.write() {
-        *table = windows_table(&windup_core::hotkeys::recording_bindings(config));
+        *table = windows_table(&session_bindings(config, LiveKind::Video));
+    }
+    if let Ok(mut table) = STEPS_BINDINGS.write() {
+        *table = windows_table(&session_bindings(config, LiveKind::Steps));
     }
 }
 
 #[cfg(target_os = "windows")]
-fn start_windows_hook(
-    tx: Sender<HotkeyEvent>,
-    running: Arc<AtomicBool>,
-    recording: Arc<AtomicBool>,
-) {
-    *EVENT_SENDER.lock().unwrap() = Some(tx);
-    let set = RECORDING.set(recording);
-    // One hook per process: a second would read the first's flag.
-    debug_assert!(set.is_ok(), "the Windows hook was started twice");
+fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
+    // One hook per process: a second would share the first's `LIVE`.
+    let first = EVENT_SENDER.lock().unwrap().replace(tx).is_none();
+    debug_assert!(first, "the Windows hook was started twice");
 
     thread::spawn(move || {
         use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -423,10 +465,16 @@ fn start_windows_hook(
                         };
 
                         // try_read: the hook must never wait on a lock.
-                        let recording = RECORDING.get().is_some_and(|r| r.load(Ordering::Relaxed));
-                        matched = match (BINDINGS.try_read(), RECORDING_BINDINGS.try_read()) {
-                            (Ok(table), Ok(rec)) => match_key(&table, &rec, recording, vk, held),
-                            (Ok(table), Err(_)) => match_binding(&table, vk, held),
+                        let live = live_kind(LIVE.load(Ordering::Relaxed));
+                        matched = match (
+                            BINDINGS.try_read(),
+                            RECORDING_BINDINGS.try_read(),
+                            STEPS_BINDINGS.try_read(),
+                        ) {
+                            (Ok(table), Ok(video), Ok(steps)) => {
+                                match_key(&table, &video, &steps, live, vk, held)
+                            }
+                            (Ok(table), _, _) => match_binding(&table, vk, held),
                             _ => None,
                         };
                     }
@@ -573,7 +621,7 @@ fn focused_window() -> Target {
 mod tests {
     use super::*;
     use windup_core::ToolId;
-    use windup_core::hotkeys::{bindings, recording_bindings};
+    use windup_core::hotkeys::{bindings, session_bindings};
     use windup_core::{Config, Shortcut, ShortcutModifiers};
 
     const WIN: ShortcutModifiers = ShortcutModifiers {
@@ -650,48 +698,95 @@ mod tests {
     }
 
     const ESC: u16 = 0x1B;
+    const KEY_G: u16 = 0x47;
+    const KEY_X: u16 = 0x58;
+    const VIDEO: Option<LiveKind> = Some(LiveKind::Video);
+    const STEPS: Option<LiveKind> = Some(LiveKind::Steps);
+
+    /// The tools' table and each session's, from the default config.
+    fn tables() -> [Vec<(u16, ShortcutModifiers, Action)>; 3] {
+        let c = Config::default();
+        [
+            default_table(),
+            windows_table(&session_bindings(&c, LiveKind::Video)),
+            windows_table(&session_bindings(&c, LiveKind::Steps)),
+        ]
+    }
 
     #[test]
     fn esc_is_matched_only_while_recording() {
-        let c = Config::default();
-        let t = default_table();
-        let rec = windows_table(&recording_bindings(&c));
+        let [t, v, s] = tables();
         let none = ShortcutModifiers::NONE;
+        let key = |live, vk, held| match_key(&t, &v, &s, live, vk, held);
         // Outside a recording Esc is the focused app's.
-        assert_eq!(match_key(&t, &rec, false, ESC, none), None);
+        assert_eq!(key(None, ESC, none), None);
+        assert_eq!(key(VIDEO, ESC, none), Some(Action::RecordCancel));
+        // Only bare Esc: Ctrl+Shift+Esc is still Task Manager's.
+        assert_eq!(key(VIDEO, ESC, ShortcutModifiers::CTRL_SHIFT), None);
+        // Pause is live only while recording; the Video key stops.
+        assert_eq!(key(None, 0x50, WIN_SHIFT), None);
+        assert_eq!(key(VIDEO, 0x50, WIN_SHIFT), Some(Action::RecordPause));
+        assert_eq!(key(None, 0x52, WIN_SHIFT), Some(Action::Video));
+        assert_eq!(key(VIDEO, 0x52, WIN_SHIFT), Some(Action::RecordStop));
+        // The other tools keep working during a recording.
+        assert_eq!(key(VIDEO, 0x56, WIN), Some(Action::ClipboardPopup));
+    }
+
+    #[test]
+    fn the_step_key_is_matched_only_during_steps() {
+        let [t, v, s] = tables();
+        let key = |live, vk, held| match_key(&t, &v, &s, live, vk, held);
+        assert_eq!(key(None, KEY_X, WIN_SHIFT), None);
+        assert_eq!(key(STEPS, KEY_X, WIN_SHIFT), Some(Action::Step));
+        // Matched means swallowed: the focused app never sees it.
+        let mut held = Vec::new();
         assert_eq!(
-            match_key(&t, &rec, true, ESC, none),
+            key_verdict(&mut held, KEY_X, true, key(STEPS, KEY_X, WIN_SHIFT)),
+            Verdict::Fire(Action::Step)
+        );
+        // A recording has no step key: it passes.
+        assert_eq!(key(VIDEO, KEY_X, WIN_SHIFT), None);
+        let mut held = Vec::new();
+        assert_eq!(
+            key_verdict(&mut held, KEY_X, true, key(VIDEO, KEY_X, WIN_SHIFT)),
+            Verdict::Pass
+        );
+        assert_eq!(
+            key(VIDEO, ESC, ShortcutModifiers::NONE),
             Some(Action::RecordCancel)
         );
-        // Only bare Esc: Ctrl+Shift+Esc is still Task Manager's.
-        assert_eq!(
-            match_key(&t, &rec, true, ESC, ShortcutModifiers::CTRL_SHIFT),
-            None
-        );
-        // Pause is live only while recording; the Video key stops.
-        assert_eq!(match_key(&t, &rec, false, 0x50, WIN_SHIFT), None);
-        assert_eq!(
-            match_key(&t, &rec, true, 0x50, WIN_SHIFT),
-            Some(Action::RecordPause)
-        );
-        assert_eq!(
-            match_key(&t, &rec, false, 0x52, WIN_SHIFT),
-            Some(Action::Video)
-        );
-        assert_eq!(
-            match_key(&t, &rec, true, 0x52, WIN_SHIFT),
-            Some(Action::RecordStop)
-        );
-        // The other tools keep working during a recording.
-        assert_eq!(
-            match_key(&t, &rec, true, 0x56, WIN),
-            Some(Action::ClipboardPopup)
-        );
+    }
+
+    #[test]
+    fn during_steps_esc_cancels_and_the_steps_key_stops() {
+        let [t, v, s] = tables();
+        let none = ShortcutModifiers::NONE;
+        let key = |live, vk, held| match_key(&t, &v, &s, live, vk, held);
+        assert_eq!(key(None, ESC, none), None);
+        assert_eq!(key(STEPS, ESC, none), Some(Action::RecordCancel));
+        assert_eq!(key(None, KEY_G, WIN_SHIFT), Some(Action::Steps));
+        assert_eq!(key(STEPS, KEY_G, WIN_SHIFT), Some(Action::RecordStop));
+        // Pause is video's pause key.
+        assert_eq!(key(STEPS, 0x50, WIN_SHIFT), Some(Action::RecordPause));
+        // The Video key stays the tool's: the host ignores it during Steps.
+        assert_eq!(key(STEPS, 0x52, WIN_SHIFT), Some(Action::Video));
+    }
+
+    #[test]
+    fn the_live_code_round_trips() {
+        for live in [None, VIDEO, STEPS] {
+            assert_eq!(live_kind(live_code(live)), live);
+        }
     }
 
     #[test]
     fn each_recording_key_reaches_the_recording_as_its_own_event() {
         let t = Target::None;
+        assert_eq!(
+            HotkeyEvent::from_action(Action::Steps, t),
+            HotkeyEvent::Steps
+        );
+        assert_eq!(HotkeyEvent::from_action(Action::Step, t), HotkeyEvent::Step);
         assert_eq!(
             HotkeyEvent::from_action(Action::Video, t),
             HotkeyEvent::Record { target: t }

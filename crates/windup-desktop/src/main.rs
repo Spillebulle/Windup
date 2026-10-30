@@ -9,6 +9,7 @@ mod overlay;
 mod paste;
 mod platform;
 mod recording;
+mod review_host;
 mod setup;
 mod steps;
 mod video;
@@ -59,8 +60,10 @@ struct WindupApp {
     /// Where overlays go: only the viewport host draws them here.
     host: Host,
     overlay: overlay::Overlay,
-    /// A recording, its bar and its end (Windows and X11).
+    /// A recording or Steps session, its bar and its end (Windows and X11).
     rec: recording::Rec,
+    /// The review of a Steps session that stopped (Windows and X11).
+    review: Option<review_host::ReviewViewport>,
     last_saved_state: (usize, u64),
     max_items_atomic: Arc<AtomicUsize>,
     save_images_atomic: Arc<AtomicBool>,
@@ -197,13 +200,9 @@ impl WindupApp {
                         Command::RecordPause => HotkeyEvent::RecordPause,
                         Command::RecordStop => HotkeyEvent::RecordStop,
                         Command::RecordCancel => HotkeyEvent::RecordCancel,
-                        Command::Steps => HotkeyEvent::Steps { target },
+                        Command::Steps => HotkeyEvent::Steps,
                         Command::Step => HotkeyEvent::Step,
-                        // Task 14 gives it an event of its own.
-                        Command::StepsStop => {
-                            log::info!("steps: not yet");
-                            return;
-                        }
+                        Command::StepsStop => HotkeyEvent::StepsStop,
                         Command::Show => HotkeyEvent::Show,
                         Command::Reload => HotkeyEvent::Reload,
                     };
@@ -216,7 +215,7 @@ impl WindupApp {
         }
 
         let applied_bindings = windup_core::hotkeys::bindings(&config);
-        let applied_recording = windup_core::hotkeys::recording_bindings(&config);
+        let applied_recording = session_keys(&config);
         paste::set_trigger_vk(paste_plain_vk(&applied_bindings));
         Self {
             config,
@@ -243,6 +242,7 @@ impl WindupApp {
             host: plan.host,
             overlay: overlay::Overlay::default(),
             rec: recording::Rec::default(),
+            review: None,
             last_saved_state: initial_state,
             max_items_atomic,
             save_images_atomic,
@@ -287,6 +287,14 @@ impl WindupApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
     }
+}
+
+/// Every session's own keys (recording, then Steps), to notice a change.
+fn session_keys(config: &Config) -> Vec<(windup_core::Shortcut, windup_core::hotkeys::Action)> {
+    use windup_core::hotkeys::{LiveKind, session_bindings};
+    let mut keys = session_bindings(config, LiveKind::Video);
+    keys.extend(session_bindings(config, LiveKind::Steps));
+    keys
 }
 
 /// Light or dark, with "Follow system" settled by `system_dark`.
@@ -355,13 +363,15 @@ impl eframe::App for WindupApp {
             && !self.popup_open
             && !self.overlay.busy()
             && !self.rec.live.busy()
+            && !self.rec.steps_busy()
+            && self.review.is_none()
             && let Some(exe) = linux::ipc::upgraded_exe()
         {
             linux::ipc::hand_over(&exe);
         }
 
         let wanted = windup_core::hotkeys::bindings(&self.config);
-        let wanted_recording = windup_core::hotkeys::recording_bindings(&self.config);
+        let wanted_recording = session_keys(&self.config);
         if wanted != self.applied_bindings || wanted_recording != self.applied_recording {
             if let Some(l) = &self.hotkey_listener {
                 l.rebind(&self.config);
@@ -419,10 +429,17 @@ impl eframe::App for WindupApp {
                 }
                 // While a recording runs, the Video hotkey stops it.
                 HotkeyEvent::Record { target } => self.video_hotkey(ctx, target),
-                HotkeyEvent::RecordPause => self.pause_recording(),
-                HotkeyEvent::RecordStop => self.stop_recording(),
-                HotkeyEvent::RecordCancel => self.cancel_recording(),
-                HotkeyEvent::Steps { .. } | HotkeyEvent::Step => log::info!("steps: not yet"),
+                // Pause, stop and Esc act on whichever session runs.
+                HotkeyEvent::RecordPause => self.pause_live(),
+                HotkeyEvent::RecordStop => self.stop_live(),
+                HotkeyEvent::RecordCancel => self.cancel_live(),
+                HotkeyEvent::Steps => self.steps_hotkey(ctx),
+                HotkeyEvent::Step => self.take_step(),
+                HotkeyEvent::StepsStop => {
+                    if self.rec.steps_busy() {
+                        self.stop_steps();
+                    }
+                }
                 HotkeyEvent::Show => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -619,6 +636,8 @@ impl eframe::App for WindupApp {
 
         // Before the overlays: a Record they give starts next frame.
         self.drive_recording(ctx, &palette, mode);
+        // Before the overlays: a step it opens in the editor shows at once.
+        self.drive_review(ctx, &palette, mode);
         self.drive_capture(ctx, &palette);
 
         // Keep UI smooth and responsive (60fps when popup is open, 100ms when idle)

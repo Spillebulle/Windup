@@ -5170,6 +5170,7 @@ dependencies = [
  "pipewire",
  "pollster",
  "raw-window-handle",
+ "rfd",
  "rustix 1.1.4",
  "serde",
  "serde_json",

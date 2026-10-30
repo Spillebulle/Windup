@@ -4,6 +4,10 @@
 //! Also the notice card that says why a capture could not start or save,
 //! or where a recording went. The recording itself is `recording.rs`.
 //!
+//! The same overlay is the editor on one Steps step ([`WindupApp::edit_step`]):
+//! the step's picture stands in for the frozen monitor, and the edits go
+//! back into its file.
+//!
 //! The Wayland hosts never come here: they have no eframe viewports to put
 //! an overlay in. Their capture is `linux::capture`, with the overlay on the
 //! Wayland thread. Both hand the outcome to `capture::finish`.
@@ -18,6 +22,7 @@ use crate::platform::{Host, Target};
 use crate::{WindupApp, capture, cursor, paste};
 use capture::finish::{self, remember, remember_steps, remember_video};
 use eframe::egui;
+use std::path::PathBuf;
 use windup_core::ToolId;
 use windup_core::capture::DRect;
 use windup_core::capture::session::{Action, CaptureMode, Outcome, Session};
@@ -59,6 +64,8 @@ struct Capture {
     frames: u32,
     /// The window that had focus at the hotkey, given it back at the end.
     target: Target,
+    /// The step's file, when this is the editor on a step.
+    step: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -133,8 +140,8 @@ impl WindupApp {
             log::debug!("capture: already open");
             return;
         }
-        if self.rec.live.busy() {
-            log::debug!("capture: a recording is under way");
+        if self.rec.live.busy() || self.rec.steps_busy() {
+            log::debug!("capture: a recording or Steps session is under way");
             return;
         }
         if !self.config.is_tool_enabled(tool) {
@@ -186,6 +193,18 @@ impl WindupApp {
         session.pointer = Some([cx, cy]);
         let focus = session.shot.monitor_at(cx, cy).unwrap_or(0);
 
+        self.open_overlay(ctx, session, focus, target, None);
+    }
+
+    /// The overlays for `session`, one per monitor, from the next frame.
+    fn open_overlay(
+        &mut self,
+        ctx: &egui::Context,
+        session: Session,
+        focus: usize,
+        target: Target,
+        step: Option<PathBuf>,
+    ) {
         let fallback = ctx.native_pixels_per_point().unwrap_or(1.0);
         let zoom = ctx.zoom_factor();
         let surfaces = session
@@ -199,7 +218,6 @@ impl WindupApp {
                 title: format!("Windup capture {}", i + 1),
             })
             .collect();
-
         let mut view = CaptureView::new();
         view.reduced_motion = reduced_motion();
         self.overlay.capture = Some(Capture {
@@ -209,8 +227,51 @@ impl WindupApp {
             focus,
             frames: 0,
             target,
+            step,
         });
         ctx.request_repaint();
+    }
+
+    /// The editor on a step's picture, `path`, over the monitor the step
+    /// was taken on (`monitor`, by name), else the pointer's. Enter or
+    /// Ctrl+S writes the edits back into the file; Esc leaves it alone.
+    /// Refused while a capture is open: one overlay at a time.
+    pub(crate) fn edit_step(&mut self, ctx: &egui::Context, path: PathBuf, monitor: &str) {
+        let o = &self.overlay;
+        if o.capture.is_some() || o.finishing.is_some() || self.host != Host::Viewport {
+            log::debug!("steps: the editor cannot open now");
+            return;
+        }
+        let image = match image::open(&path) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                log::warn!("steps: cannot read {}: {e}", path.display());
+                self.open_notice(ctx, "The step's picture could not be read.", None);
+                return;
+            }
+        };
+        // Only the layouts and their names are wanted from it.
+        let monitors: Vec<(DRect, String)> = capture::grab_all()
+            .map(|s| s.monitors.into_iter().map(|m| (m.layout, m.name)).collect())
+            .unwrap_or_default();
+        let (cx, cy) = cursor::get_cursor_position();
+        let layouts: Vec<DRect> = monitors.iter().map(|(l, _)| *l).collect();
+        let named = monitors
+            .iter()
+            .find(|(_, name)| !monitor.is_empty() && name == monitor)
+            .map(|(l, _)| *l);
+        let Some(screen) = named.or_else(|| {
+            layouts
+                .get(capture::monitor_index_at(&layouts, cx, cy))
+                .copied()
+        }) else {
+            self.open_notice(ctx, capture::CaptureError::Unsupported.message(), None);
+            return;
+        };
+        let layout = fit_image(screen, image.dimensions());
+        log::info!("steps: editing {} on {layout:?}", path.display());
+        let session = Session::edit_image(image, layout, &self.config.screenshot);
+        self.open_overlay(ctx, session, 0, Target::None, Some(path));
     }
 
     /// Draws the overlays and the notice, and acts on an outcome. Every
@@ -326,13 +387,18 @@ impl WindupApp {
         }
         if let Some(Outcome::Steps { choice }) = &outcome {
             remember_steps(&mut self.config.steps, &cap.session);
-            // Started here once Steps has a runtime (Task 14).
-            log::info!("capture: steps asked for ({choice:?}), not yet run");
+            // Started next frame, once the overlays are off the screen.
+            self.steps_from(*choice);
             outcome = None;
         }
         if let Some(Outcome::StepDone(img)) = &outcome {
-            // Written back to the step by the review (Task 14).
-            log::info!("capture: step edited ({}x{})", img.width(), img.height());
+            if let Some(path) = &cap.step {
+                self.step_edited(ctx, img, path);
+            }
+            outcome = None;
+        }
+        // The editor on a step never copies or saves a screenshot.
+        if cap.step.is_some() {
             outcome = None;
         }
         self.config.save();
@@ -344,6 +410,17 @@ impl WindupApp {
             self.overlay.finishing = outcome;
         }
         ctx.request_repaint();
+    }
+
+    /// Writes an edited step over its file and has the review draw its
+    /// thumbnail again.
+    fn step_edited(&mut self, ctx: &egui::Context, img: &image::RgbaImage, path: &std::path::Path) {
+        if let Err(why) = finish::write_step(img, path) {
+            self.open_notice(ctx, &why, None);
+            return;
+        }
+        log::info!("steps: step {} edited", path.display());
+        self.reload_step(ctx, path);
     }
 
     /// Copies and saves the picture. A failure is shown in the notice.
@@ -458,6 +535,27 @@ impl WindupApp {
             crate::hide_popup_window(NOTICE_TITLE);
             crate::reset_popup_clipping_cache();
         }
+    }
+}
+
+/// Where a picture of `size` pixels is shown on `screen` (desktop units):
+/// the whole monitor when it has the picture's shape (it was taken there),
+/// else the largest rectangle of that shape, centred.
+pub(crate) fn fit_image(screen: DRect, (w, h): (u32, u32)) -> DRect {
+    if w == 0 || h == 0 || screen.w <= 0.0 || screen.h <= 0.0 {
+        return screen;
+    }
+    let (w, h) = (w as f32, h as f32);
+    if ((w / h) / (screen.w / screen.h) - 1.0).abs() < 0.005 {
+        return screen;
+    }
+    let f = (screen.w / w).min(screen.h / h);
+    let (fw, fh) = ((w * f).round(), (h * f).round());
+    DRect {
+        x: (screen.x + (screen.w - fw) / 2.0).round(),
+        y: (screen.y + (screen.h - fh) / 2.0).round(),
+        w: fw,
+        h: fh,
     }
 }
 
@@ -780,6 +878,25 @@ mod tests {
         assert!(fullscreen_now(steps(2)), "mapped: the message");
         assert!(fullscreen_now(steps(FOCUS_FRAMES - 1)));
         assert!(!fullscreen_now(steps(FOCUS_FRAMES)), "not every frame");
+    }
+
+    #[test]
+    fn a_step_fills_the_monitor_it_was_taken_on() {
+        let m = rect(1920.0, 0.0, 2560.0, 1440.0);
+        assert_eq!(fit_image(m, (2560, 1440)), m);
+        // At another scale, the same shape still fills it.
+        assert_eq!(fit_image(m, (1280, 720)), m);
+    }
+
+    #[test]
+    fn a_step_of_another_shape_is_fitted_and_centred() {
+        let m = rect(0.0, 0.0, 1920.0, 1080.0);
+        // 4:3 on 16:9: full height, bars left and right.
+        assert_eq!(fit_image(m, (1024, 768)), rect(240.0, 0.0, 1440.0, 1080.0));
+        // Taller than wide: full height.
+        let r = fit_image(m, (500, 1000));
+        assert_eq!((r.h, r.w), (1080.0, 540.0));
+        assert_eq!(fit_image(m, (0, 10)), m);
     }
 
     #[test]

@@ -492,6 +492,93 @@ x11_record_cancel() {
     rm -rf "$videos"/Windup
 }
 
+# Steps on X11: Super+Shift+G starts a session, two clicks and the step key
+# take three steps, Super+Shift+G again opens the review. The session folder
+# exports, the review's close asks and Return discards, which removes the
+# folder. A second session cancelled with Escape leaves nothing.
+x11_steps() {
+    local log=$art/x11-windup.log root=$home/.cache/windup/steps dir
+    xdotool key super+shift+g
+    if wait_for 150 grep -q "steps: started" "$log"; then
+        ok "x11: Super+Shift+G started a Steps session"
+    else
+        bad "x11: Super+Shift+G did not start a Steps session"
+        grep -E "steps" "$log"
+        return
+    fi
+    sleep 0.5
+    xdotool mousemove 300 400 click 1
+    sleep 0.6
+    xdotool click 3
+    sleep 0.6
+    xdotool key super+shift+x
+    if wait_for 100 grep -q "steps: step 3 written" "$log"; then
+        ok "x11: two clicks and the step key took three steps"
+    else
+        bad "x11: the clicks and the step key did not take three steps"
+        grep -E "steps" "$log"
+    fi
+    xdotool key super+shift+g
+    if wait_for 100 grep -q "steps: review opened" "$log"; then
+        ok "x11: Super+Shift+G again stopped and opened the review"
+    else
+        bad "x11: the review did not open"
+        grep -E "steps" "$log"
+        return
+    fi
+    dir=$(find "$root" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+    # A step taken with the key has no pointer to mark; the clicks do.
+    if [ -n "$dir" ] && python3 - "$dir/steps.json" <<'PY'
+import json, sys
+steps = json.load(open(sys.argv[1]))["steps"]
+clicks = [s for s in steps if s["cause"] != "Hotkey"]
+assert len(steps) == 3, len(steps)
+assert len(clicks) == 2 and all(s["pointer"] is not None for s in clicks), steps
+PY
+    then
+        ok "x11: steps.json holds the three steps, the clicks with the pointer"
+    else
+        bad "x11: steps.json is not the three steps (${dir:-no folder})"
+    fi
+    local html=$home/x11-steps.html
+    if [ -n "$dir" ] && "$bin" --steps-export "$dir" html "$html" >/dev/null 2>&1 &&
+        [ "$(grep -o '<img' "$html" | wc -l)" -eq 3 ]; then
+        ok "x11: --steps-export wrote a page with the three pictures"
+    else
+        bad "x11: --steps-export did not write the three pictures"
+    fi
+    xdotool search --name '^Windup steps$' windowactivate --sync key alt+F4 2>/dev/null
+    sleep 0.6
+    xdotool key Return
+    if [ -n "$dir" ] && wait_for 50 sh -c "! test -e '$dir'"; then
+        ok "x11: closing the review and Return discarded the steps"
+    else
+        bad "x11: the review's discard left ${dir:-nothing to check}"
+    fi
+
+    xdotool key super+shift+g
+    if wait_for 150 sh -c "[ \$(grep -c 'steps: started' '$log') -ge 2 ]"; then
+        sleep 0.5
+        xdotool mousemove 300 400 click 1
+        sleep 0.6
+        xdotool key Escape
+        if wait_for 100 grep -q "steps: cancelled" "$log" &&
+            wait_for 50 sh -c "[ -z \"\$(ls -A '$root' 2>/dev/null)\" ]"; then
+            ok "x11: Escape cancelled the Steps session and left no folder"
+        else
+            bad "x11: Escape did not cancel the Steps session cleanly"
+            ls -la "$root" 2>/dev/null
+        fi
+    else
+        bad "x11: a second Steps session did not start"
+    fi
+    if wait_for 50 grep -q "steps keys released" "$log"; then
+        ok "x11: the Steps keys were let go"
+    else
+        bad "x11: the Steps keys are still grabbed"
+    fi
+}
+
 wayland_session() {
     echo "== Wayland (headless sway)"
     fresh_home
@@ -878,6 +965,7 @@ x11_session() {
     fi
 
     x11_record_cancel
+    x11_steps
 
     # Started in the background, the window is hidden; `windup` shows it,
     # closing it hides it again without stopping Windup, and it comes back.
