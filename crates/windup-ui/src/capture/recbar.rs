@@ -3,6 +3,10 @@
 //! Stop. It is drawn into a window or surface the host keeps out of the
 //! recording; this view only paints and reports clicks and keys.
 //!
+//! A Steps session uses the same bar with its step count in place of the
+//! dot, the timer and the chips: nothing records between steps, so nothing
+//! pulses.
+//!
 //! Space and Enter work only while the bar's own window has focus; Esc is
 //! global and handled by the host, never here.
 
@@ -25,6 +29,9 @@ pub struct RecBarState {
     pub bitrate_label: String,
     /// The OS reduced-motion setting: the dot then stays still.
     pub reduced_motion: bool,
+    /// A Steps session's step count. The bar then shows it, in place of the
+    /// dot, the timer and the chips; pause and stop stay.
+    pub steps: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +62,22 @@ pub fn dot_alpha(t: f64, still: bool) -> f32 {
     }
     let phase = std::f64::consts::TAU * t / metrics::REC_PULSE_SECS;
     (0.55 + 0.45 * phase.cos()) as f32
+}
+
+/// `1 step`, `3 steps`.
+pub fn count_text(n: u32) -> String {
+    if n == 1 {
+        "1 step".to_string()
+    } else {
+        format!("{n} steps")
+    }
+}
+
+/// The widest the count gets at this many digits, so the bar keeps its
+/// width from one step to the next until a digit is added.
+fn count_slot(ctx: &Context, n: u32) -> f32 {
+    let digits = "0".repeat(n.to_string().len());
+    width_of(ctx, &format!("{digits} steps"), timer_font())
 }
 
 fn timer_font() -> FontId {
@@ -96,15 +119,21 @@ fn button_size() -> Vec2 {
 /// only then). Stable while the timer stays in its hour bracket.
 pub fn bar_size(ctx: &Context, state: &RecBarState) -> Vec2 {
     let gap = metrics::REC_GAP;
+    let lead = match state.steps {
+        Some(n) => metrics::ICON + gap + count_slot(ctx, n) + gap,
+        None => {
+            metrics::REC_DOT
+                + gap
+                + timer_slot(ctx, state.elapsed)
+                + gap
+                + chip_w(ctx, &fps_label(state.fps))
+                + gap
+                + chip_w(ctx, &state.bitrate_label)
+                + gap
+        }
+    };
     let w = metrics::S2
-        + metrics::REC_DOT
-        + gap
-        + timer_slot(ctx, state.elapsed)
-        + gap
-        + chip_w(ctx, &fps_label(state.fps))
-        + gap
-        + chip_w(ctx, &state.bitrate_label)
-        + gap
+        + lead
         + metrics::HAIRLINE
         + gap
         + 2.0 * button_size().x
@@ -176,31 +205,47 @@ impl RecBarView {
         let cy = bar.center().y;
         let mut x = bar.left() + metrics::S2;
 
-        let still = state.reduced_motion || state.paused;
-        painter.circle_filled(
-            pos2(x + metrics::REC_DOT / 2.0, cy),
-            metrics::REC_DOT / 2.0,
-            p.critical.gamma_multiply(dot_alpha(now, still)),
-        );
-        x += metrics::REC_DOT + gap;
-
-        let timer = painter.layout_no_wrap(timer_text(state.elapsed), timer_font(), p.text_strong);
-        painter.galley(pos2(x, cy - timer.size().y / 2.0), timer, p.text_strong);
-        x += timer_slot(&ctx, state.elapsed) + gap;
-
-        for label in [fps_label(state.fps), state.bitrate_label.clone()] {
-            let w = chip_w(&ctx, &label);
-            let h = text::TINY + 2.0 * metrics::CHIP_PAD_Y;
-            let r = Rect::from_min_size(pos2(x, cy - h / 2.0), vec2(w, h));
-            painter.rect_filled(r, metrics::RADIUS, p.control);
-            painter.text(
-                r.center(),
-                egui::Align2::CENTER_CENTER,
-                label,
-                chip_font(),
-                p.text_muted,
+        if let Some(n) = state.steps {
+            Icon::Footprints.paint(
+                &painter,
+                Rect::from_min_size(
+                    pos2(x, cy - metrics::ICON / 2.0),
+                    vec2(metrics::ICON, metrics::ICON),
+                ),
+                p.accent,
             );
-            x += w + gap;
+            x += metrics::ICON + gap;
+            let count = painter.layout_no_wrap(count_text(n), timer_font(), p.text_strong);
+            painter.galley(pos2(x, cy - count.size().y / 2.0), count, p.text_strong);
+            x += count_slot(&ctx, n) + gap;
+        } else {
+            let still = state.reduced_motion || state.paused;
+            painter.circle_filled(
+                pos2(x + metrics::REC_DOT / 2.0, cy),
+                metrics::REC_DOT / 2.0,
+                p.critical.gamma_multiply(dot_alpha(now, still)),
+            );
+            x += metrics::REC_DOT + gap;
+
+            let timer =
+                painter.layout_no_wrap(timer_text(state.elapsed), timer_font(), p.text_strong);
+            painter.galley(pos2(x, cy - timer.size().y / 2.0), timer, p.text_strong);
+            x += timer_slot(&ctx, state.elapsed) + gap;
+
+            for label in [fps_label(state.fps), state.bitrate_label.clone()] {
+                let w = chip_w(&ctx, &label);
+                let h = text::TINY + 2.0 * metrics::CHIP_PAD_Y;
+                let r = Rect::from_min_size(pos2(x, cy - h / 2.0), vec2(w, h));
+                painter.rect_filled(r, metrics::RADIUS, p.control);
+                painter.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    chip_font(),
+                    p.text_muted,
+                );
+                x += w + gap;
+            }
         }
 
         painter.line_segment(
@@ -278,7 +323,8 @@ impl RecBarView {
         }
 
         // The pulse needs frames; the timer needs one a few times a second.
-        if !state.paused {
+        // A step count changes only when the host says so.
+        if !state.paused && state.steps.is_none() {
             let ms = if state.reduced_motion { 250 } else { 33 };
             ctx.request_repaint_after(Duration::from_millis(ms));
         }
@@ -298,6 +344,7 @@ mod tests {
             fps: 30,
             bitrate_label: "8 Mb/s".into(),
             reduced_motion: false,
+            steps: None,
         }
     }
 
@@ -459,6 +506,36 @@ mod tests {
         assert!(rig.view.tip_pending());
         rig.frame(&s, false, vec![Event::PointerMoved(pos2(1.0, 1.0))]);
         assert!(!rig.view.tip_pending());
+    }
+
+    #[test]
+    fn the_count_says_step_or_steps() {
+        assert_eq!(count_text(1), "1 step");
+        assert_eq!(count_text(3), "3 steps");
+        assert_eq!(count_text(0), "0 steps");
+    }
+
+    #[test]
+    fn a_steps_bar_is_narrower_than_a_video_bar_and_keeps_its_buttons() {
+        let mut rig = Rig::new();
+        let video = state();
+        let mut s = RecBarState {
+            steps: Some(3),
+            ..state()
+        };
+        let size = bar_size(&rig.ctx, &s);
+        assert!(size.x < bar_size(&rig.ctx, &video).x, "{size:?}");
+        assert_eq!(size.y, metrics::REC_BAR_H);
+        assert!(host_size(&rig.ctx, &s).x == size.x);
+        let stop = pos2(
+            size.x - metrics::S2 - metrics::SEG_ICON_W / 2.0,
+            size.y / 2.0,
+        );
+        let pause = stop - vec2(metrics::SEG_ICON_W + metrics::SEG_PAD, 0.0);
+        assert_eq!(rig.click(&s, pause), Some(RecBarAction::Pause));
+        assert_eq!(rig.click(&s, stop), Some(RecBarAction::Stop));
+        s.paused = true;
+        assert_eq!(rig.click(&s, pause), Some(RecBarAction::Resume));
     }
 
     #[test]

@@ -116,6 +116,12 @@ pub mod metrics {
     pub const WHEEL_POPOVER: f32 = 168.0;
     /// Width of the notice card (a capture error with an OK button).
     pub const NOTICE_W: f32 = 320.0;
+    /// Width of a step's thumbnail in the Steps review.
+    pub const REVIEW_THUMB_W: f32 = 240.0;
+    /// The Steps review window: §7.17's standard dialog width, and tall
+    /// enough for a few rows.
+    pub const REVIEW_W: f32 = 760.0;
+    pub const REVIEW_H: f32 = 820.0;
 
     // Colour wheel, from Umber's picker.
     /// Width of the hue ring. A wheel too small for it keeps a quarter of its

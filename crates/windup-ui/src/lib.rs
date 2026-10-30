@@ -7,6 +7,7 @@ pub mod notice;
 pub mod popup;
 pub mod settings;
 pub mod setup;
+pub mod steps;
 pub mod theme;
 pub mod themelib;
 pub mod widgets;

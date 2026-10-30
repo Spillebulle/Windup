@@ -266,6 +266,7 @@ impl WindupApp {
             fps: running.fps,
             bitrate_label: running.label.clone(),
             reduced_motion: reduced_motion(),
+            steps: None,
         })
     }
 

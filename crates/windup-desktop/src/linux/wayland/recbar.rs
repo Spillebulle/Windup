@@ -62,6 +62,7 @@ impl RecBar {
             fps: self.fps,
             bitrate_label: self.label.clone(),
             reduced_motion: self.reduced_motion,
+            steps: None,
         }
     }
 }
@@ -122,6 +123,7 @@ impl State {
             fps,
             bitrate_label: label.clone(),
             reduced_motion,
+            steps: None,
         };
         let size = whole(host_size(&canvas.ctx, &bar_state));
         let Some((output, spot, scale)) = self.bar_spot(rect, size) else {
