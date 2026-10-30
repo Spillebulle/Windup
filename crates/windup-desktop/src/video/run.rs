@@ -19,8 +19,8 @@ use windup_core::capture::output::{recording_name_now, unique_path};
 use windup_core::config::{Config, VideoConfig};
 use windup_core::video::pcm::put_f32le;
 use windup_core::video::{
-    AudioIn, Codec, Container, Finish, Pacer, RecState, Recorder, SegmentJob, Source, candidates,
-    job_rate, join_passes, pick_encoder, segment_args, segment_ext,
+    AudioIn, Codec, Container, Failed, Finish, Pacer, RecState, Recorder, Retry, SegmentJob,
+    Source, candidates, job_rate, join_passes, pick_encoder, retry, segment_args, segment_ext,
 };
 
 use super::ffmpeg::{self, PROBE, ProbeState};
@@ -200,6 +200,7 @@ impl Recording {
             encoder,
             hardware,
             fell_back: false,
+            download: false,
             source_fell_back: false,
             first_size: None,
             bitrate,
@@ -431,6 +432,8 @@ struct Run {
     encoder: &'static str,
     hardware: bool,
     fell_back: bool,
+    /// Ddagrab's frames are downloaded for the hardware encoder from here on.
+    download: bool,
     /// The factory's `fallback` source is in use from here on.
     source_fell_back: bool,
     /// Segment 0's picture size. The join copies the segments into one
@@ -449,17 +452,22 @@ impl Run {
             .join(format!("seg-{index}.{}", segment_ext(self.cfg.container)))
     }
 
+    /// The source segments use now: the factory's, or its fallback once
+    /// that took over.
+    fn wanted_source(&self) -> Source {
+        match self.factory.fallback() {
+            Some(fallback) if self.source_fell_back => fallback,
+            _ => self.factory.source(),
+        }
+    }
+
     fn open_segment(&mut self, index: u32) -> Result<Segment, String> {
         let fps = self.cfg.fps.max(1);
         let gif = self.cfg.container == Container::Gif;
 
         let mut pipes = Vec::new();
         let mut video_pipe = None;
-        let wanted = match self.factory.fallback() {
-            Some(fallback) if self.source_fell_back => fallback,
-            _ => self.factory.source(),
-        };
-        let source = match wanted {
+        let source = match self.wanted_source() {
             Source::RawPipe { .. } => {
                 let frames = self.factory.open_pipe()?;
                 let (w, h) = frames.size();
@@ -507,6 +515,7 @@ impl Run {
             bitrate_kbps: self.bitrate,
             audio: audio_in,
             out: self.segment_path(index),
+            download: self.download,
         };
         let args = segment_args(&job, self.cfg.container);
         log::debug!("segment {index}: ffmpeg {}", args.join(" "));
@@ -639,8 +648,9 @@ impl Run {
     }
 
     /// Notices a segment that died on its own. A hardware encoder that died
-    /// at once is swapped for the software one and the segment started
-    /// again; anything else ends the recording, keeping what was recorded.
+    /// at once is given ddagrab's frames through memory, then swapped for the
+    /// software one, and the segment started again (`retry` has the order);
+    /// anything else ends the recording, keeping what was recorded.
     fn check(&mut self) {
         let Some(seg) = self.seg.as_mut() else {
             return;
@@ -681,35 +691,48 @@ impl Run {
                     None => "ffmpeg stopped.".into(),
                 }),
         };
-        // The two fallbacks are independent, and the encoder is the likelier
-        // culprit, so a hardware encoder that failed at once is swapped first
-        // with the source kept. Only a failure after that (or with no
-        // hardware encoder to blame) moves to the source's fallback.
-        if early && ffmpeg_failed && self.hardware && !self.fell_back {
-            let sw = software(self.codec);
-            log::warn!(
-                "segment {index}: {} failed at once ({why}); using {sw} from here on",
-                self.encoder
-            );
-            self.encoder = sw;
-            self.hardware = false;
-            self.fell_back = true;
-            match self.open_segment(index) {
-                Ok(seg) => {
-                    self.seg = Some(seg);
-                    return;
+        // The fallbacks are independent, and the encoder is the likelier
+        // culprit, so a hardware encoder that failed at once is tried with
+        // ddagrab's frames downloaded, then swapped, with the source kept.
+        // Only a failure after that (or with no hardware encoder to blame)
+        // moves to the source's fallback.
+        let next = (early && ffmpeg_failed)
+            .then(|| {
+                retry(Failed {
+                    ddagrab: matches!(self.wanted_source(), Source::Ddagrab { .. }),
+                    hardware: self.hardware && !self.fell_back,
+                    downloaded: self.download,
+                    source_fallback: !self.source_fell_back && self.factory.fallback().is_some(),
+                })
+            })
+            .flatten();
+        if let Some(next) = next {
+            match next {
+                Retry::Download => {
+                    log::warn!(
+                        "segment {index}: {} failed at once on the GPU's frames ({why}); \
+                         copying them through memory from here on",
+                        self.encoder
+                    );
+                    self.download = true;
                 }
-                Err(e) => why = e,
+                Retry::Software => {
+                    let sw = software(self.codec);
+                    log::warn!(
+                        "segment {index}: {} failed at once ({why}); using {sw} from here on",
+                        self.encoder
+                    );
+                    self.encoder = sw;
+                    self.hardware = false;
+                    self.fell_back = true;
+                }
+                Retry::Source => {
+                    log::warn!(
+                        "segment {index}: the screen source failed at once ({why}); using its fallback from here on"
+                    );
+                    self.source_fell_back = true;
+                }
             }
-        } else if early
-            && ffmpeg_failed
-            && !self.source_fell_back
-            && self.factory.fallback().is_some()
-        {
-            log::warn!(
-                "segment {index}: the screen source failed at once ({why}); using its fallback from here on"
-            );
-            self.source_fell_back = true;
             match self.open_segment(index) {
                 Ok(seg) => {
                     self.seg = Some(seg);

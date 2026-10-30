@@ -55,6 +55,50 @@ pub struct SegmentJob {
     pub bitrate_kbps: Option<u32>,
     pub audio: Vec<AudioIn>,
     pub out: PathBuf,
+    /// Ddagrab's frames go through memory even for an encoder that could take
+    /// them on the GPU. On a hybrid laptop Desktop Duplication runs on the
+    /// card the screen hangs off (usually Intel's) and NVENC or AMF, on the
+    /// other card, cannot read its textures.
+    pub download: bool,
+}
+
+/// What a segment whose ffmpeg failed at once tries next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retry {
+    /// The same hardware encoder, with ddagrab's frames downloaded.
+    Download,
+    /// The software encoder, same source.
+    Software,
+    /// The source's fallback (gdigrab for ddagrab).
+    Source,
+}
+
+/// Where a recording stands when a segment fails at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Failed {
+    pub ddagrab: bool,
+    pub hardware: bool,
+    pub downloaded: bool,
+    /// The source has a fallback not yet in use.
+    pub source_fallback: bool,
+}
+
+/// The next thing to try, the encoder first since it is the likelier
+/// culprit. A discrete card's encoder fed ddagrab frames from the other card
+/// is the usual hybrid-laptop failure, so that encoder is kept with the
+/// frames downloaded before the card is given up for software (QSV is not
+/// tried in between: the probe already put the discrete card first).
+/// `None`: nothing left to try.
+pub fn retry(f: Failed) -> Option<Retry> {
+    if f.hardware && f.ddagrab && !f.downloaded {
+        Some(Retry::Download)
+    } else if f.hardware {
+        Some(Retry::Software)
+    } else if f.source_fallback {
+        Some(Retry::Source)
+    } else {
+        None
+    }
 }
 
 /// Every segment is a Matroska file of the final codec, so the join can copy.
@@ -122,9 +166,11 @@ pub fn segment_args(job: &SegmentJob, container: Container) -> Vec<String> {
             video_inputs = 1;
         }
         Source::Ddagrab { output, x, y, w, h } => {
-            let tail = if !gif && (encoder.ends_with("_nvenc") || encoder.ends_with("_amf")) {
+            let tail = if software || job.download {
+                ",hwdownload,format=bgra"
+            } else if encoder.ends_with("_nvenc") || encoder.ends_with("_amf") {
                 ""
-            } else if !gif && encoder.ends_with("_qsv") {
+            } else if encoder.ends_with("_qsv") {
                 ",hwmap=derive_device=qsv,format=qsv"
             } else {
                 ",hwdownload,format=bgra"
@@ -308,6 +354,7 @@ mod tests {
             bitrate_kbps: None,
             audio: vec![],
             out: PathBuf::from("seg0.mkv"),
+            download: false,
         }
     }
 
@@ -368,6 +415,55 @@ mod tests {
         assert!(graph(&a).contains("hwdownload,format=bgra"));
         assert!(has(&a, "-pix_fmt yuv420p"));
         assert!(has(&a, "-preset veryfast"));
+    }
+
+    #[test]
+    fn ddagrab_downloads_for_a_card_it_is_not_on() {
+        for enc in ["h264_nvenc", "hevc_amf", "h264_qsv"] {
+            let mut j = job(dda(), enc);
+            j.download = true;
+            let a = segment_args(&j, Container::Mp4);
+            assert!(graph(&a).ends_with(":draw_mouse=1,hwdownload,format=bgra[v]"));
+            assert!(has(&a, &format!("-c:v {enc}")));
+            // The encoder picks its own pixel format from memory.
+            assert!(!has(&a, "-pix_fmt yuv420p"));
+        }
+    }
+
+    #[test]
+    fn a_failed_hardware_encoder_on_ddagrab_downloads_then_goes_software() {
+        let f = Failed {
+            ddagrab: true,
+            hardware: true,
+            downloaded: false,
+            source_fallback: true,
+        };
+        assert_eq!(retry(f), Some(Retry::Download));
+        let f = Failed {
+            downloaded: true,
+            ..f
+        };
+        assert_eq!(retry(f), Some(Retry::Software));
+        let f = Failed {
+            hardware: false,
+            ..f
+        };
+        assert_eq!(retry(f), Some(Retry::Source));
+        let f = Failed {
+            source_fallback: false,
+            ..f
+        };
+        assert_eq!(retry(f), None);
+    }
+
+    #[test]
+    fn other_sources_go_straight_to_software() {
+        let f = Failed {
+            hardware: true,
+            ..Failed::default()
+        };
+        assert_eq!(retry(f), Some(Retry::Software));
+        assert_eq!(retry(Failed::default()), None);
     }
 
     #[test]

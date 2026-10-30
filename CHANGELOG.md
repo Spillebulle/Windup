@@ -3,6 +3,7 @@
 ## Unreleased
 
 - The Video settings warn when the Pause shortcut is also another tool's shortcut, with the same caution keycap as a clashing tool shortcut: while a recording runs, those keys pause it instead.
+- On Windows laptops with Intel graphics and an NVIDIA or AMD card, recordings stay on the NVIDIA or AMD encoder. When it cannot read the screen straight from the Intel card, Windup copies the frames over instead of falling back to the much slower software encoder.
 
 ## 0.3.1
 
