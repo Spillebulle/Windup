@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::{delegate_output, delegate_registry, registry_handlers};
-use wayland_client::protocol::{wl_output, wl_pointer, wl_seat};
+use wayland_client::globals::registry_queue_init;
+use wayland_client::protocol::{wl_callback, wl_output, wl_pointer, wl_seat};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::ext::image_capture_source::v1::client::{
     ext_image_capture_source_v1::ExtImageCaptureSourceV1,
@@ -35,13 +36,11 @@ use wayland_protocols::ext::image_copy_capture::v1::client::{
 };
 use windup_core::capture::backend::WlPointer;
 use windup_core::capture::geometry::DRect;
-use windup_core::steps::pointer::cursor_point;
 
 use crate::capture::CaptureError;
 use crate::capture::ipcrects::{hyprland_cursor_live, sway_focused_live};
 use crate::linux::wayland::screencopy::{
-    Method, connect, grab_output, output_layout_from_env, outputs_of, read_events, silent,
-    wait_until,
+    Method, grab_output, output_layout_from_env, outputs_of, read_events, silent, wait_until,
 };
 use crate::steps::camera::{Camera, Shot, describe};
 
@@ -81,8 +80,9 @@ struct Seen {
     size: Option<(i32, i32)>,
     /// Between `enter` and `leave`.
     inside: bool,
+    /// The hotspot's place in the output's pixels: the protocol gives the
+    /// pointer's tip itself, never the cursor image's corner.
     position: Option<(i32, i32)>,
-    hotspot: (i32, i32),
     /// When it last moved here, to choose between two outputs that both
     /// have a corner of the cursor image.
     stamp: u64,
@@ -94,7 +94,8 @@ struct Seen {
 fn pick_cursor(seen: &[Seen]) -> Option<(String, [f32; 2])> {
     seen.iter()
         .filter_map(|s| {
-            let p = cursor_point(s.position?, s.hotspot);
+            let (x, y) = s.position?;
+            let p = [x as f32, y as f32];
             let on = s.size.is_none_or(|(w, h)| {
                 p[0] >= 0.0 && p[1] >= 0.0 && p[0] < w as f32 && p[1] < h as f32
             });
@@ -117,14 +118,15 @@ impl CursorTracker {
     /// pointer, or no session says the cursor is on its output within
     /// `FIRST_ENTER` of opening.
     pub fn start() -> Option<CursorTracker> {
+        let conn = Connection::connect_to_env().ok()?;
         let seen = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("windup-cursor".into())
             .spawn({
-                let (seen, stop) = (seen.clone(), stop.clone());
-                move || track(seen, stop, tx)
+                let (conn, seen, stop) = (conn.clone(), seen.clone(), stop.clone());
+                move || track(conn, seen, stop, tx)
             })
             .ok()?;
         let mut tracker = CursorTracker {
@@ -137,8 +139,10 @@ impl CursorTracker {
             Ok(Err(why)) => log::info!("steps: no cursor session: {why}"),
             Err(_) => log::info!("steps: the cursor sessions did not open in time"),
         }
-        // Not joined: a compositor that hangs while the sessions open must
-        // not hold the camera too. The thread sees `stop` once it is free.
+        // The thread's own waits end by `SETUP_CAP`, except the registry's
+        // first roundtrip, which has no deadline: closing the socket ends
+        // that one too. Not joined, so the camera never waits on it.
+        hang_up(&conn);
         tracker.thread.take();
         None
     }
@@ -146,6 +150,14 @@ impl CursorTracker {
     /// The output the pointer is on and the pointer's place in its pixels.
     pub fn where_now(&self) -> Option<(String, [f32; 2])> {
         pick_cursor(&self.seen.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+/// Shuts the connection's socket, so whatever waits on it gets an error.
+fn hang_up(conn: &Connection) {
+    use std::os::fd::AsFd;
+    if let Ok(fd) = conn.backend().poll_fd().as_fd().try_clone_to_owned() {
+        let _ = std::os::unix::net::UnixStream::from(fd).shutdown(std::net::Shutdown::Both);
     }
 }
 
@@ -164,6 +176,8 @@ struct TrackState {
     has_pointer: bool,
     seen: Arc<Mutex<Vec<Seen>>>,
     clock: u64,
+    /// `wl_display.sync` callbacks answered.
+    synced: u64,
 }
 
 impl TrackState {
@@ -180,17 +194,19 @@ impl TrackState {
 /// cursor was found, then follows it until `stop`. Everything it bound goes
 /// with its connection when it returns.
 fn track(
+    conn: Connection,
     seen: Arc<Mutex<Vec<Seen>>>,
     stop: Arc<AtomicBool>,
     ready: mpsc::Sender<Result<(), String>>,
 ) {
-    let opened = open_sessions(seen).and_then(|(conn, mut queue, mut state)| {
+    let setup = Instant::now() + SETUP_CAP;
+    let opened = open_sessions(&conn, seen, setup).and_then(|(mut queue, mut state)| {
         let deadline = Instant::now() + FIRST_ENTER;
         wait_until(&mut queue, &mut state, deadline, TrackState::any_inside)
             .map_err(|_| "the cursor is on no output's session".to_owned())?;
-        Ok((conn, queue, state))
+        Ok((queue, state))
     });
-    let (_conn, mut queue, mut state) = match opened {
+    let (mut queue, mut state) = match opened {
         Ok(opened) => opened,
         Err(why) => {
             let _ = ready.send(Err(why));
@@ -220,12 +236,28 @@ fn seen_of(state: &TrackState) -> std::sync::MutexGuard<'_, Vec<Seen>> {
     state.seen.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A connection with the seat's pointer and a cursor session per output.
+/// A roundtrip that gives up at `deadline`, so a silent compositor ends the
+/// thread instead of holding it.
+fn sync(
+    conn: &Connection,
+    queue: &mut EventQueue<TrackState>,
+    state: &mut TrackState,
+    deadline: Instant,
+) -> Result<(), String> {
+    let want = state.synced + 1;
+    conn.display().sync(&queue.handle(), ());
+    wait_until(queue, state, deadline, |s| s.synced >= want).map_err(|e| describe(&e))
+}
+
+/// The seat's pointer and a cursor session per output, set up by `deadline`.
 fn open_sessions(
+    conn: &Connection,
     seen: Arc<Mutex<Vec<Seen>>>,
-) -> Result<(Connection, EventQueue<TrackState>, TrackState), String> {
-    let (conn, globals, mut queue) =
-        connect::<TrackState>().map_err(|_| "no Wayland connection".to_owned())?;
+    deadline: Instant,
+) -> Result<(EventQueue<TrackState>, TrackState), String> {
+    // Its one roundtrip has no deadline; `start` hangs up if it never ends.
+    let (globals, mut queue) =
+        registry_queue_init::<TrackState>(conn).map_err(|e| e.to_string())?;
     let qh = queue.handle();
     let source: ExtOutputImageCaptureSourceManagerV1 = globals
         .bind(&qh, 1..=1, ())
@@ -242,11 +274,12 @@ fn open_sessions(
         has_pointer: false,
         seen,
         clock: 0,
+        synced: 0,
     };
     // Two roundtrips: the first delivers wl_output and the seat's
     // capabilities, the second xdg_output.
     for _ in 0..2 {
-        queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
+        sync(conn, &mut queue, &mut state, deadline)?;
     }
     if !state.has_pointer {
         return Err("the seat has no pointer".to_owned());
@@ -277,7 +310,7 @@ fn open_sessions(
     }
     *seen_of(&state) = list;
     queue.flush().map_err(|e| e.to_string())?;
-    Ok((conn, queue, state))
+    Ok((queue, state))
 }
 
 impl Dispatch<wl_seat::WlSeat, ()> for TrackState {
@@ -298,6 +331,21 @@ impl Dispatch<wl_seat::WlSeat, ()> for TrackState {
     }
 }
 
+impl Dispatch<wl_callback::WlCallback, ()> for TrackState {
+    fn event(
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.synced += 1;
+        }
+    }
+}
+
 impl Dispatch<ExtImageCopyCaptureCursorSessionV1, usize> for TrackState {
     fn event(
         state: &mut Self,
@@ -310,25 +358,29 @@ impl Dispatch<ExtImageCopyCaptureCursorSessionV1, usize> for TrackState {
         state.clock += 1;
         let clock = state.clock;
         let mut seen = seen_of(state);
-        let Some(s) = seen.get_mut(*index) else {
-            return;
-        };
-        match event {
-            cursor::Event::Enter => {
-                s.inside = true;
-                s.stamp = clock;
-            }
-            cursor::Event::Leave => {
-                s.inside = false;
-                s.position = None;
-            }
-            cursor::Event::Position { x, y } => {
-                s.position = Some((x, y));
-                s.stamp = clock;
-            }
-            cursor::Event::Hotspot { x, y } => s.hotspot = (x, y),
-            _ => {}
+        if let Some(s) = seen.get_mut(*index) {
+            note(s, event, clock);
         }
+    }
+}
+
+/// One cursor session event, heard at `clock`. `hotspot` is ignored: the
+/// position is the hotspot's own place already.
+fn note(s: &mut Seen, event: cursor::Event, clock: u64) {
+    match event {
+        cursor::Event::Enter => {
+            s.inside = true;
+            s.stamp = clock;
+        }
+        cursor::Event::Leave => {
+            s.inside = false;
+            s.position = None;
+        }
+        cursor::Event::Position { x, y } => {
+            s.position = Some((x, y));
+            s.stamp = clock;
+        }
+        _ => {}
     }
 }
 
@@ -383,6 +435,9 @@ pub struct ScreencopyCamera {
     /// The route actually used: `CursorSession` only with a tracker.
     pointer: WlPointer,
     tracker: Option<CursorTracker>,
+    /// What `monitor` found, for the shot that follows it: one lookup per
+    /// shot, and the bar is hidden for the output that is pictured.
+    aimed: Option<Aim>,
 }
 
 impl ScreencopyCamera {
@@ -406,6 +461,7 @@ impl ScreencopyCamera {
             method,
             pointer,
             tracker,
+            aimed: None,
         }
     }
 
@@ -446,11 +502,15 @@ impl ScreencopyCamera {
 
 impl Camera for ScreencopyCamera {
     fn monitor(&mut self, _at: Option<[f32; 2]>) -> Option<DRect> {
-        self.aim().ok().map(|aim| aim.layout)
+        self.aimed = self.aim().ok();
+        self.aimed.as_ref().map(|aim| aim.layout)
     }
 
     fn shoot(&mut self, _at: Option<[f32; 2]>) -> Result<Shot, CaptureError> {
-        let aim = self.aim()?;
+        let aim = match self.aimed.take() {
+            Some(aim) => aim,
+            None => self.aim()?,
+        };
         let paint = paint_cursor(aim.found_by, self.tracker.is_some());
         let m = grab_output(self.method, &aim.name, paint)?;
         Ok(match aim.place {
@@ -492,7 +552,6 @@ mod tests {
             size: Some((1920, 1080)),
             inside,
             position,
-            hotspot: (0, 0),
             stamp,
         }
     }
@@ -517,9 +576,12 @@ mod tests {
     }
 
     #[test]
-    fn the_hotspot_is_added_to_the_position() {
-        let mut s = seen("DP-1", true, Some((100, 50)), 1);
-        s.hotspot = (4, 2);
-        assert_eq!(pick_cursor(&[s]), Some(("DP-1".into(), [104.0, 52.0])));
+    fn a_hotspot_does_not_move_the_point() {
+        // The protocol's position is the hotspot's own place.
+        let mut s = seen("DP-1", false, None, 0);
+        note(&mut s, cursor::Event::Enter, 1);
+        note(&mut s, cursor::Event::Position { x: 100, y: 50 }, 2);
+        note(&mut s, cursor::Event::Hotspot { x: 4, y: 2 }, 3);
+        assert_eq!(pick_cursor(&[s]), Some(("DP-1".into(), [100.0, 50.0])));
     }
 }
