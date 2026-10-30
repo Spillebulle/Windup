@@ -997,7 +997,7 @@ pub(crate) fn remove_stale_segments() {
 /// Whether process `pid` runs. Where that cannot be told it is taken to,
 /// so its folder is kept.
 #[cfg(target_os = "windows")]
-fn process_running(pid: u32) -> bool {
+pub(crate) fn process_running(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
     };
@@ -1019,12 +1019,12 @@ fn process_running(pid: u32) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn process_running(pid: u32) -> bool {
+pub(crate) fn process_running(pid: u32) -> bool {
     Path::new("/proc").join(pid.to_string()).exists()
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn process_running(_pid: u32) -> bool {
+pub(crate) fn process_running(_pid: u32) -> bool {
     true
 }
 

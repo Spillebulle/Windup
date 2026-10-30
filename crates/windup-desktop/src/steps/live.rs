@@ -34,6 +34,9 @@ const IDLE_CHECK: Duration = Duration::from_millis(50);
 /// Shots waiting for the writer before the camera waits for it: a few full
 /// screens, so a burst of clicks does not hold every picture in memory.
 const WRITE_QUEUE: usize = 4;
+/// In each session folder: the id of the process recording it, so that
+/// another Windup starting does not take it for a leftover.
+const OWNER_FILE: &str = "owner";
 
 /// What asks for a step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -123,6 +126,10 @@ impl StepsLive {
         let now = jiff::Zoned::now();
         let dir = new_session_dir(root, &now)
             .map_err(|e| format!("cannot create the steps folder: {e}"))?;
+        if let Err(e) = std::fs::write(dir.join(OWNER_FILE), std::process::id().to_string()) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("cannot write to the steps folder: {e}"));
+        }
         let shared = Arc::new(Shared::default());
         let (triggers, trigger_rx) = channel();
         let (events_tx, events) = channel();
@@ -343,6 +350,11 @@ impl CameraThread {
             } else {
                 match self.triggers.recv_timeout(IDLE_CHECK) {
                     Ok(t) => t,
+                    // A writer that ended has failed (it ends otherwise only
+                    // when this thread does): end now, not at the next press.
+                    Err(RecvTimeoutError::Timeout) if self.writer.is_finished() => {
+                        return Ending::Asked;
+                    }
                     Err(RecvTimeoutError::Timeout) => continue,
                     Err(RecvTimeoutError::Disconnected) => return Ending::Asked,
                 }
@@ -473,16 +485,18 @@ fn encode_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
 }
 
 /// Removes the session folders a Windup that ended mid-session left behind.
-/// Called once at startup, by the one Windup on this display, so none of
-/// them is live.
+/// Called once at startup.
 pub fn remove_stale_sessions() {
     if let Some(root) = steps_root() {
-        remove_stale_in(&root);
+        remove_stale_in(&root, crate::video::run::process_running);
     }
 }
 
-/// Removes every folder in `root`; anything else is left.
-fn remove_stale_in(root: &Path) {
+/// Removes every folder in `root` but those whose owner is this process or
+/// another that still runs (a second Windup on Windows, which has no single
+/// instance). A folder with no readable owner is a leftover. Anything that
+/// is not a folder is left.
+fn remove_stale_in(root: &Path, running: impl Fn(u32) -> bool) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -491,6 +505,12 @@ fn remove_stale_in(root: &Path) {
             continue;
         }
         let path = entry.path();
+        let owner = std::fs::read_to_string(path.join(OWNER_FILE))
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok());
+        if owner.is_some_and(|pid| pid == std::process::id() || running(pid)) {
+            continue;
+        }
         match std::fs::remove_dir_all(&path) {
             Ok(()) => log::info!(
                 "removed {}, left by a Steps session that never ended",
@@ -887,7 +907,7 @@ mod tests {
         std::fs::create_dir_all(root.join("2026-10-30 142501")).unwrap();
         std::fs::create_dir_all(root.join("2026-10-30 142501 (2)/x")).unwrap();
         std::fs::write(root.join("note.txt"), "kept").unwrap();
-        remove_stale_in(&root);
+        remove_stale_in(&root, |_| false);
         let left: Vec<_> = std::fs::read_dir(&root)
             .unwrap()
             .flatten()
@@ -895,5 +915,57 @@ mod tests {
             .collect();
         assert_eq!(left, ["note.txt"]);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_live_session_folder_is_kept() {
+        let root = std::env::temp_dir().join(format!("windup-steps-owned-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ours = root.join("2026-10-30 142501");
+        let dead = root.join("2026-10-30 142502");
+        let other = root.join("2026-10-30 142503");
+        for (dir, pid) in [
+            (&ours, std::process::id()),
+            (&dead, u32::MAX - 1),
+            (&other, 4242),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(OWNER_FILE), pid.to_string()).unwrap();
+        }
+        // 4242 stands for another Windup that still runs.
+        remove_stale_in(&root, |pid| pid == 4242);
+        assert!(ours.is_dir() && other.is_dir());
+        assert!(!dead.exists());
+        // The real check: no process has this id.
+        remove_stale_in(&root, crate::video::run::process_running);
+        assert!(ours.is_dir());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_session_folder_names_its_owner() {
+        let mut r = rig(BOTH, vec![], None);
+        let dir = r.live.dir().to_path_buf();
+        let owner = std::fs::read_to_string(dir.join(OWNER_FILE)).unwrap();
+        assert_eq!(owner.trim(), std::process::id().to_string());
+        r.live.cancel();
+        until_over(&mut r.live);
+    }
+
+    #[test]
+    fn a_writer_failure_ends_the_session_without_another_trigger() {
+        let mut r = rig(BOTH, vec![], None);
+        let dir = r.live.dir().to_path_buf();
+        // Nowhere to write: the shot cannot be filed.
+        std::fs::remove_dir_all(&dir).unwrap();
+        r.live.trigger(Trigger::Hotkey);
+        let started = Instant::now();
+        let (_, end) = until_over(&mut r.live);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let StepsEnd::Failed { why, review } = end else {
+            panic!("{end:?}");
+        };
+        assert!(why.contains("01.png"), "{why}");
+        assert_eq!(review, None);
     }
 }
