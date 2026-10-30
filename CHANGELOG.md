@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Print Screen opens the capture bar again on Windows builds that no longer pass that key to keyboard hooks: a shortcut on Print Screen is now also registered as a system hotkey.
+
 ## 0.4.0
 
 - Steps, a click-by-click recorder for step-by-step guides. Win+Shift+G (Super+Shift+G on Linux) starts it from anywhere, or choose Steps on the capture bar. Each click takes a picture of the monitor under the pointer with a marker where you clicked, a ring, a numbered badge or an arrow in the colour and size you choose, and Win+Shift+X takes a step by hand. A small bar counts the steps, with pause and stop, and is never in a picture. Win+Shift+P pauses, as for Video; the same keys again stop; Esc throws the steps away and leaves no files.
