@@ -8,8 +8,8 @@ use image::RgbaImage;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use windup_core::capture::output;
-use windup_core::capture::session::{CaptureMode, Outcome, Session};
-use windup_core::config::{ScreenshotConfig, VideoConfig};
+use windup_core::capture::session::{CaptureMode, Outcome, Purpose, Session};
+use windup_core::config::{ScreenshotConfig, StepsConfig, VideoConfig};
 
 /// How many taken names a save steps past before it gives up.
 pub(crate) const SAVE_TRIES: usize = 16;
@@ -23,13 +23,18 @@ pub(crate) fn wants(outcome: &Outcome) -> (bool, bool) {
         Outcome::Copy(_) => (true, false),
         Outcome::Save(_) => (false, true),
         Outcome::CopyAndSave(_) => (true, true),
-        Outcome::Record { .. } | Outcome::Cancel => (false, false),
+        Outcome::Record { .. } | Outcome::Steps { .. } | Outcome::StepDone(_) | Outcome::Cancel => {
+            (false, false)
+        }
     }
 }
 
 /// What the next capture starts with: this one's target, colour and sizes.
+/// The editor on a step's picture has no target of its own to remember.
 pub(crate) fn remember(cfg: &mut ScreenshotConfig, session: &Session) {
-    cfg.last_target = session.target_of(CaptureMode::Screenshot);
+    if session.purpose == Purpose::Capture {
+        cfg.last_target = session.target_of(CaptureMode::Screenshot);
+    }
     cfg.colour = session.colour;
     cfg.sizes = session.sizes.clone();
 }
@@ -45,6 +50,13 @@ pub(crate) fn remember_video(cfg: &mut VideoConfig, session: &Session) {
     cfg.system_audio = v.system_audio;
     cfg.mic = v.mic;
     cfg.last_target = session.target_of(CaptureMode::Video);
+}
+
+/// What the next Steps session starts with, once one is asked for: the
+/// trigger and marker picked on the bar.
+pub(crate) fn remember_steps(cfg: &mut StepsConfig, session: &Session) {
+    cfg.trigger = session.steps.trigger;
+    cfg.marker.kind = session.steps.marker;
 }
 
 /// Writes `bytes` to a new file in `dir`, named by `pick(dir, name)`. The file
@@ -117,7 +129,10 @@ pub(crate) fn deliver(
     let (want_copy, want_save) = wants(&outcome);
     let img = match outcome {
         Outcome::Copy(img) | Outcome::Save(img) | Outcome::CopyAndSave(img) => img,
-        Outcome::Record { .. } | Outcome::Cancel => return None,
+        // A step's picture goes back to its step, not to the clipboard.
+        Outcome::Record { .. } | Outcome::Steps { .. } | Outcome::StepDone(_) | Outcome::Cancel => {
+            return None;
+        }
     };
     let mut errors = Vec::new();
     if want_save {
@@ -141,8 +156,10 @@ pub(crate) fn deliver(
 mod tests {
     use super::*;
     use windup_core::capture::DesktopShot;
+    use windup_core::capture::session::StepsChoice;
     use windup_core::capture::session::{Action, ModeAvailability};
     use windup_core::config::{ImageFormat, TargetKind, ToolSizes};
+    use windup_core::steps::options::{MarkerKind, StepTrigger};
     use windup_core::video::Bitrate;
 
     /// A fresh, empty folder under the temp dir.
@@ -173,6 +190,53 @@ mod tests {
         assert_eq!(wants(&Outcome::Save(img())), (false, true));
         assert_eq!(wants(&Outcome::CopyAndSave(img())), (true, true));
         assert_eq!(wants(&Outcome::Cancel), (false, false));
+        let choice = StepsChoice::default();
+        assert_eq!(wants(&Outcome::Steps { choice }), (false, false));
+        assert_eq!(wants(&Outcome::StepDone(img())), (false, false));
+    }
+
+    #[test]
+    fn the_steps_choices_are_remembered() {
+        let mut steps = StepsConfig::default();
+        let mut s = Session::new(
+            DesktopShot { monitors: vec![] },
+            vec![],
+            &ScreenshotConfig::default(),
+            &VideoConfig::default(),
+            ModeAvailability::ALL,
+        );
+        s.set_steps(&steps);
+        s.act(Action::SetStepTrigger(StepTrigger::ClicksOnly));
+        s.act(Action::SetMarker(MarkerKind::Ring));
+        remember_steps(&mut steps, &s);
+        assert_eq!(steps.trigger, StepTrigger::ClicksOnly);
+        assert_eq!(steps.marker.kind, MarkerKind::Ring);
+    }
+
+    #[test]
+    fn a_step_edit_keeps_the_screenshot_target_and_delivers_nothing() {
+        let mut cfg = ScreenshotConfig {
+            last_target: TargetKind::Window,
+            ..ScreenshotConfig::default()
+        };
+        let layout = windup_core::capture::DRect {
+            x: 0.0,
+            y: 0.0,
+            w: 4.0,
+            h: 4.0,
+        };
+        let mut s = Session::edit_image(RgbaImage::new(4, 4), layout, &cfg);
+        s.colour = [9, 8, 7, 255];
+        remember(&mut cfg, &s);
+        assert_eq!(cfg.last_target, TargetKind::Window);
+        assert_eq!(cfg.colour, [9, 8, 7, 255]);
+        let mut called = false;
+        let e = deliver(Outcome::StepDone(RgbaImage::new(4, 4)), &cfg, |_| {
+            called = true;
+            true
+        });
+        assert_eq!(e, None);
+        assert!(!called);
     }
 
     #[test]

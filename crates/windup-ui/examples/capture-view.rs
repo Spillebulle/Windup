@@ -153,6 +153,14 @@ impl eframe::App for App {
                         Outcome::Record { rect, choice } => {
                             println!("Record {}x{} at {} fps", rect.w, rect.h, choice.fps)
                         }
+                        Outcome::Steps { choice } => println!(
+                            "Steps: {}, {}",
+                            choice.trigger.label(),
+                            choice.marker.label()
+                        ),
+                        Outcome::StepDone(img) => {
+                            println!("Step edited {}x{}", img.width(), img.height())
+                        }
                         Outcome::Cancel => println!("Cancel"),
                     }
                     println!("Starting again.");

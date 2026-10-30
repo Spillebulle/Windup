@@ -17,6 +17,11 @@
 //! instead of `Editing`, where the selection stays adjustable, there are no
 //! annotation tools, and Record ends the session with the rectangle and the
 //! recording choices. Each mode keeps its own target.
+//!
+//! Steps needs no selection: its row has the trigger and marker choices,
+//! and Start ends the session with them. The same editor also opens on one
+//! step's picture ([`Session::edit_image`]), where Copy and Save both give
+//! the whole picture back with the edits burned in.
 
 use image::RgbaImage;
 
@@ -25,7 +30,8 @@ use super::geometry::{DRect, DesktopShot, MonitorShot};
 use super::pick::{Tween, WindowRect, edge_rect, window_at};
 use super::raster::render;
 use super::selection::{Handle, MIN_DRAG, Selection};
-use crate::config::{ScreenshotConfig, TargetKind, ToolSizes, VideoConfig};
+use crate::config::{ScreenshotConfig, StepsConfig, TargetKind, ToolSizes, VideoConfig};
+use crate::steps::options::{MarkerKind, StepTrigger};
 use crate::video::pcm::GIF_HAS_NO_SOUND;
 use crate::video::{Bitrate, Container, frame_rates};
 
@@ -63,7 +69,29 @@ pub enum Outcome {
         rect: DRect,
         choice: VideoChoice,
     },
+    /// Start a Steps session with these choices.
+    Steps {
+        choice: StepsChoice,
+    },
+    /// A step's picture as edited, the whole of it.
+    StepDone(RgbaImage),
     Cancel,
+}
+
+/// What the session is for: a capture from the frozen desktop, or editing
+/// one step's picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Purpose {
+    #[default]
+    Capture,
+    StepEdit,
+}
+
+/// What a Steps session is asked to be, as picked on the bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StepsChoice {
+    pub trigger: StepTrigger,
+    pub marker: MarkerKind,
 }
 
 /// What a recording is asked to be, as picked on the bar.
@@ -84,6 +112,10 @@ pub struct ModeAvailability {
     pub video: Result<(), &'static str>,
     pub system_audio: Result<(), &'static str>,
     pub mic: Result<(), &'static str>,
+    /// Whether Steps can take pictures here.
+    pub steps: Result<(), &'static str>,
+    /// Whether clicks can be seen, for the triggers that use them.
+    pub clicks: Result<(), &'static str>,
 }
 
 impl ModeAvailability {
@@ -92,6 +124,8 @@ impl ModeAvailability {
         video: Ok(()),
         system_audio: Ok(()),
         mic: Ok(()),
+        steps: Ok(()),
+        clicks: Ok(()),
     };
 }
 
@@ -122,6 +156,9 @@ pub enum Action {
     SetGifColours(u16),
     ToggleSystemAudio,
     ToggleMic,
+    StartSteps,
+    SetStepTrigger(StepTrigger),
+    SetMarker(MarkerKind),
 }
 
 /// What the held mouse button is doing.
@@ -161,7 +198,13 @@ pub struct Session {
     /// The configured container; a GIF has colours and no sound.
     pub container: Container,
     pub availability: ModeAvailability,
-    /// The target of the mode not shown, for when it comes back.
+    /// Steps' choices as picked.
+    pub steps: StepsChoice,
+    pub purpose: Purpose,
+    /// The mode `target` belongs to: Screenshot or Video. Steps has none, so
+    /// choosing it leaves the target as it was.
+    target_owner: CaptureMode,
+    /// The target of the other of Screenshot and Video, for when it comes back.
     other_target: TargetKind,
     hover_target: Option<DRect>,
     also_save_on_copy: bool,
@@ -210,6 +253,9 @@ impl Session {
             },
             container: video.container,
             availability,
+            steps: StepsChoice::default(),
+            purpose: Purpose::Capture,
+            target_owner: CaptureMode::Screenshot,
             other_target: video.last_target,
             hover_target: None,
             also_save_on_copy: cfg.also_save_on_copy,
@@ -218,6 +264,49 @@ impl Session {
             reselecting: false,
             draw_start: (0.0, 0.0),
         }
+    }
+
+    /// The editor on one picture, `image`, shown as one monitor at `layout`:
+    /// the whole of it selected, so Copy and Save give it back with the
+    /// edits burned in ([`Outcome::StepDone`]).
+    pub fn edit_image(image: RgbaImage, layout: DRect, cfg: &ScreenshotConfig) -> Session {
+        let scale = if layout.w > 0.0 {
+            image.width() as f32 / layout.w
+        } else {
+            1.0
+        };
+        let shot = DesktopShot {
+            monitors: vec![MonitorShot {
+                layout,
+                image,
+                name: String::new(),
+                scale,
+                refresh_hz: None,
+            }],
+        };
+        let cfg = ScreenshotConfig {
+            last_target: TargetKind::Area,
+            ..cfg.clone()
+        };
+        let mut s = Session::new(
+            shot,
+            Vec::new(),
+            &cfg,
+            &VideoConfig::default(),
+            ModeAvailability::ALL,
+        );
+        s.purpose = Purpose::StepEdit;
+        s.selection.set_rect(layout);
+        s.stage = Stage::Editing;
+        s
+    }
+
+    /// Steps' choices from its settings.
+    pub fn set_steps(&mut self, cfg: &StepsConfig) {
+        self.steps = StepsChoice {
+            trigger: cfg.trigger,
+            marker: cfg.marker.kind,
+        };
     }
 
     /// The picture of the selection with the annotations on it. `Cancel` when
@@ -249,6 +338,7 @@ impl Session {
         self.pointer = Some(p);
         let at = (p[0], p[1]);
         let target = match self.stage {
+            Stage::Choosing if self.mode == CaptureMode::Steps => None,
             Stage::Choosing => self.target_at(at),
             Stage::Editing | Stage::Ready
                 if self.grab == Grab::Nothing && self.outside_selection(at) =>
@@ -276,7 +366,7 @@ impl Session {
         let at = (p[0], p[1]);
         match self.stage {
             Stage::Choosing => {
-                if self.target == TargetKind::Area {
+                if self.target == TargetKind::Area && self.mode != CaptureMode::Steps {
                     self.selection.press(at, self.handle_tolerance(at));
                     self.grab = Grab::Selection;
                 }
@@ -324,6 +414,7 @@ impl Session {
             Grab::Draw => self.commit_draft(),
             Grab::Nothing => {
                 if self.stage == Stage::Choosing
+                    && self.mode != CaptureMode::Steps
                     && self.target != TargetKind::Area
                     && let Some(rect) = self.target_at((p[0], p[1]))
                 {
@@ -384,7 +475,7 @@ impl Session {
     /// The target `mode` has: the one shown for the current mode, the one
     /// set aside for the other.
     pub fn target_of(&self, mode: CaptureMode) -> TargetKind {
-        if mode == self.mode {
+        if mode == self.target_owner || mode == CaptureMode::Steps {
             self.target
         } else {
             self.other_target
@@ -453,9 +544,14 @@ impl Session {
         let editing = self.stage == Stage::Editing;
         let ready = self.stage == Stage::Ready;
         let choosing = self.stage == Stage::Choosing;
+        let step_edit = self.purpose == Purpose::StepEdit;
         match a {
             Action::Cancel => return Some(Outcome::Cancel),
             Action::Copy | Action::Save if !editing => {}
+            Action::Copy | Action::Save if step_edit => {
+                let whole = self.shot.bounds();
+                return render(&self.shot, whole, &self.doc).map(Outcome::StepDone);
+            }
             Action::Copy => return self.result(true, self.also_save_on_copy),
             Action::Save => return self.result(false, true),
             Action::Undo => {
@@ -468,12 +564,17 @@ impl Session {
             }
             Action::ToggleLoupe => self.loupe = !self.loupe,
             Action::SelectAll => {
-                if self.target == TargetKind::Area && self.grab == Grab::Nothing {
+                if self.target == TargetKind::Area
+                    && self.grab == Grab::Nothing
+                    && self.mode != CaptureMode::Steps
+                    && !step_edit
+                {
                     self.selection.select_all(self.shot.bounds());
                     self.enter_selected();
                 }
             }
-            Action::Nudge { dx, dy } if editing || ready => {
+            // A step's picture is selected whole and stays so.
+            Action::Nudge { dx, dy } if (editing || ready) && !step_edit => {
                 // A step is in points.
                 let k = self.units_per_point(self.here());
                 self.selection.nudge(dx * k, dy * k, self.edge);
@@ -516,18 +617,27 @@ impl Session {
             }
             // Once a selection is made it stays; the target says what a
             // click outside it picks next.
-            Action::SetTarget(kind) if self.grab == Grab::Nothing => self.set_target(kind),
-            // Steps arrives in a later version; Video when it can work here.
-            Action::SetMode(mode) if choosing && mode != self.mode => {
+            Action::SetTarget(kind) if self.grab == Grab::Nothing && !step_edit => {
+                self.set_target(kind)
+            }
+            // Video and Steps when they can work here.
+            Action::SetMode(mode) if choosing && mode != self.mode && !step_edit => {
                 let allowed = match mode {
                     CaptureMode::Screenshot => true,
                     CaptureMode::Video => self.availability.video.is_ok(),
-                    CaptureMode::Steps => false,
+                    CaptureMode::Steps => self.availability.steps.is_ok(),
                 };
                 if allowed && self.grab == Grab::Nothing {
-                    let shown = std::mem::replace(&mut self.other_target, self.target);
+                    // Steps has no target: the one shown stays for whichever
+                    // of the others comes back.
+                    if mode != CaptureMode::Steps && mode != self.target_owner {
+                        let shown = std::mem::replace(&mut self.other_target, self.target);
+                        self.target_owner = mode;
+                        self.set_target(shown);
+                    }
                     self.mode = mode;
-                    self.set_target(shown);
+                    self.hover = None;
+                    self.hover_target = None;
                 }
             }
             Action::SetColour(colour) => self.set_colour(colour),
@@ -555,11 +665,22 @@ impl Session {
                     self.video.mic = !self.video.mic;
                 }
             }
+            Action::StartSteps if choosing && self.mode == CaptureMode::Steps => {
+                return Some(Outcome::Steps { choice: self.steps });
+            }
+            Action::SetStepTrigger(trigger) => {
+                let uses_clicks = trigger != StepTrigger::HotkeyOnly;
+                if !uses_clicks || self.availability.clicks.is_ok() {
+                    self.steps.trigger = trigger;
+                }
+            }
+            Action::SetMarker(marker) => self.steps.marker = marker,
             Action::Nudge { .. }
             | Action::Delete
             | Action::SetTarget(_)
             | Action::SetMode(_)
-            | Action::Record => {}
+            | Action::Record
+            | Action::StartSteps => {}
         }
         None
     }
@@ -758,6 +879,15 @@ impl Session {
             self.grab = Grab::Transform;
             return;
         }
+        // A step's picture is selected whole: no edges to drag, nothing
+        // outside it to pick, and Select moves nothing.
+        if self.purpose == Purpose::StepEdit {
+            self.doc.selected = None;
+            if self.tool != Tool::Select {
+                self.start_draft(at);
+            }
+            return;
+        }
         // The selection's own edges win over drawing, whatever the tool.
         let handle = self.selection.handle_at(at, tolerance);
         if let Some(h) = handle
@@ -857,6 +987,7 @@ fn squared(start: (f32, f32), at: (f32, f32)) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::steps::avail::NO_STEPS_SOURCE;
     use crate::video::pcm::{GIF_HAS_NO_SOUND, SOUND_NEEDS_PIPEWIRE};
     use crate::video::{Bitrate, Container};
     use image::Rgba;
@@ -1572,6 +1703,146 @@ mod tests {
         s.act(Action::Nudge { dx: 50.0, dy: 0.0 });
         assert_eq!(s.frame_rates(), vec![15, 24, 30, 60, 144]);
         assert_eq!(s.video_choice().fps, 144);
+    }
+
+    // --- steps --------------------------------------------------------------
+
+    const NO_CLICKS: &str = "Windup cannot read the mouse.";
+
+    fn steps_session(avail: ModeAvailability, cfg: &StepsConfig) -> Session {
+        let mut s = Session::new(
+            shot(),
+            windows(),
+            &ScreenshotConfig::default(),
+            &VideoConfig::default(),
+            avail,
+        );
+        s.set_steps(cfg);
+        s.act(Action::SetMode(CaptureMode::Steps));
+        s
+    }
+
+    #[test]
+    fn steps_mode_needs_no_selection_and_start_ends_it() {
+        let cfg = StepsConfig {
+            trigger: StepTrigger::HotkeyOnly,
+            ..StepsConfig::default()
+        };
+        let mut s = steps_session(ModeAvailability::ALL, &cfg);
+        assert_eq!(s.mode, CaptureMode::Steps);
+        drag_area(&mut s, [10.0, 10.0], [200.0, 200.0]);
+        assert_eq!(s.selection.rect, None);
+        assert_eq!(s.stage, Stage::Choosing);
+        // A click picks nothing either, whatever the target.
+        s.act(Action::SetTarget(TargetKind::FullScreen));
+        s.pointer_moved([50.0, 50.0], 0.0);
+        assert!(s.hover.is_none());
+        s.press([50.0, 50.0], NONE);
+        s.release([50.0, 50.0], NONE);
+        assert_eq!(s.selection.rect, None);
+        match s.act(Action::StartSteps) {
+            Some(Outcome::Steps { choice }) => assert_eq!(
+                choice,
+                StepsChoice {
+                    trigger: StepTrigger::HotkeyOnly,
+                    marker: MarkerKind::Badge,
+                }
+            ),
+            other => panic!("expected steps, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn steps_mode_is_refused_with_its_reason_when_unavailable() {
+        let avail = ModeAvailability {
+            steps: Err(NO_STEPS_SOURCE),
+            ..ModeAvailability::ALL
+        };
+        let mut s = steps_session(avail, &StepsConfig::default());
+        assert_eq!(s.mode, CaptureMode::Screenshot);
+        assert_eq!(s.availability.steps, Err(NO_STEPS_SOURCE));
+        assert!(s.act(Action::StartSteps).is_none());
+    }
+
+    #[test]
+    fn a_clicks_trigger_is_ignored_without_click_capture() {
+        let avail = ModeAvailability {
+            clicks: Err(NO_CLICKS),
+            ..ModeAvailability::ALL
+        };
+        let cfg = StepsConfig {
+            trigger: StepTrigger::HotkeyOnly,
+            ..StepsConfig::default()
+        };
+        let mut s = steps_session(avail, &cfg);
+        s.act(Action::SetStepTrigger(StepTrigger::ClicksOnly));
+        s.act(Action::SetStepTrigger(StepTrigger::ClicksAndHotkey));
+        assert_eq!(s.steps.trigger, StepTrigger::HotkeyOnly);
+        s.act(Action::SetMarker(MarkerKind::Arrow));
+        assert_eq!(s.steps.marker, MarkerKind::Arrow);
+        // With clicks, it changes.
+        let mut s = steps_session(ModeAvailability::ALL, &cfg);
+        s.act(Action::SetStepTrigger(StepTrigger::ClicksOnly));
+        assert_eq!(s.steps.trigger, StepTrigger::ClicksOnly);
+    }
+
+    #[test]
+    fn a_step_edit_selects_the_whole_picture_and_ends_in_step_done() {
+        let img = RgbaImage::from_pixel(1920, 1080, Rgba([30, 60, 90, 255]));
+        let layout = rect(0.0, 0.0, 960.0, 540.0);
+        let mut s = Session::edit_image(img, layout, &ScreenshotConfig::default());
+        assert_eq!(s.purpose, Purpose::StepEdit);
+        assert_eq!(s.stage, Stage::Editing);
+        assert_eq!(s.selection.rect, Some(layout));
+        assert_eq!(s.shot.monitors.len(), 1);
+        assert_eq!(s.shot.monitors[0].scale, 2.0);
+        draw(&mut s, Tool::Rect, [100.0, 100.0], [300.0, 200.0], NONE);
+        assert_eq!(s.doc.items.len(), 1);
+        match s.act(Action::Copy) {
+            Some(Outcome::StepDone(img)) => {
+                assert_eq!(img.dimensions(), (1920, 1080));
+                // The rectangle is burned in.
+                assert_ne!(img.get_pixel(200, 200).0, [30, 60, 90, 255]);
+            }
+            other => panic!("expected a step, got {other:?}"),
+        }
+        match s.act(Action::Save) {
+            Some(Outcome::StepDone(img)) => assert_eq!(img.dimensions(), (1920, 1080)),
+            other => panic!("expected a step, got {other:?}"),
+        }
+        assert!(matches!(s.act(Action::Cancel), Some(Outcome::Cancel)));
+    }
+
+    #[test]
+    fn start_steps_does_nothing_in_other_modes() {
+        let mut s = session(TargetKind::Area);
+        assert!(s.act(Action::StartSteps).is_none());
+        let mut s = editing();
+        assert!(s.act(Action::StartSteps).is_none());
+        let mut s = ready();
+        assert!(s.act(Action::StartSteps).is_none());
+    }
+
+    #[test]
+    fn steps_keeps_the_other_modes_targets() {
+        let video = VideoConfig {
+            last_target: TargetKind::FullScreen,
+            ..VideoConfig::default()
+        };
+        let cfg = ScreenshotConfig {
+            last_target: TargetKind::Window,
+            ..ScreenshotConfig::default()
+        };
+        let mut s = Session::new(shot(), windows(), &cfg, &video, ModeAvailability::ALL);
+        s.act(Action::SetMode(CaptureMode::Steps));
+        assert_eq!(s.target_of(CaptureMode::Screenshot), TargetKind::Window);
+        assert_eq!(s.target_of(CaptureMode::Video), TargetKind::FullScreen);
+        s.act(Action::SetMode(CaptureMode::Video));
+        assert_eq!(s.target, TargetKind::FullScreen);
+        s.act(Action::SetMode(CaptureMode::Steps));
+        s.act(Action::SetMode(CaptureMode::Screenshot));
+        assert_eq!(s.target, TargetKind::Window);
+        assert_eq!(s.target_of(CaptureMode::Video), TargetKind::FullScreen);
     }
 
     #[test]

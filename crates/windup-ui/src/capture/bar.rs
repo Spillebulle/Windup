@@ -1,5 +1,7 @@
-//! The capture bar: the launcher while choosing, the tool bar while editing,
-//! the recording options while Video is ready.
+//! The capture bar: the launcher while choosing (with Steps' choices and
+//! Start when Steps is the mode), the tool bar while editing (Done instead of
+//! Save and Copy on a step's picture), the recording options while Video is
+//! ready.
 //!
 //! One floating panel centred at the top of the monitor under the pointer
 //! that **changes in place** between stages (spec "The launcher bar"). Laid
@@ -22,9 +24,10 @@ use egui::{
 };
 use std::time::Duration;
 use windup_core::capture::annotate::Tool;
-use windup_core::capture::session::{CaptureMode, Stage, VideoChoice};
+use windup_core::capture::session::{CaptureMode, Purpose, Stage, StepsChoice, VideoChoice};
 use windup_core::config::{EditorKeys, TargetKind};
 use windup_core::shortcut::{Shortcut, ShortcutModifiers};
+use windup_core::steps::options::{MarkerKind, StepTrigger};
 use windup_core::video::{Bitrate, FIXED_BITRATES, GIF_COLOURS};
 
 /// What a click on the bar asks for. The view turns it into a session action.
@@ -45,6 +48,9 @@ pub enum BarCommand {
     GifColours(u16),
     ToggleSystemAudio,
     ToggleMic,
+    StartSteps,
+    StepTrigger(StepTrigger),
+    Marker(MarkerKind),
 }
 
 /// What the bar shows, read from the session each frame.
@@ -65,6 +71,14 @@ pub struct BarState<'a> {
     pub gif: bool,
     pub system_audio: Result<(), &'static str>,
     pub mic: Result<(), &'static str>,
+    /// What Start would ask for.
+    pub steps: StepsChoice,
+    /// Whether the Steps mode can be chosen, and why not.
+    pub steps_mode: Result<(), &'static str>,
+    /// Whether clicks can be seen, and why not: the triggers that use them
+    /// are disabled without.
+    pub clicks: Result<(), &'static str>,
+    pub purpose: Purpose,
 }
 
 #[derive(Default)]
@@ -116,12 +130,16 @@ struct Entry {
     icon: Option<Icon>,
     label: String,
     command: BarCommand,
+    /// Why it cannot be picked, when it cannot (§7.6): drawn faded, with
+    /// this as its tooltip.
+    why: Option<&'static str>,
 }
 
-/// The one accent button (§7.6 primary): Copy, or Record.
+/// The one accent button (§7.6 primary): Copy, Record, Start or Done.
 struct Primary {
     icon: Icon,
     label: &'static str,
+    tip: &'static str,
     key: String,
     command: BarCommand,
 }
@@ -157,8 +175,17 @@ const TOOLS: [(Tool, Icon, &str); 7] = [
     (Tool::Pipette, Icon::Pipette, "Pick a colour"),
 ];
 
-/// What a disabled mode says (§7.6: disabled controls say why).
-pub const LATER: &str = "Arrives in a later version.";
+const TRIGGERS: [(StepTrigger, Icon); 3] = [
+    (StepTrigger::ClicksAndHotkey, Icon::MousePointerClick),
+    (StepTrigger::HotkeyOnly, Icon::Keyboard),
+    (StepTrigger::ClicksOnly, Icon::Mouse),
+];
+
+const MARKERS: [(MarkerKind, Icon); 3] = [
+    (MarkerKind::Ring, Icon::Circle),
+    (MarkerKind::Badge, Icon::Hash),
+    (MarkerKind::Arrow, Icon::MousePointer2),
+];
 
 /// A bitrate as the dropdown reads it: `Auto`, `8 Mb/s`.
 pub fn bitrate_label(b: Bitrate) -> String {
@@ -201,10 +228,49 @@ fn target_menu(s: &BarState) -> Item {
                 icon: Some(icon),
                 label: label.to_string(),
                 command: BarCommand::Target(kind),
+                why: None,
             })
             .collect(),
         BarCommand::Target(s.target),
         None,
+    ))
+}
+
+/// What takes a step. The triggers that use clicks are disabled where
+/// clicks cannot be seen; one already chosen says why on its trigger too.
+fn trigger_menu(s: &BarState) -> Item {
+    let entries: Vec<Entry> = TRIGGERS
+        .iter()
+        .map(|&(t, icon)| Entry {
+            icon: Some(icon),
+            label: t.label().to_string(),
+            command: BarCommand::StepTrigger(t),
+            why: if t == StepTrigger::HotkeyOnly {
+                None
+            } else {
+                s.clicks.err()
+            },
+        })
+        .collect();
+    let mut m = menu(entries, BarCommand::StepTrigger(s.steps.trigger), None);
+    m.tip = Some(m.entries[m.current].why.unwrap_or("What takes a step"));
+    Item::Menu(m)
+}
+
+/// How each step's picture marks the click.
+fn marker_menu(s: &BarState) -> Item {
+    Item::Menu(menu(
+        MARKERS
+            .iter()
+            .map(|&(k, icon)| Entry {
+                icon: Some(icon),
+                label: k.label().to_string(),
+                command: BarCommand::Marker(k),
+                why: None,
+            })
+            .collect(),
+        BarCommand::Marker(s.steps.marker),
+        Some("Marker"),
     ))
 }
 
@@ -213,7 +279,13 @@ fn plain(label: String, command: BarCommand) -> Entry {
         icon: None,
         label,
         command,
+        why: None,
     }
+}
+
+/// Enter, fixed as Esc is: the editor's keys are the screenshot's.
+fn enter() -> String {
+    Shortcut::new(ShortcutModifiers::NONE, "ENTER").to_string()
 }
 
 /// The seg box's height: the segment plus its padding and hairline (§7.9).
@@ -245,13 +317,47 @@ impl Bar {
             key: Some(Shortcut::new(ShortcutModifiers::NONE, "ESCAPE").to_string()),
             command: BarCommand::Close,
         };
+        let settings = || {
+            Item::Icon(IconButton {
+                icon: Icon::Settings,
+                tip: "Settings",
+                key: None,
+                command: BarCommand::Settings,
+            })
+        };
+        let tools = || {
+            Item::Seg(
+                TOOLS
+                    .iter()
+                    .map(|&(t, icon, tip)| Seg {
+                        icon,
+                        tip,
+                        on: s.tool == t,
+                        enabled: true,
+                        command: BarCommand::Tool(t),
+                    })
+                    .collect(),
+            )
+        };
+        let undo = || {
+            Item::Icon(IconButton {
+                icon: Icon::Undo2,
+                tip: "Undo",
+                key: Some(s.keys.undo.to_string()),
+                command: BarCommand::Undo,
+            })
+        };
         match s.stage {
-            Stage::Choosing => vec![
-                Item::Seg(
+            Stage::Choosing => {
+                let modes = Item::Seg(
                     [
                         (CaptureMode::Screenshot, Icon::Camera, Ok("Screenshot")),
                         (CaptureMode::Video, Icon::Video, s.video.map(|()| "Video")),
-                        (CaptureMode::Steps, Icon::Footprints, Err(LATER)),
+                        (
+                            CaptureMode::Steps,
+                            Icon::Footprints,
+                            s.steps_mode.map(|()| "Steps"),
+                        ),
                     ]
                     .into_iter()
                     .map(|(m, icon, tip)| Seg {
@@ -262,15 +368,50 @@ impl Bar {
                         command: BarCommand::Mode(m),
                     })
                     .collect(),
-                ),
+                );
+                if s.mode == CaptureMode::Steps {
+                    // No selection to make: the choices and Start.
+                    vec![
+                        modes,
+                        Item::Divider,
+                        trigger_menu(s),
+                        marker_menu(s),
+                        Item::Divider,
+                        settings(),
+                        Item::Primary(Primary {
+                            icon: Icon::Play,
+                            label: "Start",
+                            tip: "Start",
+                            key: enter(),
+                            command: BarCommand::StartSteps,
+                        }),
+                        Item::Icon(close),
+                    ]
+                } else {
+                    vec![
+                        modes,
+                        Item::Divider,
+                        target_menu(s),
+                        Item::Divider,
+                        settings(),
+                        Item::Icon(close),
+                    ]
+                }
+            }
+            // A step's picture: no target, no file of its own. Done writes
+            // the edits back to the step.
+            Stage::Editing if s.purpose == Purpose::StepEdit => vec![
+                tools(),
+                Item::Swatch,
                 Item::Divider,
-                target_menu(s),
+                undo(),
                 Item::Divider,
-                Item::Icon(IconButton {
-                    icon: Icon::Settings,
-                    tip: "Settings",
-                    key: None,
-                    command: BarCommand::Settings,
+                Item::Primary(Primary {
+                    icon: Icon::Check,
+                    label: "Done",
+                    tip: "Done (Ctrl+S too)",
+                    key: enter(),
+                    command: BarCommand::Copy,
                 }),
                 Item::Icon(close),
             ],
@@ -278,26 +419,10 @@ impl Bar {
             Stage::Editing => vec![
                 target_menu(s),
                 Item::Divider,
-                Item::Seg(
-                    TOOLS
-                        .iter()
-                        .map(|&(t, icon, tip)| Seg {
-                            icon,
-                            tip,
-                            on: s.tool == t,
-                            enabled: true,
-                            command: BarCommand::Tool(t),
-                        })
-                        .collect(),
-                ),
+                tools(),
                 Item::Swatch,
                 Item::Divider,
-                Item::Icon(IconButton {
-                    icon: Icon::Undo2,
-                    tip: "Undo",
-                    key: Some(s.keys.undo.to_string()),
-                    command: BarCommand::Undo,
-                }),
+                undo(),
                 Item::Divider,
                 Item::Icon(IconButton {
                     icon: Icon::Download,
@@ -308,6 +433,7 @@ impl Bar {
                 Item::Primary(Primary {
                     icon: Icon::Copy,
                     label: "Copy",
+                    tip: "Copy",
                     key: s.keys.copy.to_string(),
                     command: BarCommand::Copy,
                 }),
@@ -375,8 +501,8 @@ impl Bar {
                     Item::Primary(Primary {
                         icon: Icon::Circle,
                         label: "Record",
-                        // Fixed, as Esc is: the editor's keys are not Video's.
-                        key: Shortcut::new(ShortcutModifiers::NONE, "ENTER").to_string(),
+                        tip: "Record",
+                        key: enter(),
                         command: BarCommand::Record,
                     }),
                     Item::Icon(close),
@@ -678,7 +804,7 @@ impl Bar {
                         p.accent_ink,
                     );
                     if resp.hovered() {
-                        hovered_tip = Some((item_id, rect, b.label, Some(b.key.clone())));
+                        hovered_tip = Some((item_id, rect, b.tip, Some(b.key.clone())));
                     }
                     if resp.clicked() {
                         out.command = Some(b.command);
@@ -695,8 +821,11 @@ impl Bar {
         });
 
         if let Some((trigger, m)) = open_menu {
-            let (list, choice) = menu_list(ui, p, theme, trigger, m, id);
+            let (list, choice, why) = menu_list(ui, p, theme, trigger, m, id);
             out.owns.push(list);
+            if why.is_some() {
+                hovered_tip = why.map(|(tip_id, r, why)| (tip_id, r, why, None));
+            }
             if let Some(k) = choice {
                 self.menu_open = None;
                 if k != m.current {
@@ -800,8 +929,9 @@ impl Bar {
 }
 
 /// A dropdown's list: §7.7, opening 4 px below the trigger, exactly its
-/// width, the current item in the selected-row look. Returns the list's rect
-/// and the entry clicked.
+/// width, the current item in the selected-row look. Returns the list's rect,
+/// the entry clicked, and a disabled entry under the pointer with its reason.
+#[allow(clippy::type_complexity)]
 fn menu_list(
     ui: &mut Ui,
     p: &Palette,
@@ -809,7 +939,7 @@ fn menu_list(
     trigger: Rect,
     m: &Menu,
     id: Id,
-) -> (Rect, Option<usize>) {
+) -> (Rect, Option<usize>, Option<(Id, Rect, &'static str)>) {
     let painter = ui
         .ctx()
         .layer_painter(LayerId::new(Order::Foreground, id.with("menu")));
@@ -824,6 +954,7 @@ fn menu_list(
     );
     popover_box(&painter, p, theme, list, metrics::RADIUS_CARD);
     let mut choice = None;
+    let mut why = None;
     for (k, entry) in m.entries.iter().enumerate() {
         let r = Rect::from_min_size(
             pos2(
@@ -832,18 +963,27 @@ fn menu_list(
             ),
             vec2(list.width() - 2.0 * metrics::MENU_PAD, item_h),
         );
-        let resp = ui.interact(r, id.with(("menu", k)), Sense::click());
+        let entry_id = id.with(("menu", k));
+        let resp = ui.interact(r, entry_id, Sense::click());
         let on = k == m.current;
+        let enabled = entry.why.is_none();
         if on {
             painter.rect_filled(r, metrics::RADIUS_SEG, p.control);
-        } else if resp.hovered() {
+        } else if resp.hovered() && enabled {
             painter.rect_filled(r, metrics::RADIUS_SEG, p.control_hover);
         }
-        let ink = if on || resp.hovered() {
+        let ink = if !enabled {
+            p.text_muted.gamma_multiply(metrics::DISABLED_ALPHA)
+        } else if on || resp.hovered() {
             p.text_strong
         } else {
             p.text
         };
+        if resp.hovered()
+            && let Some(reason) = entry.why
+        {
+            why = Some((entry_id, r, reason));
+        }
         let mut text_x = r.left() + metrics::MENU_ITEM_PAD_X - metrics::S1;
         if let Some(icon) = entry.icon {
             let icon_r = Rect::from_min_size(
@@ -860,11 +1000,11 @@ fn menu_list(
             label_font(),
             ink,
         );
-        if resp.clicked() {
+        if resp.clicked() && enabled {
             choice = Some(k);
         }
     }
-    (list, choice)
+    (list, choice, why)
 }
 
 /// A tool-look icon button (§7.6 tool, §2.4): the one that is on is

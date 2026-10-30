@@ -1,5 +1,6 @@
-//! What the launcher bar may offer for Video: gathered here, decided by
-//! `windup_core::video::avail`, handed to `Session::new` as plain data.
+//! What the launcher bar may offer for Video and Steps: gathered here,
+//! decided by `windup_core::video::avail` and `windup_core::steps::avail`,
+//! handed to `Session::new` as plain data.
 //!
 //! Two of the facts can be slow: the frame sources (on Wayland the
 //! ScreenCast portal is asked, for up to 500 ms) and the sound devices (a
@@ -19,9 +20,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
-use windup_core::capture::backend::{Moving, video_order};
+use windup_core::capture::backend::{Facts, Moving, StepRoute, steps_order, video_order};
 use windup_core::capture::session::ModeAvailability;
 use windup_core::config::VideoConfig;
+use windup_core::steps::avail::steps_available;
+use windup_core::steps::clicks::{ClickFacts, click_route, clicks_reason};
 use windup_core::video::avail::{self, AudioDevices};
 
 use super::audio::audio_devices;
@@ -34,8 +37,43 @@ pub(crate) const FRESH_WAIT: Duration = Duration::from_millis(150);
 
 static SOUND: RwLock<Option<AudioDevices>> = RwLock::new(None);
 static LISTING: AtomicBool = AtomicBool::new(false);
-static SOURCES: RwLock<Option<Vec<Moving>>> = RwLock::new(None);
+static SOURCES: RwLock<Option<Sources>> = RwLock::new(None);
 static FINDING: AtomicBool = AtomicBool::new(false);
+
+/// What the desktop can capture with, found together from one look at it.
+#[derive(Clone)]
+struct Sources {
+    video: Vec<Moving>,
+    steps: Vec<StepRoute>,
+    clicks: Result<(), &'static str>,
+}
+
+impl Sources {
+    fn from(f: &Facts) -> Sources {
+        // The OS hands Windows and X11 the clicks. On Wayland they are read
+        // from the pointer devices, which nothing here opens yet: say so.
+        let wayland = !f.windows && !f.x11_only;
+        let clicks = ClickFacts {
+            native: !wayland,
+            pointer_nodes: usize::from(wayland),
+            ..ClickFacts::default()
+        };
+        Sources {
+            video: video_order(f),
+            steps: steps_order(f),
+            clicks: clicks_reason(click_route(&clicks)),
+        }
+    }
+
+    /// A finder that panicked: nothing to capture with.
+    fn failed() -> Sources {
+        Sources {
+            video: vec![Moving::None],
+            steps: vec![StepRoute::None],
+            clicks: Ok(()),
+        }
+    }
+}
 
 /// What a sound listing that panicked leaves: a sound system with no
 /// devices, which the toggles report as "No sound device was found."
@@ -134,8 +172,8 @@ pub(crate) fn refresh() -> Refresh {
         "video-sources",
         &SOURCES,
         &FINDING,
-        vec![Moving::None],
-        || video_order(&crate::capture::video_facts()),
+        Sources::failed(),
+        || Sources::from(&crate::capture::video_facts()),
     );
     Refresh([sound, sources])
 }
@@ -148,8 +186,14 @@ pub(crate) fn current(config: &VideoConfig) -> ModeAvailability {
         state.probed(),
         config.container,
         config.codec,
-        sources.as_deref(),
+        sources.as_ref().map(|s| s.video.as_slice()),
     );
+    // Until the first look is in, Steps is offered: a session that cannot
+    // take its first picture says so when it starts.
+    let (steps, clicks) = match &sources {
+        Some(s) => (steps_available(&s.steps), s.clicks),
+        None => (Ok(()), Ok(())),
+    };
     let sound = SOUND
         .read()
         .ok()
@@ -159,6 +203,8 @@ pub(crate) fn current(config: &VideoConfig) -> ModeAvailability {
         video,
         system_audio,
         mic,
+        steps,
+        clicks,
     }
 }
 
@@ -221,6 +267,28 @@ mod tests {
             avail::sound(Some(SOUND_FAILED.counts())),
             (Err(NO_SOUND_DEVICE), Err(NO_SOUND_DEVICE))
         );
+    }
+
+    #[test]
+    fn steps_and_clicks_follow_the_desktop() {
+        use windup_core::steps::avail::NO_STEPS_SOURCE;
+        use windup_core::steps::clicks::CLICKS_NOT_SET_UP;
+        let windows = Sources::from(&Facts {
+            windows: true,
+            ..Facts::default()
+        });
+        assert_eq!(steps_available(&windows.steps), Ok(()));
+        assert_eq!(windows.clicks, Ok(()));
+        let x11 = Sources::from(&Facts {
+            x11_only: true,
+            ..Facts::default()
+        });
+        assert_eq!(steps_available(&x11.steps), Ok(()));
+        assert_eq!(x11.clicks, Ok(()));
+        // Wayland with nothing to take pictures with.
+        let bare = Sources::from(&Facts::default());
+        assert_eq!(steps_available(&bare.steps), Err(NO_STEPS_SOURCE));
+        assert_eq!(bare.clicks, Err(CLICKS_NOT_SET_UP));
     }
 
     #[test]

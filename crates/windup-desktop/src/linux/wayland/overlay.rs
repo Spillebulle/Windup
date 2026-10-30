@@ -221,6 +221,8 @@ impl State {
                 Outcome::Save(_) => "save",
                 Outcome::CopyAndSave(_) => "copy and save",
                 Outcome::Record { .. } => "record",
+                Outcome::Steps { .. } => "steps",
+                Outcome::StepDone(_) => "step edited",
                 Outcome::Cancel if open_settings => "settings",
                 Outcome::Cancel => "cancel",
             }

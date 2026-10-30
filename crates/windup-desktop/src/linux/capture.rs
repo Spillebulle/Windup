@@ -194,7 +194,8 @@ impl Background {
             &config.video,
             grab.availability,
         );
-        // Refused, and left on Screenshot, when Video cannot work here.
+        session.set_steps(&config.steps);
+        // Refused, and left on Screenshot, when Video or Steps cannot work here.
         session.act(Action::SetMode(self.capture.mode));
         let theme = popup_setup(config);
         let setup = CaptureSetup {
@@ -227,12 +228,27 @@ impl Background {
     ) {
         self.capture.gate.end();
         let record = matches!(end.outcome, Outcome::Record { .. });
+        let steps = matches!(end.outcome, Outcome::Steps { .. });
         self.change_config(config, |c| {
             finish::remember(&mut c.screenshot, &end.session);
             if record {
                 finish::remember_video(&mut c.video, &end.session);
             }
+            if steps {
+                finish::remember_steps(&mut c.steps, &end.session);
+            }
         });
+        match &end.outcome {
+            // Started here once Steps has a runtime on Wayland (Task 15).
+            Outcome::Steps { choice } => {
+                log::info!("capture: steps asked for ({choice:?}), not yet run");
+            }
+            // Written back to the step by the review (Task 15).
+            Outcome::StepDone(img) => {
+                log::info!("capture: step edited ({}x{})", img.width(), img.height());
+            }
+            _ => {}
+        }
         if let Outcome::Record { rect, choice } = &end.outcome {
             // The overlay's surfaces were destroyed before this event was
             // sent; the start waits a moment more on its worker for the

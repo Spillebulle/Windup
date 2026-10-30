@@ -16,7 +16,7 @@
 
 use crate::platform::{Host, Target};
 use crate::{WindupApp, capture, cursor, paste};
-use capture::finish::{self, remember, remember_video};
+use capture::finish::{self, remember, remember_steps, remember_video};
 use eframe::egui;
 use windup_core::ToolId;
 use windup_core::capture::DRect;
@@ -175,7 +175,8 @@ impl WindupApp {
             &self.config.video,
             availability,
         );
-        // Refused, and left on Screenshot, when Video cannot work here.
+        session.set_steps(&self.config.steps);
+        // Refused, and left on Screenshot, when Video or Steps cannot work here.
         session.act(Action::SetMode(mode));
 
         // Desktop units are the cursor's own: physical pixels on Windows,
@@ -321,6 +322,17 @@ impl WindupApp {
             remember_video(&mut self.config.video, &cap.session);
             // Started next frame, once the overlays are off the screen.
             self.record_from(*rect, *choice, &cap.session);
+            outcome = None;
+        }
+        if let Some(Outcome::Steps { choice }) = &outcome {
+            remember_steps(&mut self.config.steps, &cap.session);
+            // Started here once Steps has a runtime (Task 14).
+            log::info!("capture: steps asked for ({choice:?}), not yet run");
+            outcome = None;
+        }
+        if let Some(Outcome::StepDone(img)) = &outcome {
+            // Written back to the step by the review (Task 14).
+            log::info!("capture: step edited ({}x{})", img.width(), img.height());
             outcome = None;
         }
         self.config.save();

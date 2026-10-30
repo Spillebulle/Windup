@@ -51,10 +51,15 @@ pub enum Icon {
     Play,
     Volume2,
     Mic,
+    Hash,
+    MousePointerClick,
+    Mouse,
+    FileCode,
+    Images,
 }
 
 impl Icon {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 45] = [
         Self::Sliders,
         Self::Clipboard,
         Self::FileText,
@@ -95,6 +100,11 @@ impl Icon {
         Self::Play,
         Self::Volume2,
         Self::Mic,
+        Self::Hash,
+        Self::MousePointerClick,
+        Self::Mouse,
+        Self::FileCode,
+        Self::Images,
     ];
 
     pub fn nodes(self) -> &'static [Node] {
@@ -472,6 +482,62 @@ impl Icon {
                     w: 6.0,
                     h: 13.0,
                     r: 3.0,
+                },
+            ],
+            // Lucide hash (the numbered badge). Its four `<line>` elements,
+            // each written as the path from (x1, y1) to (x2, y2).
+            Self::Hash => &[
+                Node::Path("M4 9L20 9"),
+                Node::Path("M4 15L20 15"),
+                Node::Path("M10 3L8 21"),
+                Node::Path("M16 3L14 21"),
+            ],
+            // Lucide mouse-pointer-click (clicks take a step)
+            Self::MousePointerClick => &[
+                Node::Path("M14 4.1 12 6"),
+                Node::Path("m5.1 8-2.9-.8"),
+                Node::Path("m6 12-1.9 2"),
+                Node::Path("M7.2 2.2 8 5.1"),
+                Node::Path(
+                    "M9.037 9.69a.498.498 0 0 1 .653-.653l11 4.5a.5.5 0 0 1-.074.949l-4.349 1.041a1 1 0 0 0-.74.739l-1.04 4.35a.5.5 0 0 1-.95.074z",
+                ),
+            ],
+            // Lucide mouse (clicks only)
+            Self::Mouse => &[
+                Node::Rect {
+                    x: 5.0,
+                    y: 2.0,
+                    w: 14.0,
+                    h: 20.0,
+                    r: 7.0,
+                },
+                Node::Path("M12 6v4"),
+            ],
+            // Lucide file-code (the web page export)
+            Self::FileCode => &[
+                Node::Path(
+                    "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z",
+                ),
+                Node::Path("M14 2v5a1 1 0 0 0 1 1h5"),
+                Node::Path("M10 12.5 8 15l2 2.5"),
+                Node::Path("m14 12.5 2 2.5-2 2.5"),
+            ],
+            // Lucide images (the numbered images export). Its filled dot is
+            // stroked, as Image's is.
+            Self::Images => &[
+                Node::Path("m22 11-1.296-1.296a2.4 2.4 0 0 0-3.408 0L11 16"),
+                Node::Path("M4 8a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2"),
+                Node::Circle {
+                    cx: 13.0,
+                    cy: 7.0,
+                    r: 1.0,
+                },
+                Node::Rect {
+                    x: 8.0,
+                    y: 2.0,
+                    w: 14.0,
+                    h: 14.0,
+                    r: 2.0,
                 },
             ],
         }

@@ -9,6 +9,8 @@ use image::RgbaImage;
 use windup_core::capture::session::{CaptureMode, ModeAvailability, Outcome};
 use windup_core::capture::{DesktopShot, MonitorShot};
 use windup_core::config::{ScreenshotConfig, VideoConfig};
+use windup_core::steps::avail::NO_STEPS_SOURCE;
+use windup_core::steps::options::StepTrigger;
 
 /// Two monitors side by side in one 400 x 200 point window, one point to
 /// one desktop unit: monitor 0 at x = -200 at 1x, monitor 1 at x = 0 at
@@ -341,13 +343,127 @@ fn the_disabled_video_button_shows_its_reason() {
 }
 
 #[test]
-fn steps_still_says_later_and_video_says_video() {
+fn steps_says_steps_and_video_says_video() {
     let mut rig = Rig::with(400.0, VideoConfig::default(), ModeAvailability::ALL);
     rig.frame(vec![Event::PointerMoved(pos2(600.0, Y0))]);
     let steps = rig.mode_button(2);
-    assert!(rig.hover_until(steps, bar::LATER));
+    assert!(rig.hover_until(steps, "Steps"));
     let video = rig.mode_button(1);
     assert!(rig.hover_until(video, "Video"));
+}
+
+#[test]
+fn the_disabled_steps_button_shows_its_reason() {
+    let avail = ModeAvailability {
+        steps: Err(NO_STEPS_SOURCE),
+        ..ModeAvailability::ALL
+    };
+    let mut rig = Rig::with(400.0, VideoConfig::default(), avail);
+    rig.frame(vec![Event::PointerMoved(pos2(600.0, Y0))]);
+    let steps = rig.mode_button(2);
+    assert!(rig.hover_until(steps, NO_STEPS_SOURCE));
+    rig.click(steps);
+    assert_eq!(rig.session.mode, CaptureMode::Screenshot);
+}
+
+/// A rig in Steps mode with the pointer on monitor 1.
+fn steps_rig(avail: ModeAvailability) -> Rig {
+    let mut rig = Rig::with(400.0, VideoConfig::default(), avail);
+    rig.frame(vec![Event::PointerMoved(pos2(600.0, Y0))]);
+    let steps = rig.mode_button(2);
+    rig.click(steps);
+    assert_eq!(rig.session.mode, CaptureMode::Steps);
+    rig.frame(vec![Event::PointerMoved(pos2(600.0, Y0))]);
+    rig
+}
+
+#[test]
+fn the_steps_row_shows_start_not_a_target() {
+    let mut rig = steps_rig(ModeAvailability::ALL);
+    for label in ["Start", "Clicks and hotkey", "Numbered badge"] {
+        assert!(rig.painted(label), "{label}");
+    }
+    assert!(!rig.painted("Area"), "no target menu");
+    // A drag makes no selection.
+    rig.drag(pos2(460.0, Y0), pos2(540.0, Y0 + 80.0));
+    assert_eq!(rig.session.stage, Stage::Choosing);
+    assert!(rig.session.selection.rect.is_none());
+}
+
+#[test]
+fn enter_in_steps_mode_starts() {
+    let mut rig = steps_rig(ModeAvailability::ALL);
+    match rig.key(egui::Key::Enter, Modifiers::NONE) {
+        Some(Outcome::Steps { choice }) => {
+            assert_eq!(choice, rig.session.steps);
+        }
+        other => panic!("expected steps, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_disabled_trigger_entry_says_why() {
+    const NO_CLICKS: &str = "Windup cannot read the mouse.";
+    let avail = ModeAvailability {
+        clicks: Err(NO_CLICKS),
+        ..ModeAvailability::ALL
+    };
+    let mut rig = steps_rig(avail);
+    rig.session.steps.trigger = StepTrigger::HotkeyOnly;
+    // The trigger dropdown follows the mode segment and a divider.
+    let bar = rig.bar_rect();
+    let seg_w = 3.0 * metrics::SEG_ICON_W + 4.0 * metrics::SEG_PAD + 2.0 * metrics::HAIRLINE;
+    let left = bar.left() + metrics::S2 + seg_w + metrics::S2 + metrics::HAIRLINE + metrics::S2;
+    let trigger = pos2(left + metrics::S2 + 4.0, bar.center().y);
+    rig.click(trigger);
+    // The first entry, Clicks and hotkey, in the list under it.
+    let top = bar.center().y + metrics::BUTTON / 2.0 + metrics::POPOVER_GAP + metrics::MENU_PAD;
+    let item_h = metrics::ICON + 2.0 * metrics::MENU_ITEM_PAD_Y;
+    let first = pos2(left + metrics::S2 + 4.0, top + item_h / 2.0);
+    assert!(
+        rig.hover_until(first, NO_CLICKS),
+        "the reason as its tooltip"
+    );
+    rig.click(first);
+    assert_eq!(rig.session.steps.trigger, StepTrigger::HotkeyOnly);
+}
+
+/// A rig editing one step picture: 400 x 200 units, 800 x 400 pixels.
+fn step_edit_rig() -> Rig {
+    let mut rig = Rig::new();
+    rig.w = 400.0;
+    let layout = DRect {
+        x: 0.0,
+        y: 0.0,
+        w: 400.0,
+        h: 200.0,
+    };
+    let img = RgbaImage::from_pixel(800, 400, image::Rgba([90, 90, 90, 255]));
+    rig.session = Session::edit_image(img, layout, &ScreenshotConfig::default());
+    rig.frame(vec![Event::PointerMoved(pos2(200.0, Y0))]);
+    rig
+}
+
+#[test]
+fn the_step_edit_bar_has_done_and_no_save() {
+    let mut rig = step_edit_rig();
+    assert!(rig.painted("Done"));
+    assert!(!rig.painted("Copy"));
+    assert!(!rig.painted("Area"), "no target menu");
+    match rig.key(egui::Key::Enter, Modifiers::NONE) {
+        Some(Outcome::StepDone(img)) => assert_eq!(img.dimensions(), (800, 400)),
+        other => panic!("expected the step, got {other:?}"),
+    }
+}
+
+#[test]
+fn enter_finishes_a_step_edit_even_with_copy_bound_elsewhere() {
+    let mut rig = step_edit_rig();
+    rig.keys.copy = Shortcut::new(ShortcutModifiers::CTRL, "C");
+    assert!(matches!(
+        rig.key(egui::Key::Enter, Modifiers::NONE),
+        Some(Outcome::StepDone(_))
+    ));
 }
 
 #[test]
