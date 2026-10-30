@@ -2,7 +2,10 @@
 //! GNOME), kept apart from PipeWire so they are tested everywhere: where
 //! each shared monitor sits, which pixel formats to ask for and how each is
 //! read, which part of a buffer holds the picture, and what becomes of the
-//! restore token.
+//! restore token. Steps reads the same streams for stills: how often a
+//! frame is copied, where the pointer is in it, and its pixels as RGBA.
+
+use std::time::{Duration, Instant};
 
 use crate::capture::geometry::DRect;
 use crate::video::compose::Order;
@@ -174,6 +177,46 @@ pub fn token_change(saved: Option<&str>, returned: Option<&str>) -> TokenChange 
     }
 }
 
+/// How often a Steps stream copies a whole frame while nobody asks for one,
+/// so a shot of a screen that has stopped changing (whose compositor sends
+/// no new frames) is at most this old.
+pub const STILL_EVERY: Duration = Duration::from_millis(100);
+
+/// Whether a stream copies the frame that just arrived: always the first one
+/// after a shot asked (`wanted`), else at most once per `STILL_EVERY` since
+/// the last copy (`last`).
+pub fn copy_still(last: Option<Instant>, now: Instant, wanted: bool) -> bool {
+    wanted || last.is_none_or(|t| now.saturating_duration_since(t) >= STILL_EVERY)
+}
+
+/// The pointer in a stream's frame of `size` pixels, from the stream's
+/// cursor metadata: `position` is already the pointer's tip (the hotspot),
+/// in the frame's pixels. `None` for an `id` of 0 (no cursor data) or a
+/// point outside the frame (the pointer is on another screen).
+pub fn cursor_in_stream(id: u32, position: (i32, i32), size: (u32, u32)) -> Option<[f32; 2]> {
+    let (x, y) = position;
+    let inside = x >= 0 && y >= 0 && (x as i64) < size.0 as i64 && (y as i64) < size.1 as i64;
+    (id != 0 && inside).then_some([x as f32, y as f32])
+}
+
+/// A `w` x `h` frame whose rows start every `stride` bytes of `bytes`, as
+/// opaque RGBA (the fourth byte of every format is ignored). `bytes` must
+/// hold the frame (`frame_view` says so).
+pub fn still_rgba(bytes: &[u8], stride: usize, w: u32, h: u32, format: ShmVideoFormat) -> Vec<u8> {
+    let row = w as usize * 4;
+    let mut out = Vec::with_capacity(row * h as usize);
+    for y in 0..h as usize {
+        let line = &bytes[y * stride..y * stride + row];
+        for px in line.as_chunks::<4>().0 {
+            match format.order() {
+                Order::Bgra => out.extend_from_slice(&[px[2], px[1], px[0], 255]),
+                Order::Rgba => out.extend_from_slice(&[px[0], px[1], px[2], 255]),
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +366,48 @@ mod tests {
     fn no_token_back_clears_the_saved_one() {
         assert_eq!(token_change(Some("a"), None), TokenChange::Clear);
         assert_eq!(token_change(None, None), TokenChange::Keep);
+    }
+
+    #[test]
+    fn cursor_meta_maps_into_the_frame() {
+        // The position is the pointer's tip already.
+        assert_eq!(
+            cursor_in_stream(7, (100, 50), (1920, 1080)),
+            Some([100.0, 50.0])
+        );
+        assert_eq!(cursor_in_stream(0, (100, 50), (1920, 1080)), None);
+        assert_eq!(cursor_in_stream(7, (1920, 50), (1920, 1080)), None);
+        assert_eq!(
+            cursor_in_stream(7, (1919, 1079), (1920, 1080)),
+            Some([1919.0, 1079.0])
+        );
+        assert_eq!(cursor_in_stream(7, (-1, 50), (1920, 1080)), None);
+        assert_eq!(cursor_in_stream(7, (0, 0), (0, 0)), None);
+    }
+
+    #[test]
+    fn a_still_is_copied_when_asked_and_otherwise_every_100_ms() {
+        let t = Instant::now();
+        assert_eq!(STILL_EVERY, Duration::from_millis(100));
+        assert!(copy_still(None, t, false), "the first frame");
+        assert!(!copy_still(Some(t), t + Duration::from_millis(99), false));
+        assert!(copy_still(Some(t), t + STILL_EVERY, false));
+        assert!(copy_still(Some(t), t + Duration::from_millis(1), true));
+    }
+
+    #[test]
+    fn a_still_is_opaque_rgba_whatever_the_order() {
+        // 2x2 with padded rows of 12 bytes.
+        let mut bytes = vec![0u8; 24];
+        bytes[0..8].copy_from_slice(&[1, 2, 3, 0, 4, 5, 6, 0]);
+        bytes[12..20].copy_from_slice(&[7, 8, 9, 0, 10, 11, 12, 0]);
+        assert_eq!(
+            still_rgba(&bytes, 12, 2, 2, ShmVideoFormat::Bgrx),
+            [3, 2, 1, 255, 6, 5, 4, 255, 9, 8, 7, 255, 12, 11, 10, 255]
+        );
+        assert_eq!(
+            still_rgba(&bytes, 12, 2, 2, ShmVideoFormat::Rgba),
+            [1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]
+        );
     }
 }

@@ -8,6 +8,7 @@ use windup_core::capture::geometry::{DRect, MonitorShot};
 use windup_core::steps::pointer::to_image;
 
 use crate::capture::CaptureError;
+use crate::video::live::TokenSlot;
 
 /// One step's picture: the monitor the press was on.
 pub struct Shot {
@@ -69,10 +70,18 @@ impl Conceal for NoConceal {
 /// The first route in `route_order` that opens and takes a picture. That
 /// first picture is thrown away: it is taken so that a missing permission
 /// fails now, before the user starts clicking.
-pub fn open_camera(route_order: &[StepRoute]) -> Result<(Box<dyn Camera>, StepRoute), String> {
+///
+/// `token` holds the saved ScreenCast restore token (video's); once the
+/// portal has answered it holds the next, whether or not a camera opened,
+/// and the caller saves it (`Config::save_screencast_token`) as video does.
+/// The session, and so the token, lasts as long as the camera.
+pub fn open_camera(
+    route_order: &[StepRoute],
+    token: &TokenSlot,
+) -> Result<(Box<dyn Camera>, StepRoute), String> {
     let mut why = Vec::new();
     for &route in route_order {
-        match open(route) {
+        match open(route, token) {
             Ok(mut camera) => match camera.shoot(None) {
                 Ok(_) => return Ok((camera, route)),
                 Err(e) => why.push(format!("{route:?}: {}", describe(&e))),
@@ -88,7 +97,9 @@ pub fn open_camera(route_order: &[StepRoute]) -> Result<(Box<dyn Camera>, StepRo
 }
 
 /// The camera for one route.
-fn open(route: StepRoute) -> Result<Box<dyn Camera>, String> {
+// Only the ScreenCast portal (Linux) takes a token.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn open(route: StepRoute, token: &TokenSlot) -> Result<Box<dyn Camera>, String> {
     match route {
         #[cfg(target_os = "windows")]
         StepRoute::Gdi => Ok(Box::new(super::windows::GdiCamera)),
@@ -97,6 +108,12 @@ fn open(route: StepRoute) -> Result<Box<dyn Camera>, String> {
         #[cfg(target_os = "linux")]
         StepRoute::Screencopy { ext, pointer } => Ok(Box::new(
             crate::linux::steps::screencopy::ScreencopyCamera::new(ext, pointer),
+        )),
+        #[cfg(target_os = "linux")]
+        StepRoute::KWin => Ok(Box::new(crate::linux::steps::kwin::KWinCamera::open()?)),
+        #[cfg(target_os = "linux")]
+        StepRoute::ScreenCast => Ok(Box::new(
+            crate::linux::steps::screencast::PortalCamera::open(token)?,
         )),
         other => Err(format!("no camera exists for {other:?}")),
     }
@@ -121,14 +138,16 @@ mod tests {
         } else {
             StepRoute::Gdi
         };
-        let err = open_camera(&[foreign, StepRoute::None])
+        let token = TokenSlot::default();
+        let err = open_camera(&[foreign, StepRoute::None], &token)
             .err()
             .expect("no camera");
         assert!(
             err.contains(&format!("{foreign:?}")) && err.contains("None"),
             "{err}"
         );
-        assert!(open_camera(&[]).is_err());
+        assert!(open_camera(&[], &token).is_err());
+        assert_eq!(*token.lock().unwrap(), None, "no portal was asked");
     }
 
     #[test]

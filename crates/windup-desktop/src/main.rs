@@ -920,10 +920,19 @@ fn steps_export(job: &windup_core::ipc::StepsExport) -> i32 {
 
 /// `windup --step-shot-test out.png`: one step's picture by the camera a
 /// session would open, of the pointer's monitor. Prints `pointer X,Y` in the
-/// picture's pixels, or `pointer unknown`.
+/// picture's pixels, or `pointer unknown`. The ScreenCast portal's next
+/// restore token is saved, as a Steps session saves it, so a second run
+/// shows no dialog.
 fn step_shot_test(path: &std::path::Path) -> i32 {
     let order = windup_core::capture::backend::steps_order(&capture::facts());
-    let (mut camera, route) = match steps::camera::open_camera(&order) {
+    let saved = windup_core::config::Config::load_screencast_token();
+    let token = Arc::new(Mutex::new(saved.clone()));
+    let opened = steps::camera::open_camera(&order, &token);
+    let next = token.lock().ok().and_then(|t| t.clone());
+    if next != saved {
+        windup_core::config::Config::save_screencast_token(next.as_deref());
+    }
+    let (mut camera, route) = match opened {
         Ok(opened) => opened,
         Err(why) => {
             eprintln!("windup: {why}");

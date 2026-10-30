@@ -16,20 +16,27 @@
 //! A restore token lets the next session skip the question. Each token is
 //! good once; the session returns the next, which `ScreenCastFactory` keeps
 //! for the next segment and hands to whoever saves it.
+//!
+//! Steps reads the same streams for stills (`open_screencast_stills`): the
+//! session is held open for the whole Steps session, each stream keeps a
+//! recent frame, and the pointer comes as the streams' cursor metadata
+//! instead of being drawn in, where the portal offers that.
 
 use std::os::fd::OwnedFd;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ashpd::desktop::PersistMode;
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
+use ashpd::enumflags2::BitFlags;
 use futures_util::StreamExt;
 use futures_util::future::{Either, select};
+use image::RgbaImage;
 use windup_core::capture::geometry::DRect;
-use windup_core::video::screencast::{TokenChange, token_change};
+use windup_core::video::screencast::{TokenChange, layout_from_streams, token_change};
 use windup_core::video::{Source, even_size};
 
 use super::pw_stream::{self, PwStream};
@@ -54,6 +61,32 @@ pub(super) struct PortalStream {
     pub(super) node: u32,
     pub(super) position: Option<(i32, i32)>,
     pub(super) size: Option<(i32, i32)>,
+}
+
+/// What the PipeWire streams are read for.
+#[cfg_attr(not(feature = "pipewire"), allow(dead_code))]
+pub(crate) enum Want {
+    /// A recording: every stream placed in one picture of this rectangle
+    /// (desktop units), published to the mailbox.
+    Compose(DRect),
+    /// Steps: each stream keeps its own recent frame and its pointer, one
+    /// slot per stream in the portal's order.
+    Stills(Arc<Mutex<Vec<StillSlot>>>),
+}
+
+/// One stream's recent frame and pointer, for Steps.
+#[derive(Default)]
+pub(crate) struct StillSlot {
+    /// The newest frame copied, and when.
+    pub(crate) frame: Option<(RgbaImage, Instant)>,
+    /// The pointer in the frame's pixels, while the cursor metadata puts it
+    /// on this stream's screen.
+    pub(crate) cursor: Option<[f32; 2]>,
+    /// When `cursor` last changed (a count shared by the streams), to choose
+    /// between two streams that both still hold a position.
+    pub(crate) cursor_stamp: u64,
+    /// A shot asked: the next frame is copied whatever its age.
+    pub(crate) want_now: bool,
 }
 
 /// The recorded rectangle through the ScreenCast portal: what `--record-test`
@@ -128,15 +161,44 @@ pub(crate) fn open_screencast(
         // Asking would show the dialog for frames nothing could read.
         return Err(CaptureError::Unsupported);
     }
-    let saved = token.lock().ok().and_then(|t| t.clone());
     let latest = Arc::new(Mutex::new(Latest::default()));
     let stop = Stop::default();
+    let started = start_session(token, CursorMode::Embedded, &stop, &latest)?;
+    match pw_stream::spawn(
+        started.fd,
+        &started.streams,
+        Want::Compose(rect),
+        Arc::clone(&latest),
+    ) {
+        Ok(pw) => Ok(ScreenCastStream {
+            size: pw.size,
+            latest,
+            pw: Some(pw),
+            stop,
+        }),
+        Err(e) => {
+            stop.set();
+            Err(CaptureError::Failed(e))
+        }
+    }
+}
+
+/// Starts a portal session on a thread of its own with the restore token in
+/// `token`, asking for `cursor` (`Embedded`, or `Metadata` where the portal
+/// has it), and waits for it to start. `token` then holds the next one.
+fn start_session(
+    token: &Mutex<Option<String>>,
+    cursor: CursorMode,
+    stop: &Stop,
+    latest: &Arc<Mutex<Latest>>,
+) -> Result<Started, CaptureError> {
+    let saved = token.lock().ok().and_then(|t| t.clone());
     let (tx, rx) = mpsc::channel();
     {
-        let (stop, latest, sent) = (stop.clone(), Arc::clone(&latest), saved.clone());
+        let (stop, latest, sent) = (stop.clone(), Arc::clone(latest), saved.clone());
         std::thread::Builder::new()
             .name("windup-screencast-portal".into())
-            .spawn(move || pollster::block_on(session(sent, tx, stop, latest)))
+            .spawn(move || pollster::block_on(session(sent, tx, stop, latest, cursor)))
             .map_err(|e| CaptureError::Failed(e.to_string()))?;
     }
     let started = match rx.recv_timeout(PORTAL_WAIT) {
@@ -148,7 +210,11 @@ pub(crate) fn open_screencast(
             ));
         }
     };
-    log::debug!("ScreenCast streams: {:?}", started.streams);
+    log::debug!(
+        "ScreenCast streams: {:?}, cursor {:?}",
+        started.streams,
+        started.cursor
+    );
     log::info!(
         "ScreenCast: the portal {} a restore token",
         if started.token.is_some() {
@@ -158,9 +224,39 @@ pub(crate) fn open_screencast(
         }
     );
     apply_token(token, saved.as_deref(), started.token.as_deref());
-    match pw_stream::spawn(started.fd, &started.streams, rect, Arc::clone(&latest)) {
-        Ok(pw) => Ok(ScreenCastStream {
-            size: pw.size,
+    Ok(started)
+}
+
+/// Asks the portal for every monitor and keeps a recent still of each, for
+/// Steps, with the restore token in `token` (the one video uses too; the
+/// caller saves the next). Asks for the pointer as metadata where the
+/// portal offers it; elsewhere it is drawn in and its place is unknown.
+/// Blocks until the portal answers, as `open_screencast` does.
+pub(crate) fn open_screencast_stills(
+    token: &Mutex<Option<String>>,
+) -> Result<ScreenCastStills, CaptureError> {
+    if !cfg!(feature = "pipewire") {
+        return Err(CaptureError::Unsupported);
+    }
+    let latest = Arc::new(Mutex::new(Latest::default()));
+    let stop = Stop::default();
+    let started = start_session(token, CursorMode::Metadata, &stop, &latest)?;
+    let slots: Arc<Mutex<Vec<StillSlot>>> = Arc::new(Mutex::new(
+        started
+            .streams
+            .iter()
+            .map(|_| StillSlot::default())
+            .collect(),
+    ));
+    match pw_stream::spawn(
+        started.fd,
+        &started.streams,
+        Want::Stills(Arc::clone(&slots)),
+        Arc::clone(&latest),
+    ) {
+        Ok(pw) => Ok(ScreenCastStills {
+            streams: started.streams,
+            slots,
             latest,
             pw: Some(pw),
             stop,
@@ -169,6 +265,16 @@ pub(crate) fn open_screencast(
             stop.set();
             Err(CaptureError::Failed(e))
         }
+    }
+}
+
+/// The cursor mode to ask for: `wanted` when the portal offers it, else the
+/// pointer drawn in.
+fn cursor_mode(wanted: CursorMode, available: BitFlags<CursorMode>) -> CursorMode {
+    if available.contains(wanted) {
+        wanted
+    } else {
+        CursorMode::Embedded
     }
 }
 
@@ -205,6 +311,7 @@ struct Started {
     fd: OwnedFd,
     streams: Vec<PortalStream>,
     token: Option<String>,
+    cursor: CursorMode,
 }
 
 /// The portal thread: start the session, say what it gave, then hold it
@@ -214,14 +321,28 @@ async fn session(
     ready: mpsc::Sender<Result<Started, CaptureError>>,
     stop: Stop,
     latest: Arc<Mutex<Latest>>,
+    cursor: CursorMode,
 ) {
     let opened = async {
         let portal = Screencast::new().await?;
+        // Video draws the pointer in and never asks; a portal that cannot
+        // say what it offers gets the same.
+        let cursor = if cursor == CursorMode::Embedded {
+            cursor
+        } else {
+            match portal.available_cursor_modes().await {
+                Ok(available) => cursor_mode(cursor, available),
+                Err(e) => {
+                    log::debug!("ScreenCast cursor modes: {e}");
+                    CursorMode::Embedded
+                }
+            }
+        };
         let session = portal.create_session().await?;
         portal
             .select_sources(
                 &session,
-                CursorMode::Embedded,
+                cursor,
                 SourceType::Monitor.into(),
                 true,
                 token.as_deref(),
@@ -231,10 +352,10 @@ async fn session(
             .response()?;
         let started = portal.start(&session, None).await?.response()?;
         let fd = portal.open_pipe_wire_remote(&session).await?;
-        ashpd::Result::Ok((session, started, fd))
+        ashpd::Result::Ok((session, started, fd, cursor))
     }
     .await;
-    let (session, started, fd) = match opened {
+    let (session, started, fd, cursor) = match opened {
         Ok(o) => o,
         Err(e) => {
             let _ = ready.send(Err(portal_error(e)));
@@ -253,7 +374,13 @@ async fn session(
     let token = started.restore_token().map(str::to_owned);
     // Listen before saying it started, so a close right after is not missed.
     let closed = session.receive_closed().await;
-    if ready.send(Ok(Started { fd, streams, token })).is_err() {
+    let started = Started {
+        fd,
+        streams,
+        token,
+        cursor,
+    };
+    if ready.send(Ok(started)).is_err() {
         // Nobody waits any more (the wait timed out).
         let _ = session.close().await;
         return;
@@ -354,9 +481,96 @@ impl Drop for ScreenCastStream {
     }
 }
 
+/// The portal's streams read for Steps: a recent still of each screen and
+/// the pointer on it. Dropping it stops reading and closes the session.
+pub(crate) struct ScreenCastStills {
+    streams: Vec<PortalStream>,
+    slots: Arc<Mutex<Vec<StillSlot>>>,
+    latest: Arc<Mutex<Latest>>,
+    pw: Option<PwStream>,
+    stop: Stop,
+}
+
+impl ScreenCastStills {
+    /// Why the streams stopped (the desktop closed the session, PipeWire
+    /// went away), once they have.
+    pub(crate) fn ended(&self) -> Option<String> {
+        match self.latest.lock() {
+            Ok(l) => l.error.clone(),
+            Err(_) => Some(STOPPED.into()),
+        }
+    }
+
+    /// Each stream's pointer and when it last changed, in the portal's order.
+    pub(crate) fn cursors(&self) -> Vec<(Option<[f32; 2]>, u64)> {
+        self.lock()
+            .iter()
+            .map(|s| (s.cursor, s.cursor_stamp))
+            .collect()
+    }
+
+    /// Where stream `i`'s screen sits, desktop units. A stream the portal
+    /// gave no size is as big as its newest frame.
+    pub(crate) fn layout(&self, i: usize) -> Option<DRect> {
+        let slots = self.lock();
+        let described: Vec<_> = self
+            .streams
+            .iter()
+            .enumerate()
+            .map(|(j, s)| {
+                let framed = slots.get(j).and_then(|slot| {
+                    let (img, _) = slot.frame.as_ref()?;
+                    Some((img.width() as i32, img.height() as i32))
+                });
+                (s.node, s.position, s.size.or(framed))
+            })
+            .collect();
+        layout_from_streams(&described).get(i).copied()
+    }
+
+    /// Asks stream `i` for its next frame.
+    pub(crate) fn ask(&self, i: usize) {
+        if let Some(slot) = self.lock().get_mut(i) {
+            slot.want_now = true;
+        }
+    }
+
+    /// Stream `i`'s newest frame and when it was copied.
+    pub(crate) fn frame(&self, i: usize) -> Option<(RgbaImage, Instant)> {
+        self.lock().get(i)?.frame.clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<StillSlot>> {
+        self.slots.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for ScreenCastStills {
+    /// Stops reading first, then closes the session.
+    fn drop(&mut self) {
+        self.pw = None;
+        self.stop.set();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steps_ask_for_cursor_metadata_only_where_the_portal_has_it() {
+        let all = CursorMode::Hidden | CursorMode::Embedded | CursorMode::Metadata;
+        assert_eq!(cursor_mode(CursorMode::Metadata, all), CursorMode::Metadata);
+        let drawn = CursorMode::Hidden | CursorMode::Embedded;
+        assert_eq!(
+            cursor_mode(CursorMode::Metadata, drawn),
+            CursorMode::Embedded
+        );
+        assert_eq!(
+            cursor_mode(CursorMode::Metadata, BitFlags::empty()),
+            CursorMode::Embedded
+        );
+    }
 
     #[test]
     fn a_started_session_leaves_the_next_token_in_the_slot() {

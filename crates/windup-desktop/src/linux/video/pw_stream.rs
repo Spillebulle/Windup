@@ -9,6 +9,11 @@
 //! every stream has said its size the layout is fixed and a `Composer`
 //! built; from then on each buffer is placed in the picture as it arrives
 //! and the picture is published to the one-slot mailbox.
+//!
+//! For Steps (`Want::Stills`) nothing is composed: each stream keeps its
+//! own recent frame and the pointer from its cursor metadata
+//! (`SPA_META_Cursor`), which is the one place this module reads PipeWire's
+//! buffers through raw pointers.
 
 use std::cell::RefCell;
 use std::io::Cursor;
@@ -16,7 +21,7 @@ use std::os::fd::OwnedFd;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pipewire as pw;
 use pw::spa;
@@ -31,10 +36,11 @@ use windup_core::capture::geometry::DRect;
 use windup_core::video::Composer;
 use windup_core::video::compose::Buffer;
 use windup_core::video::screencast::{
-    ShmVideoFormat, covered_by, frame_view, layout_from_streams, stream_scale,
+    ShmVideoFormat, copy_still, covered_by, cursor_in_stream, frame_view, layout_from_streams,
+    still_rgba, stream_scale,
 };
 
-use super::screencast::{PortalStream, STOPPED};
+use super::screencast::{PortalStream, STOPPED, Want};
 use super::stream::Latest;
 use crate::video::outcome::SCREENS_NOT_SHARED;
 
@@ -59,12 +65,14 @@ impl Drop for PwStream {
 }
 
 /// Connects to the portal's PipeWire remote `fd` and starts reading
-/// `streams` for `rect` (desktop units). Returns once the picture's size is
-/// known; frames then arrive in `latest`.
+/// `streams` for what is wanted. Returns once every stream has agreed a
+/// format; for a recording that gives the picture's size, and frames then
+/// arrive in `latest`. For stills the size is (0, 0), each stream's frames
+/// and pointer go to its slot, and only a failure reaches `latest`.
 pub(super) fn spawn(
     fd: OwnedFd,
     streams: &[PortalStream],
-    rect: DRect,
+    want: Want,
     latest: Arc<Mutex<Latest>>,
 ) -> Result<PwStream, String> {
     if streams.is_empty() {
@@ -76,7 +84,7 @@ pub(super) fn spawn(
     let thread = std::thread::Builder::new()
         .name("windup-pipewire".into())
         .spawn(move || {
-            if let Err(e) = run(fd, streams, rect, &latest, ready.clone(), stop_rx) {
+            if let Err(e) = run(fd, streams, want, &latest, ready.clone(), stop_rx) {
                 // Before the size was known this reaches `spawn`; after,
                 // the recording.
                 let _ = ready.send(Err(e.clone()));
@@ -192,10 +200,45 @@ fn enum_format() -> Result<Vec<u8>, String> {
         .map_err(|e| format!("could not describe the formats: {e:?}"))
 }
 
+/// The `SPA_PARAM_Meta` a Steps stream asks for: cursor metadata with room
+/// for a 64 x 64 bitmap (the compositor may send a bitmap with it; Windup
+/// only reads the position, but a block too small for the bitmap could be
+/// refused).
+fn cursor_meta() -> Result<Vec<u8>, String> {
+    use spa::sys::{SPA_META_Cursor, SPA_PARAM_META_size, SPA_PARAM_META_type};
+    use spa::sys::{spa_meta_bitmap, spa_meta_cursor};
+    let size = |side: usize| {
+        (std::mem::size_of::<spa_meta_cursor>()
+            + std::mem::size_of::<spa_meta_bitmap>()
+            + side * side * 4) as i32
+    };
+    let object = Object {
+        type_: SpaTypes::ObjectParamMeta.as_raw(),
+        id: ParamType::Meta.as_raw(),
+        properties: vec![
+            Property::new(SPA_PARAM_META_type, Value::Id(Id(SPA_META_Cursor))),
+            Property::new(
+                SPA_PARAM_META_size,
+                Value::Choice(ChoiceValue::Int(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: size(64),
+                        min: size(1),
+                        max: size(256),
+                    },
+                ))),
+            ),
+        ],
+    };
+    spa::pod::serialize::PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(object))
+        .map(|(out, _)| out.into_inner())
+        .map_err(|e| format!("could not describe the cursor metadata: {e:?}"))
+}
+
 /// Everything the loop's callbacks share. They all run on the loop's
 /// thread, one at a time.
 struct Feed {
-    rect: DRect,
+    want: Want,
     streams: Vec<PortalStream>,
     /// Each stream's agreed format and size in pixels.
     formats: Vec<Option<(ShmVideoFormat, u32, u32)>>,
@@ -205,6 +248,8 @@ struct Feed {
     ready: Option<mpsc::Sender<Result<(u32, u32), String>>>,
     latest: Arc<Mutex<Latest>>,
     mainloop: pw::main_loop::WeakMainLoop,
+    /// Counts cursor changes across the streams (`StillSlot::cursor_stamp`).
+    cursor_clock: u64,
 }
 
 impl Feed {
@@ -232,6 +277,15 @@ impl Feed {
             return;
         };
         let before = slot.replace((format, w, h));
+        if let Want::Stills(_) = self.want {
+            // Each stream is read on its own: a new size is only that.
+            if self.formats.iter().all(Option::is_some)
+                && let Some(ready) = self.ready.take()
+            {
+                let _ = ready.send(Ok((0, 0)));
+            }
+            return;
+        }
         let Some(composer) = self.composer.as_mut() else {
             if self.formats.iter().all(Option::is_some) {
                 self.build();
@@ -250,6 +304,10 @@ impl Feed {
 
     /// Every stream has a size: fix the layout and say the picture's size.
     fn build(&mut self) {
+        let rect = match &self.want {
+            Want::Compose(rect) => *rect,
+            Want::Stills(_) => return,
+        };
         let agreed: Vec<(ShmVideoFormat, u32, u32)> =
             self.formats.iter().flatten().copied().collect();
         if agreed.len() != self.streams.len() {
@@ -267,7 +325,7 @@ impl Feed {
             .collect();
         let layouts = layout_from_streams(&described);
         // Partly on a screen the grant leaves out would record black there.
-        if !covered_by(self.rect, &layouts) {
+        if !covered_by(rect, &layouts) {
             self.fail(SCREENS_NOT_SHARED.into());
             return;
         }
@@ -276,7 +334,7 @@ impl Feed {
             .zip(&agreed)
             .map(|(l, &(_, w, h))| (*l, stream_scale(w, l.w), (w, h)))
             .collect();
-        let mut composer = Composer::new(self.rect, &monitors);
+        let mut composer = Composer::new(rect, &monitors);
         for (i, &(format, _, _)) in agreed.iter().enumerate() {
             composer.set_buffer(
                 i,
@@ -309,13 +367,138 @@ impl Feed {
             l.publish(&self.canvas);
         }
     }
+
+    /// Stream `i`'s cursor metadata said `id` at `position`. An id of 0 is
+    /// "no new cursor data", so the pointer stays where it was.
+    fn cursor(&mut self, i: usize, id: u32, position: (i32, i32)) {
+        let (Want::Stills(slots), Some(Some((_, w, h)))) = (&self.want, self.formats.get(i)) else {
+            return;
+        };
+        if id == 0 {
+            return;
+        }
+        let cursor = cursor_in_stream(id, position, (*w, *h));
+        let mut slots = slots.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = slots.get_mut(i)
+            && slot.cursor != cursor
+        {
+            self.cursor_clock += 1;
+            slot.cursor = cursor;
+            slot.cursor_stamp = self.cursor_clock;
+        }
+    }
+
+    /// Stream `i`'s newest buffer, for stills: copied when a shot asked or
+    /// the last copy is `STILL_EVERY` old.
+    fn still(&mut self, i: usize, data: &mut spa::buffer::Data) {
+        let (Want::Stills(slots), Some(Some((format, w, h)))) =
+            (&self.want, self.formats.get(i).copied())
+        else {
+            return;
+        };
+        // Its own handle: `fail` below needs all of `self`.
+        let slots = Arc::clone(slots);
+        let now = Instant::now();
+        {
+            let slots = slots.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(slot) = slots.get(i) else {
+                return;
+            };
+            if !copy_still(slot.frame.as_ref().map(|f| f.1), now, slot.want_now) {
+                return;
+            }
+        }
+        let kind = data.type_();
+        if kind != DataType::MemPtr && kind != DataType::MemFd {
+            self.fail(format!(
+                "PipeWire sent {kind:?} buffers, which Windup cannot read."
+            ));
+            return;
+        }
+        let chunk = data.chunk();
+        let (offset, stride, size, corrupted) = (
+            chunk.offset(),
+            chunk.stride(),
+            chunk.size(),
+            chunk.flags().contains(ChunkFlags::CORRUPTED),
+        );
+        let Some(bytes) = data.data() else {
+            return;
+        };
+        // A buffer with only the cursor in it has no picture: wait for one.
+        let Some((start, stride)) = frame_view(offset, stride, size, corrupted, bytes.len(), w, h)
+        else {
+            return;
+        };
+        // Converted outside the lock, so a shot waiting is not held up.
+        let rgba = still_rgba(&bytes[start..], stride, w, h, format);
+        let Some(image) = image::RgbaImage::from_raw(w, h, rgba) else {
+            return;
+        };
+        let mut slots = slots.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = slots.get_mut(i) {
+            slot.frame = Some((image, now));
+            slot.want_now = false;
+        }
+    }
+}
+
+/// Every buffer waiting on Steps stream `i`, oldest first: the cursor
+/// metadata of each is read, the picture of the newest only, and all go
+/// back to the stream.
+fn drain_stills(stream: &pw::stream::StreamRef, i: usize, feed: &RefCell<Feed>) {
+    use spa::sys::{SPA_META_Cursor, spa_buffer_find_meta_data, spa_meta_cursor};
+    let mut feed = feed.borrow_mut();
+    // SAFETY: the pipewire crate's `Buffer` gives no way to the buffer's
+    // metadata, so the buffers are taken raw. Each pointer comes from
+    // `dequeue_raw_buffer` on this stream, is checked for null, and is
+    // queued back exactly once, after its last use and before this returns;
+    // no reference into it outlives that. `spa_buffer_find_meta_data`
+    // returns null unless the buffer has a cursor block at least as big as
+    // `spa_meta_cursor`, which is all that is read of it. `Data` is
+    // `repr(transparent)` over `spa_data`, as `Buffer::datas_mut` relies on,
+    // and the stream maps the buffers (`MAP_BUFFERS`).
+    unsafe {
+        let mut newest: *mut pw::sys::pw_buffer = std::ptr::null_mut();
+        loop {
+            let b = stream.dequeue_raw_buffer();
+            if b.is_null() {
+                break;
+            }
+            if !newest.is_null() {
+                stream.queue_raw_buffer(newest);
+            }
+            newest = b;
+            let spa = (*b).buffer;
+            if spa.is_null() {
+                continue;
+            }
+            let meta = spa_buffer_find_meta_data(
+                spa,
+                SPA_META_Cursor,
+                std::mem::size_of::<spa_meta_cursor>(),
+            ) as *const spa_meta_cursor;
+            if let Some(c) = meta.as_ref() {
+                feed.cursor(i, c.id, (c.position.x, c.position.y));
+            }
+        }
+        if newest.is_null() {
+            return;
+        }
+        let spa = (*newest).buffer;
+        if !spa.is_null() && (*spa).n_datas > 0 && !(*spa).datas.is_null() {
+            let data = &mut *((*spa).datas as *mut spa::buffer::Data);
+            feed.still(i, data);
+        }
+        stream.queue_raw_buffer(newest);
+    }
 }
 
 /// The loop thread: connect, start a stream per monitor, run until stopped.
 fn run(
     fd: OwnedFd,
     streams: Vec<PortalStream>,
-    rect: DRect,
+    want: Want,
     latest: &Arc<Mutex<Latest>>,
     ready: mpsc::Sender<Result<(u32, u32), String>>,
     stop: pw::channel::Receiver<()>,
@@ -326,8 +509,12 @@ fn run(
     let mainloop = pw::main_loop::MainLoop::new(None).map_err(err)?;
     let context = pw::context::Context::new(&mainloop).map_err(err)?;
     let core = context.connect_fd(fd, None).map_err(err)?;
+    let stills = matches!(want, Want::Stills(_));
+    // Steps asks each stream for the pointer as metadata once its format is
+    // agreed.
+    let meta = if stills { Some(cursor_meta()?) } else { None };
     let feed = Rc::new(RefCell::new(Feed {
-        rect,
+        want,
         formats: vec![None; streams.len()],
         streams: streams.clone(),
         composer: None,
@@ -335,6 +522,7 @@ fn run(
         ready: Some(ready),
         latest: Arc::clone(latest),
         mainloop: mainloop.downgrade(),
+        cursor_clock: 0,
     }));
     let _core_listener = core
         .add_listener_local()
@@ -375,7 +563,8 @@ fn run(
             })
             .param_changed({
                 let feed = Rc::clone(&feed);
-                move |_, i, id, param| {
+                let meta = meta.clone();
+                move |stream, i, id, param| {
                     let Some(param) = param else {
                         return;
                     };
@@ -404,11 +593,22 @@ fn run(
                     let size = info.size();
                     feed.borrow_mut()
                         .format(*i, format, size.width, size.height);
+                    if let Some(pod) = meta.as_deref().and_then(Pod::from_bytes)
+                        && let Err(e) = stream.update_params(&mut [pod])
+                    {
+                        // The stills still come; only the pointer's place
+                        // does not.
+                        log::warn!("PipeWire: no cursor metadata: {e}");
+                    }
                 }
             })
             .process({
                 let feed = Rc::clone(&feed);
                 move |stream, i| {
+                    if stills {
+                        drain_stills(stream, *i, &feed);
+                        return;
+                    }
                     // Only the newest picture matters; older ones go back.
                     let mut newest = None;
                     while let Some(b) = stream.dequeue_buffer() {

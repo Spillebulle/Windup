@@ -1,5 +1,5 @@
 //! KDE Plasma: a still of each screen from KWin's `ScreenShot2` interface, and
-//! the windows' rectangles from a small KWin script.
+//! the windows' rectangles and the pointer from small KWin scripts.
 //!
 //! KWin only answers `ScreenShot2` to programs whose desktop entry lists the
 //! interface under `X-KDE-DBUS-Restricted-Interfaces`, and it finds that entry
@@ -12,7 +12,7 @@
 //! KWin in `still_order`).
 
 use crate::capture::CaptureError;
-use crate::capture::kwin_rects::{parse_kwin_rects, script};
+use crate::capture::kwin_rects::{cursor_script, parse_cursor, parse_kwin_rects, script};
 use crate::capture::pixels::{qimage_format, to_rgba};
 use crate::linux::wayland::screencopy::output_layout_from_env;
 use ashpd::zbus::zvariant::{Fd, OwnedValue, Value};
@@ -31,7 +31,7 @@ const KWIN: &str = "org.kde.KWin";
 const SHOT_PATH: &str = "/org/kde/KWin/ScreenShot2";
 const SHOT_IFACE: &str = "org.kde.KWin.ScreenShot2";
 
-/// How long to wait for the script to report. A script that never calls back
+/// How long to wait for a script to report. A script that never calls back
 /// (an old KWin, a script error) must not hold the overlay up.
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long any one D-Bus call may take; a compositor that never answers must
@@ -39,11 +39,13 @@ const SCRIPT_TIMEOUT: Duration = Duration::from_secs(1);
 const METHOD_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long to wait for a screen's pixels after KWin has replied.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
-/// The name the script is loaded under, so it can be unloaded again.
-const PLUGIN_NAME: &str = "io.github.spillebulle.windup.rects";
-const RECTS_PATH: &str = "/io/github/spillebulle/windup/Rects";
-const RECTS_IFACE: &str = "io.github.spillebulle.windup.Rects";
-const RECTS_METHOD: &str = "Windows";
+/// The names the scripts are loaded under, so they can be unloaded again.
+const RECTS_PLUGIN: &str = "io.github.spillebulle.windup.rects";
+const CURSOR_PLUGIN: &str = "io.github.spillebulle.windup.cursor";
+/// Where a script calls back with what it found.
+const REPLY_PATH: &str = "/io/github/spillebulle/windup/Reply";
+const REPLY_IFACE: &str = "io.github.spillebulle.windup.Reply";
+const REPLY_METHOD: &str = "Report";
 
 fn failed(what: impl std::fmt::Display) -> CaptureError {
     CaptureError::Failed(what.to_string())
@@ -61,7 +63,7 @@ fn is_denied(e: &zbus::Error) -> bool {
 }
 
 /// A session-bus connection whose calls give up.
-async fn session() -> zbus::Result<Connection> {
+pub(crate) async fn session() -> zbus::Result<Connection> {
     zbus::connection::Builder::session()?
         .method_timeout(METHOD_TIMEOUT)
         .build()
@@ -86,7 +88,12 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
     Ok(DesktopShot { monitors })
 }
 
-async fn capture_screen(conn: &Connection, name: &str) -> Result<image::RgbaImage, CaptureError> {
+/// One screen, by name, at its native resolution and without the cursor.
+/// `Denied` when KWin will not answer us (the AppImage).
+pub(crate) async fn capture_screen(
+    conn: &Connection,
+    name: &str,
+) -> Result<image::RgbaImage, CaptureError> {
     // Close-on-exec, so a child started meanwhile does not keep the write end
     // open and the reader waiting.
     let (read, write) =
@@ -155,13 +162,13 @@ async fn capture_screen(conn: &Connection, name: &str) -> Result<image::RgbaImag
     to_rgba(format, width, height, stride as usize, &bytes)
 }
 
-/// What the script's callback hands to the main thread.
-struct Rects(Mutex<Sender<String>>);
+/// What a script's callback hands to the waiting thread.
+struct Reply(Mutex<Sender<String>>);
 
-#[zbus::interface(name = "io.github.spillebulle.windup.Rects")]
-impl Rects {
-    /// Called by the KWin script with the windows as JSON.
-    fn windows(&self, json: String) {
+#[zbus::interface(name = "io.github.spillebulle.windup.Reply")]
+impl Reply {
+    /// Called by the KWin script with what it found, as JSON.
+    fn report(&self, json: String) {
         if let Ok(tx) = self.0.lock() {
             let _ = tx.send(json);
         }
@@ -171,13 +178,20 @@ impl Rects {
 /// The desktop's windows, topmost first; empty if KWin's script does not
 /// answer in time (the picker then falls back to edge detection).
 pub fn window_rects() -> Vec<WindowRect> {
-    match try_window_rects() {
+    match run_script(RECTS_PLUGIN, script) {
         Ok(json) => parse_kwin_rects(&json),
         Err(e) => {
             log::debug!("kwin window rects: {e}");
             Vec::new()
         }
     }
+}
+
+/// Where the pointer is (logical units) and the name of the screen it is
+/// on, as KWin's script says.
+pub(crate) fn cursor() -> Result<(f32, f32, String), String> {
+    let json = run_script(CURSOR_PLUGIN, cursor_script)?;
+    parse_cursor(&json).ok_or_else(|| format!("KWin's cursor script said {json}"))
 }
 
 /// A script file only we can have written, under the 0700 runtime directory.
@@ -191,7 +205,7 @@ fn write_script(text: &str) -> Result<PathBuf, String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
-    let path = PathBuf::from(dir).join(format!("windup-rects-{}-{nanos}.js", std::process::id()));
+    let path = PathBuf::from(dir).join(format!("windup-script-{}-{nanos}.js", std::process::id()));
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -207,31 +221,39 @@ fn write_script(text: &str) -> Result<PathBuf, String> {
 struct Loaded {
     conn: Connection,
     file: PathBuf,
+    plugin: &'static str,
 }
 
 impl Drop for Loaded {
     fn drop(&mut self) {
-        let _ = pollster::block_on(unload(&self.conn));
+        let _ = pollster::block_on(unload(&self.conn, self.plugin));
         let _ = std::fs::remove_file(&self.file);
     }
 }
 
-fn try_window_rects() -> Result<String, String> {
+/// Loads the script `make` writes (given our bus name, then the path,
+/// interface and method it calls back on) under `plugin`, runs it, and
+/// returns the one JSON string it reports, within `SCRIPT_TIMEOUT`. The
+/// script is unloaded and its file deleted however it ends.
+fn run_script(
+    plugin: &'static str,
+    make: fn(&str, &str, &str, &str) -> String,
+) -> Result<String, String> {
     let (tx, rx) = channel();
     let conn = pollster::block_on(session()).map_err(|e| e.to_string())?;
     pollster::block_on(async {
         conn.object_server()
-            .at(RECTS_PATH, Rects(Mutex::new(tx)))
+            .at(REPLY_PATH, Reply(Mutex::new(tx)))
             .await
             .map_err(|e| e.to_string())
     })?;
     let me = conn.unique_name().ok_or("no bus name")?.to_string();
-    let file = write_script(&script(&me, RECTS_PATH, RECTS_IFACE, RECTS_METHOD))?;
+    let file = write_script(&make(&me, REPLY_PATH, REPLY_IFACE, REPLY_METHOD))?;
     // From here on every exit unloads and cleans up.
-    let guard = Loaded { conn, file };
+    let guard = Loaded { conn, file, plugin };
     let id = pollster::block_on(async {
         // A script of that name left by a crashed run would refuse the load.
-        let _ = unload(&guard.conn).await;
+        let _ = unload(&guard.conn, plugin).await;
         let id: i32 = guard
             .conn
             .call_method(
@@ -239,7 +261,7 @@ fn try_window_rects() -> Result<String, String> {
                 "/Scripting",
                 Some("org.kde.kwin.Scripting"),
                 "loadScript",
-                &(guard.file.to_string_lossy().as_ref(), PLUGIN_NAME),
+                &(guard.file.to_string_lossy().as_ref(), plugin),
             )
             .await
             .map_err(|e| e.to_string())?
@@ -269,13 +291,13 @@ fn try_window_rects() -> Result<String, String> {
         .map_err(|e| format!("script {id} did not report: {e}"))
 }
 
-async fn unload(conn: &Connection) -> zbus::Result<()> {
+async fn unload(conn: &Connection, plugin: &str) -> zbus::Result<()> {
     conn.call_method(
         Some(KWIN),
         "/Scripting",
         Some("org.kde.kwin.Scripting"),
         "unloadScript",
-        &(PLUGIN_NAME,),
+        &(plugin,),
     )
     .await
     .map(|_| ())

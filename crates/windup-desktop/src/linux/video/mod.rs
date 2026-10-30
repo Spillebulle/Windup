@@ -10,7 +10,7 @@ mod pw_stream;
 mod screencast;
 mod stream;
 
-pub(crate) use screencast::ScreenCastFactory;
+pub(crate) use screencast::{ScreenCastFactory, ScreenCastStills, open_screencast_stills};
 pub(crate) use stream::WaylandFactory;
 
 /// Built without PipeWire: there is nothing to read the portal's streams
@@ -20,9 +20,7 @@ mod pw_stream {
     use std::os::fd::OwnedFd;
     use std::sync::{Arc, Mutex};
 
-    use windup_core::capture::geometry::DRect;
-
-    use super::screencast::PortalStream;
+    use super::screencast::{PortalStream, Want};
     use super::stream::Latest;
 
     pub(super) struct PwStream {
@@ -32,10 +30,10 @@ mod pw_stream {
     pub(super) fn spawn(
         fd: OwnedFd,
         streams: &[PortalStream],
-        rect: DRect,
+        want: Want,
         latest: Arc<Mutex<Latest>>,
     ) -> Result<PwStream, String> {
-        let _ = (fd, streams, rect, latest);
+        let _ = (fd, streams, want, latest);
         Err("Windup was built without PipeWire.".into())
     }
 }

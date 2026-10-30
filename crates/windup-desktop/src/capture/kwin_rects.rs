@@ -1,5 +1,5 @@
-//! The KWin script that reports window rectangles, and the reading of what it
-//! says. The D-Bus plumbing is in `linux/kde.rs`; this half is pure so it is
+//! The KWin scripts that report window rectangles and where the pointer is,
+//! and the reading of what they say. The D-Bus plumbing is in `linux/kde.rs`; this half is pure so it is
 //! tested everywhere.
 
 use serde_json::Value;
@@ -28,11 +28,44 @@ callDBus("@SERVICE@", "@PATH@", "@IFACE@", "@METHOD@", JSON.stringify(out));
 /// one JSON string.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn script(service: &str, path: &str, iface: &str, method: &str) -> String {
-    SCRIPT
-        .replace("@SERVICE@", service)
+    fill(SCRIPT, service, path, iface, method)
+}
+
+/// The script that reports the pointer: `workspace.cursorPos` is in the
+/// compositor's logical coordinates, like the window rectangles.
+const CURSOR_SCRIPT: &str = r#"
+callDBus("@SERVICE@", "@PATH@", "@IFACE@", "@METHOD@",
+    JSON.stringify({x: workspace.cursorPos.x, y: workspace.cursorPos.y, screen: workspace.activeScreen.name}));
+"#;
+
+fn fill(text: &str, service: &str, path: &str, iface: &str, method: &str) -> String {
+    text.replace("@SERVICE@", service)
         .replace("@PATH@", path)
         .replace("@IFACE@", iface)
         .replace("@METHOD@", method)
+}
+
+/// The pointer script's text, calling `method` on `service` at `path` of
+/// `iface` with one JSON string.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn cursor_script(service: &str, path: &str, iface: &str, method: &str) -> String {
+    fill(CURSOR_SCRIPT, service, path, iface, method)
+}
+
+/// The pointer from the cursor script's JSON: where it is (logical units)
+/// and the name of KWin's active screen. `None` when anything is missing or
+/// not a finite number.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn parse_cursor(json: &str) -> Option<(f32, f32, String)> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let n = |k: &str| {
+        v.get(k)?
+            .as_f64()
+            .map(|n| n as f32)
+            .filter(|n| n.is_finite())
+    };
+    let screen = v.get("screen")?.as_str()?.to_owned();
+    Some((n("x")?, n("y")?, screen))
 }
 
 /// Windows from the script's JSON (bottom to top, as KWin stacks them),
@@ -136,5 +169,25 @@ mod tests {
         ] {
             assert!(s.contains(needle), "{needle}");
         }
+    }
+
+    #[test]
+    fn kwin_cursor_parses() {
+        assert_eq!(
+            parse_cursor(r#"{"x":10.5,"y":20,"screen":"DP-1"}"#),
+            Some((10.5, 20.0, "DP-1".to_owned()))
+        );
+        assert_eq!(parse_cursor(r#"{"x":10.5,"y":20}"#), None);
+        assert_eq!(parse_cursor(r#"{"x":"a","y":20,"screen":"DP-1"}"#), None);
+        assert_eq!(parse_cursor("not json"), None);
+    }
+
+    #[test]
+    fn the_cursor_script_calls_back_with_position_and_screen() {
+        let s = cursor_script(":1.42", "/p", "org.x.I", "Report");
+        assert!(s.contains("workspace.cursorPos"), "{s}");
+        assert!(s.contains("workspace.activeScreen.name"), "{s}");
+        assert!(s.contains(r#"callDBus(":1.42", "/p", "org.x.I", "Report""#));
+        assert!(!s.contains('@'));
     }
 }
