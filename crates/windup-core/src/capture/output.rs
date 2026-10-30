@@ -102,6 +102,13 @@ pub fn default_video_dir() -> Option<PathBuf> {
         .map(|p| p.join("Windup"))
 }
 
+/// `<Documents>/Windup`, where Steps exports are saved by default.
+pub fn default_steps_dir() -> Option<PathBuf> {
+    directories::UserDirs::new()?
+        .document_dir()
+        .map(|p| p.join("Windup"))
+}
+
 /// Encodes to PNG, or to JPEG at quality 90 with transparency flattened onto black.
 pub fn encode(img: &RgbaImage, format: ImageFormat) -> Result<Vec<u8>, image::ImageError> {
     let mut out = Vec::new();
