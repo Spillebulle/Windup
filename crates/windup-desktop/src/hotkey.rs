@@ -233,6 +233,49 @@ fn match_binding(
         .map(|(_, _, a)| *a)
 }
 
+/// Print Screen's virtual-key code.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+const VK_SNAPSHOT: u16 = 0x2C;
+
+/// The bindings that are also registered with `RegisterHotKey`: those on
+/// Print Screen, which some Windows builds never show the hook (the key
+/// still takes its screenshot, and a registered hotkey still hears it).
+/// Each key and modifier set once, from every table. Where the hook does
+/// see the key it swallows the press, so the hotkey is not sent as well.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn hotkey_fallbacks(tables: &[&Table]) -> Vec<(u16, ShortcutModifiers)> {
+    let mut out: Vec<(u16, ShortcutModifiers)> = Vec::new();
+    for (vk, mods, _) in tables.iter().flat_map(|t| t.iter()) {
+        if *vk == VK_SNAPSHOT && !out.contains(&(*vk, *mods)) {
+            out.push((*vk, *mods));
+        }
+    }
+    out
+}
+
+/// `RegisterHotKey`'s modifier flags for `m`, with `MOD_NOREPEAT`: a held
+/// key fires once, as it does through the hook.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn hotkey_mods(m: ShortcutModifiers) -> u32 {
+    const MOD_ALT: u32 = 0x1;
+    const MOD_CONTROL: u32 = 0x2;
+    const MOD_SHIFT: u32 = 0x4;
+    const MOD_WIN: u32 = 0x8;
+    const MOD_NOREPEAT: u32 = 0x4000;
+    let mut flags = MOD_NOREPEAT;
+    for (on, flag) in [
+        (m.alt, MOD_ALT),
+        (m.ctrl, MOD_CONTROL),
+        (m.shift, MOD_SHIFT),
+        (m.super_key, MOD_WIN),
+    ] {
+        if on {
+            flags |= flag;
+        }
+    }
+    flags
+}
+
 /// What the hook does with one key event.
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,6 +443,15 @@ thread_local! {
     static HELD: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// The hook thread, which owns the registered hotkeys; told with
+/// [`WM_REBIND`] when the tables change. 0 until it runs.
+#[cfg(target_os = "windows")]
+static HOOK_THREAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// A thread message to the hook thread: register the hotkeys again.
+#[cfg(target_os = "windows")]
+const WM_REBIND: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
+
 #[cfg(target_os = "windows")]
 fn set_windows_tables(config: &Config) {
     use windup_core::hotkeys::session_bindings;
@@ -412,6 +464,84 @@ fn set_windows_tables(config: &Config) {
     if let Ok(mut table) = STEPS_BINDINGS.write() {
         *table = windows_table(&session_bindings(config, LiveKind::Steps));
     }
+    let thread = HOOK_THREAD.load(Ordering::SeqCst);
+    if thread != 0 {
+        // SAFETY: a plain thread message; a thread that is gone drops it.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+                thread, WM_REBIND, 0, 0,
+            );
+        }
+    }
+}
+
+/// Registers [`hotkey_fallbacks`] of the current tables on this thread,
+/// after letting go of the ones `held` had; returns what is now held, by
+/// hotkey id (its index plus one).
+#[cfg(target_os = "windows")]
+fn register_fallbacks(held: &[(u16, ShortcutModifiers)]) -> Vec<(u16, ShortcutModifiers)> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
+    for i in 0..held.len() {
+        // SAFETY: thread hotkeys this thread registered.
+        unsafe { UnregisterHotKey(std::ptr::null_mut(), i as i32 + 1) };
+    }
+    let wanted = match (
+        BINDINGS.read(),
+        RECORDING_BINDINGS.read(),
+        STEPS_BINDINGS.read(),
+    ) {
+        (Ok(t), Ok(v), Ok(s)) => hotkey_fallbacks(&[&t, &v, &s]),
+        _ => Vec::new(),
+    };
+    for (i, (vk, mods)) in wanted.iter().enumerate() {
+        // SAFETY: a thread hotkey (no window): WM_HOTKEY comes to this
+        // thread's queue.
+        let ok = unsafe {
+            RegisterHotKey(
+                std::ptr::null_mut(),
+                i as i32 + 1,
+                hotkey_mods(*mods),
+                *vk as u32,
+            )
+        };
+        if ok == 0 {
+            // Another program holds it; the hook may still see the key.
+            log::warn!("could not register hotkey vk 0x{vk:02X} {mods:?}");
+        }
+    }
+    wanted
+}
+
+/// A registered hotkey fired: the action it is bound to now, sent as the
+/// hook would send it.
+#[cfg(target_os = "windows")]
+fn fire_fallback((vk, held): (u16, ShortcutModifiers)) {
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, GetForegroundWindow,
+    };
+    let live = live_kind(LIVE.load(Ordering::SeqCst));
+    let action = match (
+        BINDINGS.read(),
+        RECORDING_BINDINGS.read(),
+        STEPS_BINDINGS.read(),
+    ) {
+        (Ok(t), Ok(v), Ok(s)) => match_key(&t, &v, &s, live, vk, held),
+        _ => None,
+    };
+    let Some(action) = action else {
+        return;
+    };
+    // SAFETY: plain queries, and a permission for this process.
+    let target = unsafe {
+        AllowSetForegroundWindow(GetCurrentProcessId());
+        Target::Hwnd(GetForegroundWindow() as isize)
+    };
+    if let Ok(guard) = EVENT_SENDER.lock()
+        && let Some(sender) = guard.as_ref()
+    {
+        let _ = sender.send(HotkeyEvent::from_action(action, target));
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -422,9 +552,11 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
 
     thread::spawn(move || {
         use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+        use windows_sys::Win32::System::Threading::GetCurrentThreadId;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetMessageW, MSG, SetWindowsHookExW,
-            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
+            CallNextHookEx, DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW,
+            SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_HOTKEY, WM_KEYDOWN,
+            WM_SYSKEYDOWN,
         };
 
         unsafe extern "system" fn low_level_keyboard_proc(
@@ -531,10 +663,26 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
             }
 
             let mut msg: MSG = std::mem::zeroed();
+            // The queue exists before the thread is named as the one to
+            // post to, and the tables are read after: no change is missed.
+            PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
+            HOOK_THREAD.store(GetCurrentThreadId(), Ordering::SeqCst);
+            let mut fallbacks = register_fallbacks(&[]);
             while running.load(Ordering::SeqCst)
                 && GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0
             {
-                DispatchMessageW(&msg);
+                match msg.message {
+                    WM_HOTKEY => {
+                        let id = msg.wParam;
+                        if let Some(key) = id.checked_sub(1).and_then(|i| fallbacks.get(i)) {
+                            fire_fallback(*key);
+                        }
+                    }
+                    WM_REBIND => fallbacks = register_fallbacks(&fallbacks),
+                    _ => {
+                        DispatchMessageW(&msg);
+                    }
+                }
             }
 
             UnhookWindowsHookEx(hook);
@@ -650,6 +798,29 @@ fn focused_window() -> Target {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn print_screen_bindings_are_also_registered_once() {
+        let none = ShortcutModifiers::NONE;
+        let tools = [
+            (VK_SNAPSHOT, none, Action::CaptureLauncher),
+            (0x56, WIN, Action::ClipboardPopup),
+        ];
+        let video = [(VK_SNAPSHOT, none, Action::RecordStop)];
+        let steps = [(VK_SNAPSHOT, WIN_SHIFT, Action::Step)];
+        assert_eq!(
+            hotkey_fallbacks(&[&tools, &video, &steps]),
+            vec![(VK_SNAPSHOT, none), (VK_SNAPSHOT, WIN_SHIFT)]
+        );
+        assert!(hotkey_fallbacks(&[&tools[1..]]).is_empty());
+    }
+
+    #[test]
+    fn hotkey_flags_follow_the_modifiers_and_never_repeat() {
+        assert_eq!(hotkey_mods(ShortcutModifiers::NONE), 0x4000);
+        assert_eq!(hotkey_mods(WIN_SHIFT), 0x4000 | 0x8 | 0x4);
+        assert_eq!(hotkey_mods(WIN_CTRL), 0x4000 | 0x8 | 0x2);
+    }
 
     #[test]
     fn a_rebind_keeps_the_grabs_both_lists_hold() {
