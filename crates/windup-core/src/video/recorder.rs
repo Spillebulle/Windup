@@ -64,6 +64,15 @@ impl Recorder {
         }
     }
 
+    /// The open segment failed at once and is being opened again: what it
+    /// ran for was not recorded, so its clock waits for `begin` once more.
+    /// Earlier segments' time stays.
+    pub fn rewait(&mut self) {
+        if self.state == RecState::Recording {
+            self.since = None;
+        }
+    }
+
     pub fn state(&self) -> RecState {
         self.state
     }
@@ -232,6 +241,24 @@ mod tests {
         assert_eq!(r.state(), RecState::Done);
         assert_eq!(r.segments(), &[0]);
         assert_eq!(r.elapsed(31.0), 4.0);
+    }
+
+    #[test]
+    fn a_retried_segment_does_not_count_the_failed_attempt() {
+        let mut r = Recorder::start(0.0);
+        r.pause(2.0);
+        r.resume(3.0);
+        // The attempt dies at 3.8 and is opened again, the source taking
+        // until 5.0 to give a picture.
+        r.rewait();
+        assert_eq!(r.state(), RecState::Recording);
+        assert_eq!(r.elapsed(4.5), 2.0);
+        r.begin(5.0);
+        assert_eq!(r.elapsed(6.0), 3.0);
+        assert_eq!(r.stop(6.0), Finish::Join(vec![0, 1]));
+        // Nothing to wait for once paused or done.
+        r.rewait();
+        assert_eq!(r.elapsed(9.0), 3.0);
     }
 
     #[test]

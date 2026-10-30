@@ -746,9 +746,15 @@ impl Run {
                     self.source_fell_back = true;
                 }
             }
+            // The failed attempt recorded nothing, and the retry may wait on
+            // its source again (the portal), so the timer holds until then.
+            if let Ok(mut r) = self.shared.recorder.lock() {
+                r.rewait();
+            }
             match self.open_segment(index) {
                 Ok(seg) => {
                     self.seg = Some(seg);
+                    self.begin_clock();
                     return;
                 }
                 Err(e) => why = e,
