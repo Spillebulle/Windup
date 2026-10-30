@@ -10,6 +10,7 @@ mod paste;
 mod platform;
 mod recording;
 mod setup;
+mod steps;
 mod video;
 
 use eframe::egui;
@@ -813,6 +814,18 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    // Exports a Steps session folder; for the end-to-end tests. No window.
+    if std::env::args().nth(1).as_deref() == Some("--steps-export") {
+        match windup_core::ipc::parse_args(std::env::args().skip(1)) {
+            windup_core::ipc::Launch::StepsExport(job) => std::process::exit(steps_export(&job)),
+            windup_core::ipc::Launch::Unknown(why) => {
+                eprintln!("windup: {why}");
+                std::process::exit(2);
+            }
+            _ => {}
+        }
+    }
+
     #[cfg(target_os = "linux")]
     let Some(startup) = linux_startup() else {
         return Ok(());
@@ -820,6 +833,9 @@ fn main() -> eframe::Result<()> {
     // Segment folders a Windup that died while recording left behind.
     #[cfg(not(target_os = "linux"))]
     video::run::remove_stale_segments();
+    // ... and Steps session folders.
+    #[cfg(not(target_os = "linux"))]
+    steps::live::remove_stale_sessions();
     #[cfg(not(target_os = "linux"))]
     let startup = Startup {
         plan: if cfg!(target_os = "windows") {
@@ -878,6 +894,23 @@ fn window_rects_test() -> i32 {
     0
 }
 
+/// `windup --steps-export <dir> <format> <out>`: the session in `dir`
+/// exported as the review would, with the saved marker style. Prints what
+/// was written.
+fn steps_export(job: &windup_core::ipc::StepsExport) -> i32 {
+    let style = Config::load().steps.marker;
+    match windup_core::steps::export::export(&job.dir, job.format, &style, &job.out) {
+        Ok(path) => {
+            println!("{}", path.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("windup: {e}");
+            1
+        }
+    }
+}
+
 /// `windup --capture-test out.png`: the whole desktop as one PNG. The exit
 /// code is the process's.
 fn capture_test(path: &std::path::Path) -> i32 {
@@ -932,7 +965,8 @@ fn linux_startup() -> Option<Startup> {
         Launch::CaptureTest(_)
         | Launch::WindowRectsTest
         | Launch::EncodersTest
-        | Launch::RecordTest(_) => return None,
+        | Launch::RecordTest(_)
+        | Launch::StepsExport(_) => return None,
         Launch::Unknown(why) => {
             eprintln!("windup: {why}\n\n{}", ipc::USAGE);
             std::process::exit(2);
@@ -974,6 +1008,7 @@ fn linux_startup() -> Option<Startup> {
     // The one Windup on this display: segment folders a Windup that died
     // while recording left behind are removed.
     video::run::remove_stale_segments();
+    steps::live::remove_stale_sessions();
 
     let plan = linux::detect();
     let listener = if plan.host != platform::Host::Viewport {

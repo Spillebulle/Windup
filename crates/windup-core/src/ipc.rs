@@ -7,6 +7,7 @@
 //! socket itself is in `windup-desktop`.
 
 use crate::hotkeys::Action;
+use crate::steps::options::ExportFormat;
 use crate::video::Container;
 use std::path::PathBuf;
 
@@ -131,6 +132,9 @@ pub enum Launch {
     /// pattern), with sound if asked, for N seconds, write the file, exit. A
     /// test aid, so not in `USAGE`.
     RecordTest(RecordTest),
+    /// `--steps-export <dir> <html|pdf|md|images> <out>`: export a session
+    /// folder, exit. A test aid, so not in `USAGE`.
+    StepsExport(StepsExport),
     /// `--help`.
     Help,
     /// Something we do not understand; the text says what.
@@ -172,6 +176,30 @@ pub struct RecordTest {
     pub system_audio: bool,
     /// Record the microphone (the default input device).
     pub mic: bool,
+}
+
+/// What `--steps-export` was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepsExport {
+    /// The session folder, holding `steps.json`.
+    pub dir: PathBuf,
+    pub format: ExportFormat,
+    /// The file (HTML, PDF) or folder (Markdown, images) to write.
+    pub out: PathBuf,
+}
+
+fn parse_steps_export(rest: &[String]) -> Launch {
+    let [dir, format, out] = rest else {
+        return Launch::Unknown("--steps-export needs a folder, a format and an output".into());
+    };
+    match ExportFormat::from_arg(format) {
+        Some(format) => Launch::StepsExport(StepsExport {
+            dir: PathBuf::from(dir),
+            format,
+            out: PathBuf::from(out),
+        }),
+        None => Launch::Unknown(format!("unknown export format '{format}'")),
+    }
 }
 
 fn parse_record_test(rest: &[String]) -> Launch {
@@ -261,6 +289,11 @@ where
     {
         return parse_record_test(rest);
     }
+    if let [flag, rest @ ..] = args.as_slice()
+        && flag == "--steps-export"
+    {
+        return parse_steps_export(rest);
+    }
     match args.as_slice() {
         [] => Launch::App,
         [one] => match one.as_str() {
@@ -348,6 +381,38 @@ mod tests {
         for flag in ["--steps", "--step", "--steps-stop"] {
             assert!(USAGE.contains(flag), "{flag}");
         }
+    }
+
+    #[test]
+    fn steps_export_flag_parses() {
+        assert_eq!(
+            parse_args(["--steps-export", "/d", "html", "/o.html"]),
+            Launch::StepsExport(StepsExport {
+                dir: PathBuf::from("/d"),
+                format: ExportFormat::Html,
+                out: PathBuf::from("/o.html"),
+            })
+        );
+        assert_eq!(
+            parse_args(["--steps-export", "/d", "images", "/o"]),
+            Launch::StepsExport(StepsExport {
+                dir: PathBuf::from("/d"),
+                format: ExportFormat::Images,
+                out: PathBuf::from("/o"),
+            })
+        );
+        assert!(matches!(
+            parse_args(["--steps-export", "/d", "doc", "/o.doc"]),
+            Launch::Unknown(_)
+        ));
+        for bad in [
+            &["--steps-export"][..],
+            &["--steps-export", "/d", "html"],
+            &["--steps-export", "/d", "html", "/o", "x"],
+        ] {
+            assert!(matches!(parse_args(bad), Launch::Unknown(_)), "{bad:?}");
+        }
+        assert!(!USAGE.contains("steps-export"));
     }
 
     #[test]

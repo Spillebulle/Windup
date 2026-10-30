@@ -5110,6 +5110,7 @@ dependencies = [
  "futures-util",
  "global-hotkey",
  "image",
+ "jiff",
  "log",
  "pipewire",
  "pollster",
