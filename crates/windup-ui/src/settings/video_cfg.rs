@@ -6,11 +6,14 @@ use super::capture_cfg::{hotkey_note, shortcut_row};
 use super::{EscCaution, HotkeyHint};
 use crate::capture::bar::{bitrate_label, colours_label, fps_label};
 use crate::theme::{Mode, Palette, metrics, text};
-use crate::widgets::{button, dropdown, eyebrow, row, shortcut_badge, shortcut_recorder, toggle};
+use crate::widgets::{
+    button, caution_keycap, dropdown, eyebrow, row, shortcut_badge, shortcut_recorder, toggle,
+};
 use egui::{RichText, Ui};
 use windup_core::Config;
 use windup_core::capture::output;
 use windup_core::config::VideoConfig;
+use windup_core::hotkeys::{self, Action};
 use windup_core::shortcut::Shortcut;
 use windup_core::tool::ToolId;
 use windup_core::video::avail::{
@@ -196,6 +199,11 @@ pub fn render(
         config.save();
     }
 
+    // The stop key is the Video key, whose row above already warns.
+    let pause_clash = hotkeys::recording_clashes(config)
+        .into_iter()
+        .find(|(action, _)| *action == Action::RecordPause)
+        .map(|(_, tool)| tool.display_name());
     let default_pause = Shortcut::super_shift_p();
     row(
         ui,
@@ -213,6 +221,10 @@ pub fn render(
             ) {
                 config.video.pause_shortcut = pause;
                 config.save();
+            }
+            if let Some(name) = pause_clash {
+                caution_keycap(ui, p, &format!("Also used by {name}"))
+                    .on_hover_text("While a recording runs, these keys pause it instead.");
             }
         },
     );
