@@ -85,7 +85,9 @@ pub(crate) struct StillSlot {
     /// When `cursor` last changed (a count shared by the streams), to choose
     /// between two streams that both still hold a position.
     pub(crate) cursor_stamp: u64,
-    /// A shot asked: the next frame is copied whatever its age.
+    /// A shot asked: the next picture, or the one held, is copied whatever
+    /// its age. Cleared once copied, or when nothing newer than the last
+    /// copy is held (that copy is then the screen as it is).
     pub(crate) want_now: bool,
 }
 
@@ -535,9 +537,17 @@ impl ScreenCastStills {
         }
     }
 
-    /// Stream `i`'s newest frame and when it was copied.
-    pub(crate) fn frame(&self, i: usize) -> Option<(RgbaImage, Instant)> {
-        self.lock().get(i)?.frame.clone()
+    /// When stream `i`'s newest frame was copied, and whether a shot's ask
+    /// is still unanswered. Cheap: no picture is copied.
+    pub(crate) fn frame_state(&self, i: usize) -> (Option<Instant>, bool) {
+        self.lock().get(i).map_or((None, false), |s| {
+            (s.frame.as_ref().map(|(_, at)| *at), s.want_now)
+        })
+    }
+
+    /// Stream `i`'s newest frame.
+    pub(crate) fn frame(&self, i: usize) -> Option<RgbaImage> {
+        Some(self.lock().get(i)?.frame.as_ref()?.0.clone())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<StillSlot>> {

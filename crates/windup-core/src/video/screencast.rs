@@ -182,11 +182,70 @@ pub fn token_change(saved: Option<&str>, returned: Option<&str>) -> TokenChange 
 /// no new frames) is at most this old.
 pub const STILL_EVERY: Duration = Duration::from_millis(100);
 
-/// Whether a stream copies the frame that just arrived: always the first one
-/// after a shot asked (`wanted`), else at most once per `STILL_EVERY` since
-/// the last copy (`last`).
+/// Whether a stream copies a picture now: always when a shot asked
+/// (`wanted`), else at most once per `STILL_EVERY` since the last copy
+/// (`last`).
 pub fn copy_still(last: Option<Instant>, now: Instant, wanted: bool) -> bool {
     wanted || last.is_none_or(|t| now.saturating_duration_since(t) >= STILL_EVERY)
+}
+
+/// When a Steps stream copies its pictures. A compositor sends frames only
+/// when something changed, so the last picture of a burst may be the last
+/// for a long time: it must not be lost to the throttle. A picture that
+/// arrives too soon is held (the stream keeps its buffer, in place of the
+/// one held before) and copied once it is due, by the loop's timer
+/// (`tick`), unless a newer one comes first. Buffers that carry only the
+/// cursor are not pictures and never reach this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StillPace {
+    last: Option<Instant>,
+    held: bool,
+}
+
+/// What the loop's timer does for one stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StillTick {
+    /// Copy the held picture and give its buffer back.
+    CopyHeld,
+    /// A shot asked and nothing newer than the last copy is held: that copy
+    /// is the screen as it is.
+    Answer,
+    Wait,
+}
+
+impl StillPace {
+    /// A picture arrived: true to copy it now (and give back any held one),
+    /// false to hold it in place of the one held before.
+    pub fn picture(&mut self, now: Instant, wanted: bool) -> bool {
+        let copy = copy_still(self.last, now, wanted);
+        if copy {
+            self.last = Some(now);
+        }
+        self.held = !copy;
+        copy
+    }
+
+    /// The loop's timer.
+    pub fn tick(&mut self, now: Instant, wanted: bool) -> StillTick {
+        if self.held && copy_still(self.last, now, wanted) {
+            self.last = Some(now);
+            self.held = false;
+            StillTick::CopyHeld
+        } else if wanted && !self.held {
+            StillTick::Answer
+        } else {
+            StillTick::Wait
+        }
+    }
+
+    /// The held buffer went away (the stream took its buffers back).
+    pub fn lost_held(&mut self) {
+        self.held = false;
+    }
+
+    pub fn holds(&self) -> bool {
+        self.held
+    }
 }
 
 /// The pointer in a stream's frame of `size` pixels, from the stream's
@@ -204,14 +263,16 @@ pub fn cursor_in_stream(id: u32, position: (i32, i32), size: (u32, u32)) -> Opti
 /// hold the frame (`frame_view` says so).
 pub fn still_rgba(bytes: &[u8], stride: usize, w: u32, h: u32, format: ShmVideoFormat) -> Vec<u8> {
     let row = w as usize * 4;
+    let swap = format.order() == Order::Bgra;
     let mut out = Vec::with_capacity(row * h as usize);
     for y in 0..h as usize {
-        let line = &bytes[y * stride..y * stride + row];
-        for px in line.as_chunks::<4>().0 {
-            match format.order() {
-                Order::Bgra => out.extend_from_slice(&[px[2], px[1], px[0], 255]),
-                Order::Rgba => out.extend_from_slice(&[px[0], px[1], px[2], 255]),
+        let start = out.len();
+        out.extend_from_slice(&bytes[y * stride..y * stride + row]);
+        for px in out[start..].as_chunks_mut::<4>().0 {
+            if swap {
+                px.swap(0, 2);
             }
+            px[3] = 255;
         }
     }
     out
@@ -393,6 +454,42 @@ mod tests {
         assert!(!copy_still(Some(t), t + Duration::from_millis(99), false));
         assert!(copy_still(Some(t), t + STILL_EVERY, false));
         assert!(copy_still(Some(t), t + Duration::from_millis(1), true));
+    }
+
+    #[test]
+    fn the_last_picture_of_a_burst_is_held_then_copied() {
+        let t = Instant::now();
+        let ms = |n| t + Duration::from_millis(n);
+        let mut pace = StillPace::default();
+        assert!(pace.picture(t, false), "the first is copied");
+        assert!(!pace.picture(ms(30), false), "too soon: held");
+        assert!(!pace.picture(ms(60), false), "a newer one held instead");
+        assert!(pace.holds());
+        assert_eq!(pace.tick(ms(80), false), StillTick::Wait);
+        // The burst is over and nothing more comes: the timer copies it.
+        assert_eq!(pace.tick(ms(100), false), StillTick::CopyHeld);
+        assert!(!pace.holds());
+        assert_eq!(pace.tick(ms(500), false), StillTick::Wait);
+        // Due when it arrives: copied at once.
+        assert!(pace.picture(ms(600), false));
+    }
+
+    #[test]
+    fn a_shot_takes_the_held_picture_or_the_last_copy_at_once() {
+        let t = Instant::now();
+        let ms = |n| t + Duration::from_millis(n);
+        let mut pace = StillPace::default();
+        assert!(pace.picture(t, false));
+        assert!(!pace.picture(ms(10), false));
+        assert_eq!(pace.tick(ms(20), true), StillTick::CopyHeld);
+        // Nothing held: the last copy is the screen as it is.
+        assert_eq!(pace.tick(ms(30), true), StillTick::Answer);
+        // A picture arriving while a shot waits is copied at once.
+        assert!(pace.picture(ms(31), true));
+        // A held buffer the stream took back is no longer held.
+        assert!(!pace.picture(ms(40), false));
+        pace.lost_held();
+        assert_eq!(pace.tick(ms(200), false), StillTick::Wait);
     }
 
     #[test]

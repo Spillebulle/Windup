@@ -36,8 +36,8 @@ use windup_core::capture::geometry::DRect;
 use windup_core::video::Composer;
 use windup_core::video::compose::Buffer;
 use windup_core::video::screencast::{
-    ShmVideoFormat, copy_still, covered_by, cursor_in_stream, frame_view, layout_from_streams,
-    still_rgba, stream_scale,
+    ShmVideoFormat, StillPace, StillTick, covered_by, cursor_in_stream, frame_view,
+    layout_from_streams, still_rgba, stream_scale,
 };
 
 use super::screencast::{PortalStream, STOPPED, Want};
@@ -46,6 +46,9 @@ use crate::video::outcome::SCREENS_NOT_SHARED;
 
 /// Longest the streams may take to agree a format and say their size.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often the Steps timer looks for a held picture that is due or a shot
+/// that waits.
+const STILLS_TICK: Duration = Duration::from_millis(20);
 
 /// The running streams. Dropping it stops the loop and waits for the thread.
 pub(super) struct PwStream {
@@ -250,6 +253,10 @@ struct Feed {
     mainloop: pw::main_loop::WeakMainLoop,
     /// Counts cursor changes across the streams (`StillSlot::cursor_stamp`).
     cursor_clock: u64,
+    /// Steps: each stream's newest picture not copied yet, its buffer kept
+    /// from the stream until it is (null for none), and when to copy.
+    held: Vec<RawBuffer>,
+    pace: Vec<StillPace>,
 }
 
 impl Feed {
@@ -388,49 +395,43 @@ impl Feed {
         }
     }
 
-    /// Stream `i`'s newest buffer, for stills: copied when a shot asked or
-    /// the last copy is `STILL_EVERY` old.
-    fn still(&mut self, i: usize, data: &mut spa::buffer::Data) {
-        let (Want::Stills(slots), Some(Some((format, w, h)))) =
-            (&self.want, self.formats.get(i).copied())
-        else {
-            return;
+    /// Whether `data` holds a whole picture of stream `i`: a buffer with
+    /// only the cursor in it (empty or corrupted) does not. A buffer Windup
+    /// cannot read ends the stream.
+    fn is_picture(&mut self, i: usize, data: &mut spa::buffer::Data) -> bool {
+        let Some(Some((_, w, h))) = self.formats.get(i).copied() else {
+            return false;
         };
-        // Its own handle: `fail` below needs all of `self`.
-        let slots = Arc::clone(slots);
-        let now = Instant::now();
-        {
-            let slots = slots.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(slot) = slots.get(i) else {
-                return;
-            };
-            if !copy_still(slot.frame.as_ref().map(|f| f.1), now, slot.want_now) {
-                return;
-            }
-        }
         let kind = data.type_();
         if kind != DataType::MemPtr && kind != DataType::MemFd {
             self.fail(format!(
                 "PipeWire sent {kind:?} buffers, which Windup cannot read."
             ));
-            return;
+            return false;
         }
-        let chunk = data.chunk();
-        let (offset, stride, size, corrupted) = (
-            chunk.offset(),
-            chunk.stride(),
-            chunk.size(),
-            chunk.flags().contains(ChunkFlags::CORRUPTED),
-        );
+        let (offset, stride, size, corrupted) = chunk_of(data);
+        data.data().is_some_and(|bytes| {
+            frame_view(offset, stride, size, corrupted, bytes.len(), w, h).is_some()
+        })
+    }
+
+    /// Copies the picture in `data` to stream `i`'s slot, answering a shot
+    /// that waits for it.
+    fn copy(&mut self, i: usize, data: &mut spa::buffer::Data, now: Instant) {
+        let (Want::Stills(slots), Some(Some((format, w, h)))) =
+            (&self.want, self.formats.get(i).copied())
+        else {
+            return;
+        };
+        let (offset, stride, size, corrupted) = chunk_of(data);
         let Some(bytes) = data.data() else {
             return;
         };
-        // A buffer with only the cursor in it has no picture: wait for one.
         let Some((start, stride)) = frame_view(offset, stride, size, corrupted, bytes.len(), w, h)
         else {
             return;
         };
-        // Converted outside the lock, so a shot waiting is not held up.
+        // Converted outside the lock, so a shot looking is not held up.
         let rgba = still_rgba(&bytes[start..], stride, w, h, format);
         let Some(image) = image::RgbaImage::from_raw(w, h, rgba) else {
             return;
@@ -441,56 +442,163 @@ impl Feed {
             slot.want_now = false;
         }
     }
+
+    /// Whether a shot waits on stream `i`.
+    fn wanted(&self, i: usize) -> bool {
+        match &self.want {
+            Want::Stills(slots) => slots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(i)
+                .is_some_and(|s| s.want_now),
+            Want::Compose(_) => false,
+        }
+    }
+
+    /// A shot on stream `i` is answered by the copy there is.
+    fn answer(&self, i: usize) {
+        if let Want::Stills(slots) = &self.want
+            && let Some(slot) = slots.lock().unwrap_or_else(|e| e.into_inner()).get_mut(i)
+        {
+            slot.want_now = false;
+        }
+    }
 }
 
-/// Every buffer waiting on Steps stream `i`, oldest first: the cursor
-/// metadata of each is read, the picture of the newest only, and all go
-/// back to the stream.
-fn drain_stills(stream: &pw::stream::StreamRef, i: usize, feed: &RefCell<Feed>) {
+/// A chunk's offset, stride, size and whether it is corrupted.
+fn chunk_of(data: &spa::buffer::Data) -> (u32, i32, u32, bool) {
+    let chunk = data.chunk();
+    (
+        chunk.offset(),
+        chunk.stride(),
+        chunk.size(),
+        chunk.flags().contains(ChunkFlags::CORRUPTED),
+    )
+}
+
+/// A Steps stream's buffer, taken raw: the pipewire crate's `Buffer` gives
+/// no way to a buffer's metadata, nor to keep one past a callback.
+type RawBuffer = *mut pw::sys::pw_buffer;
+
+/// A cursor metadata block's id and position.
+type CursorMeta = (u32, (i32, i32));
+
+/// The cursor metadata and the first data block of `b`.
+///
+/// # Safety
+///
+/// `b` is non-null, was dequeued from its stream and has not been given
+/// back, and the stream has not taken it back (`remove_buffer`). The data
+/// block lives as long as that holds; the caller drops it before then.
+unsafe fn open_buffer<'a>(b: RawBuffer) -> (Option<CursorMeta>, Option<&'a mut spa::buffer::Data>) {
     use spa::sys::{SPA_META_Cursor, spa_buffer_find_meta_data, spa_meta_cursor};
-    let mut feed = feed.borrow_mut();
-    // SAFETY: the pipewire crate's `Buffer` gives no way to the buffer's
-    // metadata, so the buffers are taken raw. Each pointer comes from
-    // `dequeue_raw_buffer` on this stream, is checked for null, and is
-    // queued back exactly once, after its last use and before this returns;
-    // no reference into it outlives that. `spa_buffer_find_meta_data`
-    // returns null unless the buffer has a cursor block at least as big as
+    // SAFETY: per the contract `b` points at a live `pw_buffer`, whose
+    // `spa_buffer` is checked for null. `spa_buffer_find_meta_data` returns
+    // null unless the buffer has a cursor block at least as big as
     // `spa_meta_cursor`, which is all that is read of it. `Data` is
     // `repr(transparent)` over `spa_data`, as `Buffer::datas_mut` relies on,
     // and the stream maps the buffers (`MAP_BUFFERS`).
     unsafe {
-        let mut newest: *mut pw::sys::pw_buffer = std::ptr::null_mut();
-        loop {
-            let b = stream.dequeue_raw_buffer();
-            if b.is_null() {
-                break;
-            }
-            if !newest.is_null() {
-                stream.queue_raw_buffer(newest);
-            }
-            newest = b;
-            let spa = (*b).buffer;
-            if spa.is_null() {
-                continue;
-            }
-            let meta = spa_buffer_find_meta_data(
-                spa,
-                SPA_META_Cursor,
-                std::mem::size_of::<spa_meta_cursor>(),
-            ) as *const spa_meta_cursor;
-            if let Some(c) = meta.as_ref() {
-                feed.cursor(i, c.id, (c.position.x, c.position.y));
-            }
+        let spa = (*b).buffer;
+        if spa.is_null() {
+            return (None, None);
         }
-        if newest.is_null() {
-            return;
+        let meta =
+            spa_buffer_find_meta_data(spa, SPA_META_Cursor, std::mem::size_of::<spa_meta_cursor>())
+                as *const spa_meta_cursor;
+        let cursor = meta.as_ref().map(|c| (c.id, (c.position.x, c.position.y)));
+        let data = ((*spa).n_datas > 0 && !(*spa).datas.is_null())
+            .then(|| &mut *((*spa).datas as *mut spa::buffer::Data));
+        (cursor, data)
+    }
+}
+
+/// Gives `b` back to `stream`, which it was dequeued from.
+fn give_back(stream: &pw::stream::StreamRef, b: RawBuffer) {
+    // SAFETY: every caller passes a buffer dequeued from this stream that is
+    // not given back yet and that the stream has not taken back, and forgets
+    // it after this.
+    unsafe { stream.queue_raw_buffer(b) }
+}
+
+/// Every buffer waiting on Steps stream `i`, oldest first. The cursor
+/// metadata of each is read. A buffer with only the cursor in it goes back
+/// at once and never touches the picture held. A picture is copied when
+/// due (`StillPace`), and otherwise held in place of the one held before,
+/// for the timer (`tick_stills`) or a shot to copy.
+fn drain_stills(stream: &pw::stream::StreamRef, i: usize, feed: &RefCell<Feed>) {
+    let mut feed = feed.borrow_mut();
+    let now = Instant::now();
+    loop {
+        // SAFETY: dequeued from this stream; checked for null before use.
+        let b = unsafe { stream.dequeue_raw_buffer() };
+        if b.is_null() {
+            break;
         }
-        let spa = (*newest).buffer;
-        if !spa.is_null() && (*spa).n_datas > 0 && !(*spa).datas.is_null() {
-            let data = &mut *((*spa).datas as *mut spa::buffer::Data);
-            feed.still(i, data);
+        // SAFETY: `b` was just dequeued and is given back or held below.
+        let (cursor, data) = unsafe { open_buffer(b) };
+        if let Some((id, position)) = cursor {
+            feed.cursor(i, id, position);
         }
-        stream.queue_raw_buffer(newest);
+        let Some(data) = data.filter(|_| i < feed.held.len()) else {
+            give_back(stream, b);
+            continue;
+        };
+        if !feed.is_picture(i, data) {
+            give_back(stream, b);
+            continue;
+        }
+        let wanted = feed.wanted(i);
+        let old = std::mem::replace(&mut feed.held[i], std::ptr::null_mut());
+        if !old.is_null() {
+            give_back(stream, old);
+        }
+        if feed.pace[i].picture(now, wanted) {
+            feed.copy(i, data, now);
+            give_back(stream, b);
+        } else {
+            feed.held[i] = b;
+        }
+    }
+}
+
+/// The loop's timer for Steps: copies each held picture once it is due or
+/// a shot asks, and answers a shot when nothing newer is held.
+fn tick_stills(streams: &[Rc<pw::stream::Stream>], feed: &RefCell<Feed>) {
+    let mut feed = feed.borrow_mut();
+    let now = Instant::now();
+    for (i, stream) in streams.iter().enumerate() {
+        if i >= feed.held.len() {
+            break;
+        }
+        let wanted = feed.wanted(i);
+        match feed.pace[i].tick(now, wanted) {
+            StillTick::CopyHeld => {
+                let b = std::mem::replace(&mut feed.held[i], std::ptr::null_mut());
+                if b.is_null() {
+                    continue;
+                }
+                // SAFETY: held buffers were dequeued from this stream and
+                // are dropped from `held` when the stream takes them back.
+                if let (_, Some(data)) = unsafe { open_buffer(b) } {
+                    feed.copy(i, data, now);
+                }
+                give_back(stream, b);
+            }
+            StillTick::Answer => feed.answer(i),
+            StillTick::Wait => {}
+        }
+    }
+}
+
+/// Gives back every held buffer, before the streams go.
+fn release_held(streams: &[Rc<pw::stream::Stream>], feed: &RefCell<Feed>) {
+    let mut feed = feed.borrow_mut();
+    for (stream, held) in streams.iter().zip(feed.held.iter_mut()) {
+        let b = std::mem::replace(held, std::ptr::null_mut());
+        if !b.is_null() {
+            give_back(stream, b);
+        }
     }
 }
 
@@ -523,6 +631,8 @@ fn run(
         latest: Arc::clone(latest),
         mainloop: mainloop.downgrade(),
         cursor_clock: 0,
+        held: vec![std::ptr::null_mut(); if stills { streams.len() } else { 0 }],
+        pace: vec![StillPace::default(); streams.len()],
     }));
     let _core_listener = core
         .add_listener_local()
@@ -591,14 +701,35 @@ fn run(
                         return;
                     };
                     let size = info.size();
-                    feed.borrow_mut()
-                        .format(*i, format, size.width, size.height);
+                    let mut fed = feed.borrow_mut();
+                    // A held picture is of the old format: give it back
+                    // before the buffers change.
+                    if let Some(held) = fed.held.get_mut(*i) {
+                        let b = std::mem::replace(held, std::ptr::null_mut());
+                        if !b.is_null() {
+                            give_back(stream, b);
+                            fed.pace[*i].lost_held();
+                        }
+                    }
+                    fed.format(*i, format, size.width, size.height);
+                    drop(fed);
                     if let Some(pod) = meta.as_deref().and_then(Pod::from_bytes)
                         && let Err(e) = stream.update_params(&mut [pod])
                     {
                         // The stills still come; only the pointer's place
                         // does not.
                         log::warn!("PipeWire: no cursor metadata: {e}");
+                    }
+                }
+            })
+            .remove_buffer({
+                let feed = Rc::clone(&feed);
+                move |_, i, b| {
+                    // The stream took back the buffer held: forget it.
+                    let mut fed = feed.borrow_mut();
+                    if fed.held.get(*i).is_some_and(|h| *h == b) {
+                        fed.held[*i] = std::ptr::null_mut();
+                        fed.pace[*i].lost_held();
                     }
                 }
             })
@@ -652,8 +783,17 @@ fn run(
             )
             .map_err(err)?;
         // The listener first, so it is dropped before its stream.
-        running.push((listener, stream));
+        running.push((listener, Rc::new(stream)));
     }
+    let handles: Vec<Rc<pw::stream::Stream>> = running.iter().map(|(_, s)| Rc::clone(s)).collect();
+    let timer = stills.then(|| {
+        let timer = mainloop.loop_().add_timer({
+            let (feed, handles) = (Rc::clone(&feed), handles.clone());
+            move |_| tick_stills(&handles, &feed)
+        });
+        let _ = timer.update_timer(Some(STILLS_TICK), Some(STILLS_TICK));
+        timer
+    });
 
     let _stop = stop.attach(mainloop.loop_(), {
         let mainloop = mainloop.downgrade();
@@ -664,6 +804,10 @@ fn run(
         }
     });
     mainloop.run();
+    // The timer and the held buffers go before the streams.
+    drop(timer);
+    release_held(&handles, &feed);
+    drop(handles);
     drop(running);
     Ok(())
 }
