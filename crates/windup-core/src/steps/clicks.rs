@@ -11,7 +11,7 @@ pub const DOUBLE_CLICK_SECS: f64 = 0.4;
 pub const DOUBLE_CLICK_POINTS: f32 = 4.0;
 
 /// A touch is a tap when it is lifted within this long ...
-const TAP_SECS: f64 = 0.25;
+const TAP_SECS: f64 = 0.18;
 /// ... having moved no further than this.
 const TAP_MM: f32 = 3.0;
 
@@ -49,6 +49,9 @@ impl ClickFilter {
                 _ => true,
             };
             if near {
+                // A triple click is still one step: the drop counts as the
+                // latest press.
+                self.last = Some(p);
                 return false;
             }
         }
@@ -315,6 +318,29 @@ mod tests {
             ..blind(0.3)
         };
         assert!(f.accept(right, 1.0, false, false));
+    }
+
+    #[test]
+    fn a_triple_click_is_one_step() {
+        let mut f = ClickFilter::default();
+        let p = |t| Press {
+            button: Button::Left,
+            at: Some([10.0, 10.0]),
+            t,
+        };
+        assert!(f.accept(p(0.0), 1.0, false, false));
+        assert!(!f.accept(p(0.3), 1.0, false, false));
+        assert!(!f.accept(p(0.6), 1.0, false, false));
+        assert!(f.accept(p(1.2), 1.0, false, false));
+    }
+
+    #[test]
+    fn a_tap_is_at_most_180_ms() {
+        let mut t = TapDetector::default();
+        t.touch(true, 1, [0.0, 0.0], 0.0);
+        assert!(t.touch(false, 0, [0.0, 0.0], 0.17));
+        t.touch(true, 1, [0.0, 0.0], 1.0);
+        assert!(!t.touch(false, 0, [0.0, 0.0], 1.2));
     }
 
     #[test]
