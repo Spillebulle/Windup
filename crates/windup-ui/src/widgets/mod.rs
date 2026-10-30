@@ -8,7 +8,7 @@ pub mod toggle;
 
 pub use badge::{caution_keycap, shortcut_badge, shortcut_recorder};
 pub use button::button;
-pub use dropdown::dropdown;
+pub use dropdown::{dropdown, dropdown_gated};
 pub use row::{eyebrow, row};
 pub use segmented::segmented;
 pub use slider::{slider, slider_usize};

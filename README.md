@@ -12,11 +12,13 @@
 
 <p align="center">
   Clipboard history at your cursor · plain-text paste · screenshots with an
-  editor · screen recording · one settings window · runs in the background
+  editor · screen recording · step-by-step guides · one settings window · runs
+  in the background
 </p>
 
-> **Early days.** Five tools work, on Windows and on Linux: clipboard history,
-> plain-text paste, two ways to take a screenshot and screen recording. [What is not there yet](#what-is-not-there-yet) is honest about the
+> **Early days.** Six tools work, on Windows and on Linux: clipboard history,
+> plain-text paste, two ways to take a screenshot, screen recording and
+> step-by-step guides. [What is not there yet](#what-is-not-there-yet) is honest about the
 > rest.
 
 ## Install
@@ -89,6 +91,19 @@ MP4 unless you choose WebM, MOV, MKV or a GIF, encoded on the graphics card
 where it can be. The Video settings pane has the codec, the encoder and the
 sound devices.
 
+## Steps
+
+Press Win+Shift+G (Super+Shift+G) and Windup records a step-by-step guide:
+every click takes a picture of the screen under the pointer, with a marker
+where you clicked, and Win+Shift+X takes a step by hand. A small bar counts
+the steps and stays out of the pictures. Press the same keys again to stop,
+and a review opens: give each step a caption, remove the ones you do not
+want, or open one in the editor to blur or point something out. Export it as
+one web page with the pictures inside, a PDF, Markdown with an images folder,
+or just the numbered pictures, to Documents, Windup. Esc throws the steps
+away. On Wayland, clicks need a one-time setup, which the packages do for
+you; [`docs/linux.md`](docs/linux.md) says how.
+
 ## What is not there yet
 
 - **No tray icon, and no start at sign-in on Windows.** Both settings are
@@ -112,12 +127,14 @@ sound devices.
 | Print Screen | Open the capture bar |
 | Ctrl+Shift+S | Take a screenshot at once |
 | Win+Shift+R, Super+Shift+R | Start a recording, or stop it |
-| Win+Shift+P, Super+Shift+P | Pause or resume a recording |
+| Win+Shift+P, Super+Shift+P | Pause or resume a recording, or Steps |
+| Win+Shift+G, Super+Shift+G | Start recording steps, or stop and review them |
+| Win+Shift+X, Super+Shift+X | Take a step by hand |
 | Type | Search the history |
 | Up, Down | Move through the history |
 | Enter | Paste the selected entry |
 | Delete | Remove the selected entry |
-| Esc | Close the popup, or cancel a recording |
+| Esc | Close the popup, or cancel a recording or Steps |
 
 Every tool can be switched off in the settings window, and every shortcut
 changed there. Where a Linux desktop keeps the keys to itself, they live in

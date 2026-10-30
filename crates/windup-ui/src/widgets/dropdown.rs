@@ -19,6 +19,23 @@ pub fn dropdown(
     current: Option<usize>,
     shown: &str,
 ) -> Option<usize> {
+    dropdown_gated(ui, p, mode, id_salt, entries, &[], current, shown)
+}
+
+/// [`dropdown`] where some entries cannot be chosen: `why[i]`, when set, says
+/// why entry `i` is disabled (§7.6). It is drawn faded, says why on hover and
+/// is never picked. Entries past the end of `why` are enabled.
+#[allow(clippy::too_many_arguments)]
+pub fn dropdown_gated(
+    ui: &mut Ui,
+    p: &Palette,
+    mode: Mode,
+    id_salt: impl Hash,
+    entries: &[String],
+    why: &[Option<&str>],
+    current: Option<usize>,
+    shown: &str,
+) -> Option<usize> {
     let id = ui.make_persistent_id(id_salt);
     let enabled = ui.is_enabled();
     let mut open = enabled && ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
@@ -111,13 +128,20 @@ pub fn dropdown(
                             .show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 0.0;
                                 for (i, entry) in entries.iter().enumerate() {
-                                    let (item, item_response) = ui.allocate_exact_size(
-                                        vec2(item_w, metrics::BUTTON),
-                                        Sense::click(),
-                                    );
+                                    let gate = why.get(i).copied().flatten();
+                                    let sense = if gate.is_some() {
+                                        Sense::hover()
+                                    } else {
+                                        Sense::click()
+                                    };
+                                    let (item, mut item_response) = ui
+                                        .allocate_exact_size(vec2(item_w, metrics::BUTTON), sense);
+                                    if let Some(reason) = gate {
+                                        item_response = item_response.on_hover_text(reason);
+                                    }
                                     let selected = current == Some(i);
                                     let painter = ui.painter();
-                                    if item_response.hovered() {
+                                    if item_response.hovered() && gate.is_none() {
                                         painter.rect_filled(
                                             item,
                                             metrics::RADIUS_TIGHT,
@@ -146,9 +170,15 @@ pub fn dropdown(
                                         } else {
                                             font.clone()
                                         },
-                                        if selected { p.text_strong } else { p.text },
+                                        if gate.is_some() {
+                                            p.text_muted.gamma_multiply(metrics::DISABLED_ALPHA)
+                                        } else if selected {
+                                            p.text_strong
+                                        } else {
+                                            p.text
+                                        },
                                     );
-                                    if item_response.clicked() {
+                                    if gate.is_none() && item_response.clicked() {
                                         picked = Some(i);
                                     }
                                 }

@@ -49,6 +49,8 @@ struct WindupApp {
     /// Whether the Video pane was open last frame, to list the sound
     /// devices again each time it opens.
     video_pane_open: bool,
+    /// The Steps pane's facts and click setup, found on workers.
+    steps_pane: StepsPane,
     popup_view: PopupView,
     popup_open: bool,
     popup_opened_at: Option<std::time::Instant>,
@@ -236,6 +238,7 @@ impl WindupApp {
             applied_recording,
             settings_only: startup.settings_only,
             video_pane_open: false,
+            steps_pane: StepsPane::default(),
             popup_view: PopupView::new(),
             popup_open: false,
             popup_opened_at: None,
@@ -291,6 +294,155 @@ impl WindupApp {
         if facts.probe == ProbeState::Running || facts.sound.is_none() {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
+    }
+}
+
+/// The Steps pane's work on threads: what the desktop allows (the
+/// ScreenCast portal may be asked, for up to 500 ms) and the one-time click
+/// setup (pkexec waits for the password).
+#[derive(Default)]
+struct StepsPane {
+    /// Whether the pane was open last frame, to look again each time it opens.
+    open: bool,
+    facts: Option<std::sync::mpsc::Receiver<windup_ui::StepsFacts>>,
+    setup: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+}
+
+impl WindupApp {
+    /// Hands the Steps pane what this desktop allows, found again each time
+    /// it opens and after the click setup.
+    fn sync_steps_facts(&mut self, ctx: &egui::Context) {
+        use std::sync::mpsc::TryRecvError;
+        use windup_ui::ClickSetup;
+        let open = self.settings_view.active_pane == windup_ui::settings::SettingsPane::Steps;
+        if open && !self.steps_pane.open {
+            self.steps_pane.facts = Some(look_for_steps_facts(self.settings_view.esc_caution));
+        }
+        self.steps_pane.open = open;
+        if let Some(rx) = &self.steps_pane.facts {
+            match rx.try_recv() {
+                Ok(facts) => {
+                    self.settings_view.steps = facts;
+                    self.steps_pane.facts = None;
+                }
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200))
+                }
+                Err(TryRecvError::Disconnected) => self.steps_pane.facts = None,
+            }
+        }
+        if let Some(rx) = &self.steps_pane.setup {
+            let done = match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                    None
+                }
+                Err(TryRecvError::Disconnected) => Some(Err("The setup stopped.".into())),
+            };
+            if let Some(result) = done {
+                self.steps_pane.setup = None;
+                self.settings_view.click_setup = match result {
+                    Ok(()) => ClickSetup::Idle,
+                    // Saying no to the password dialog is not a failure.
+                    Err(e) if e == "Cancelled." => ClickSetup::Idle,
+                    Err(e) => {
+                        log::warn!("click setup: {e}");
+                        ClickSetup::Failed(e)
+                    }
+                };
+                // In the group now: the route says to log out and in.
+                self.steps_pane.facts = Some(look_for_steps_facts(self.settings_view.esc_caution));
+            }
+        }
+    }
+
+    /// Runs what a settings pane asked for.
+    fn settings_action(&mut self, action: windup_ui::SettingsAction) {
+        match action {
+            windup_ui::SettingsAction::JoinInputGroup => {
+                if self.steps_pane.setup.is_some() {
+                    return;
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                let spawned = std::thread::Builder::new()
+                    .name("click-setup".into())
+                    .spawn(move || {
+                        let _ = tx.send(join_input_group());
+                    });
+                match spawned {
+                    Ok(_) => {
+                        self.steps_pane.setup = Some(rx);
+                        self.settings_view.click_setup = windup_ui::ClickSetup::Waiting;
+                    }
+                    Err(e) => {
+                        self.settings_view.click_setup =
+                            windup_ui::ClickSetup::Failed(format!("Could not start: {e}"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Adds this user to the input group (Linux, through pkexec).
+fn join_input_group() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::steps::setup::join_input_group()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("Only Linux reads clicks this way.".into())
+    }
+}
+
+/// [`steps_facts`] on a thread. A finder that panics leaves the facts as
+/// they were.
+fn look_for_steps_facts(
+    esc: windup_ui::EscCaution,
+) -> std::sync::mpsc::Receiver<windup_ui::StepsFacts> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("steps-facts".into())
+        .spawn(move || {
+            let _ = tx.send(steps_facts(esc));
+        });
+    if let Err(e) = spawned {
+        log::debug!("could not start steps-facts: {e}");
+    }
+    rx
+}
+
+/// What the Steps pane says about this desktop: how clicks arrive, whether
+/// steps carry a marker, whether the bar shows and whether Steps works at
+/// all. `esc` is what the Video pane says, since Steps takes its keys the
+/// same way.
+fn steps_facts(esc: windup_ui::EscCaution) -> windup_ui::StepsFacts {
+    use windup_core::capture::backend::{BarHost, StepRoute, record_bar_host, steps_order};
+    use windup_core::steps::avail::{markers_available, steps_available};
+    use windup_core::steps::clicks::ClickRoute;
+    let f = capture::video_facts();
+    let order = steps_order(&f);
+    // The OS hands Windows and X11 the clicks; Wayland's are read from the
+    // pointer devices.
+    #[cfg(target_os = "linux")]
+    let route = if f.windows || f.x11_only {
+        ClickRoute::Native
+    } else {
+        windup_core::steps::clicks::click_route(&linux::steps::evdev::click_facts())
+    };
+    #[cfg(not(target_os = "linux"))]
+    let route = ClickRoute::Native;
+    let appimage =
+        cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some_and(|v| !v.is_empty());
+    windup_ui::StepsFacts {
+        route,
+        appimage,
+        markers: markers_available(order.first().copied().unwrap_or(StepRoute::None)),
+        bar_shown: record_bar_host(&f) != BarHost::Hidden,
+        esc,
+        available: steps_available(&order),
     }
 }
 
@@ -492,11 +644,16 @@ impl eframe::App for WindupApp {
         // Main Window: Settings Hub
         // -------------------------------------------------------------
         self.sync_video_facts(ctx);
-        egui::CentralPanel::default()
+        self.sync_steps_facts(ctx);
+        let action = egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(palette.window))
             .show(ctx, |ui| {
-                self.settings_view.ui(ui, &mut self.config, &palette, mode);
-            });
+                self.settings_view.ui(ui, &mut self.config, &palette, mode)
+            })
+            .inner;
+        if let Some(action) = action {
+            self.settings_action(action);
+        }
 
         // -------------------------------------------------------------
         // Secondary Floating Viewport: Clipboard History Popup

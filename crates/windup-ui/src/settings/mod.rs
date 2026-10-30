@@ -7,6 +7,7 @@ pub mod general;
 pub mod overview;
 pub mod paste_plain_cfg;
 pub mod screenshot_cfg;
+pub mod steps_cfg;
 pub mod video_cfg;
 
 use crate::icons::Icon;
@@ -14,6 +15,7 @@ use crate::theme::{Mode, Palette, metrics, strong, text};
 use egui::{Rect, Stroke, Ui, pos2, vec2};
 use windup_core::Config;
 
+pub use steps_cfg::{ClickSetup, StepsFacts};
 pub use video_cfg::VideoFacts;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -78,7 +80,7 @@ impl SettingsPane {
             SettingsPane::Capture => "The capture bar, its shortcut and where screenshots go.",
             SettingsPane::Screenshot => "The instant screenshot, file names and the editor's keys.",
             SettingsPane::Video => "Screen recording, its formats and shortcuts.",
-            SettingsPane::Steps => "Recording the steps you take, and what they are exported as.",
+            SettingsPane::Steps => "Step-by-step guides, their markers and exports.",
         }
     }
 }
@@ -137,6 +139,13 @@ impl EscCaution {
     }
 }
 
+/// What a pane asks the desktop to do, which the UI cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsAction {
+    /// Add this user to the input group, so clicks can be read on Wayland.
+    JoinInputGroup,
+}
+
 pub struct SettingsView {
     pub active_pane: SettingsPane,
     pub hotkey_hint: HotkeyHint,
@@ -146,6 +155,10 @@ pub struct SettingsView {
     /// The probe and the sound devices, which the desktop keeps current
     /// while the Video pane is open.
     pub video: VideoFacts,
+    /// What the Steps pane needs to know about this desktop.
+    pub steps: StepsFacts,
+    /// Where the one-time click setup stands, which the desktop updates.
+    pub click_setup: ClickSetup,
 }
 
 impl Default for SettingsView {
@@ -155,12 +168,21 @@ impl Default for SettingsView {
             hotkey_hint: HotkeyHint::None,
             esc_caution: EscCaution::None,
             video: VideoFacts::default(),
+            steps: StepsFacts::default(),
+            click_setup: ClickSetup::Idle,
         }
     }
 }
 
 impl SettingsView {
-    pub fn ui(&mut self, ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mode) {
+    /// Draws the window. Returns what a pane asked the desktop to do.
+    pub fn ui(
+        &mut self,
+        ui: &mut Ui,
+        config: &mut Config,
+        p: &Palette,
+        mode: Mode,
+    ) -> Option<SettingsAction> {
         let total_rect = ui.available_rect_before_wrap();
 
         // 1. Sidebar Rail on the left (240px)
@@ -195,7 +217,7 @@ impl SettingsView {
                 .max_rect(content_rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
-        self.render_content(&mut content_ui, config, p, mode);
+        self.render_content(&mut content_ui, config, p, mode)
     }
 
     fn render_rail(&mut self, ui: &mut Ui, config: &mut Config, p: &Palette) {
@@ -301,7 +323,14 @@ impl SettingsView {
         });
     }
 
-    fn render_content(&mut self, ui: &mut Ui, config: &mut Config, p: &Palette, mode: Mode) {
+    fn render_content(
+        &mut self,
+        ui: &mut Ui,
+        config: &mut Config,
+        p: &Palette,
+        mode: Mode,
+    ) -> Option<SettingsAction> {
+        let mut action = None;
         // Page header (§9: 15px title + blurb)
         ui.horizontal(|ui| {
             ui.add_space(metrics::PAD_PANEL * 2.0);
@@ -371,11 +400,21 @@ impl SettingsView {
                                     self.esc_caution,
                                 );
                             }
-                            // The pane itself comes later.
-                            SettingsPane::Steps => {}
+                            SettingsPane::Steps => {
+                                action = steps_cfg::render(
+                                    ui,
+                                    config,
+                                    p,
+                                    mode,
+                                    self.hotkey_hint,
+                                    &self.steps,
+                                    &self.click_setup,
+                                );
+                            }
                         }
                     });
             });
+        action
     }
 }
 
@@ -434,6 +473,7 @@ mod tests {
             SettingsPane::Capture,
             SettingsPane::Screenshot,
             SettingsPane::Video,
+            SettingsPane::Steps,
         ] {
             assert!(SettingsPane::ALL.contains(&pane), "{pane:?}");
             assert!(!pane.label().is_empty());

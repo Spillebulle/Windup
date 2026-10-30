@@ -122,6 +122,12 @@ pub mod metrics {
     /// enough for a few rows.
     pub const REVIEW_W: f32 = 760.0;
     pub const REVIEW_H: f32 = 820.0;
+    /// The sample tile the Steps pane previews the marker on: room for the
+    /// large marker and its halo.
+    pub const MARKER_TILE_W: f32 = 128.0;
+    pub const MARKER_TILE_H: f32 = 88.0;
+    /// The button-like shape the preview's pointer is on.
+    pub const MARKER_TARGET_W: f32 = 48.0;
 
     // Colour wheel, from Umber's picker.
     /// Width of the hue ring. A wheel too small for it keeps a quarter of its

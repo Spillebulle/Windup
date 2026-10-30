@@ -178,6 +178,80 @@ Esc always cancels a recording, where the desktop lets Windup hear it:
 
 The Video settings pane says which of these applies on your desktop.
 
+## Steps
+
+Bind **Super+Shift+G** to `windup --steps`, which starts recording steps at
+once and, pressed again, stops and opens the review. While a session runs,
+**Super+Shift+X** takes a step by hand. Where Windup binds the other
+shortcuts for you, it binds these the same way; elsewhere:
+
+| Command | Does | Usual key |
+|---|---|---|
+| `windup --steps` | Start recording steps, or stop and review them | Super+Shift+G |
+| `windup --step` | Take a step | Super+Shift+X |
+| `windup --steps-stop` | Stop and review; does nothing to a recording | |
+| `windup --record-pause` | Pause or resume, Steps or a recording | Super+Shift+P |
+| `windup --record-stop` | Stop whichever is running | |
+| `windup --record-cancel` | Throw the steps or the recording away | Esc |
+
+Each step is a picture of the monitor under the pointer, with a marker where
+the pointer was. Where the picture and the pointer come from depends on the
+desktop:
+
+| | Takes the picture with | The marker |
+|---|---|---|
+| **COSMIC**, and wlroots desktops with ext-image-copy-capture | the compositor's image copy protocol | yes |
+| **Hyprland** | the compositor's screencopy protocol | yes, from Hyprland's IPC |
+| **Sway** | screencopy of the focused monitor, with the pointer painted in | no |
+| **river, Wayfire, labwc, niri** with only the older screencopy | the compositor's screencopy protocol | no |
+| **KDE Plasma 6**, installed package | KWin's ScreenShot2 interface, no dialog | yes, from a KWin script |
+| **KDE Plasma 6** AppImage, **GNOME** | the screen sharing portal, which asks once | yes |
+| **X11** | the X server directly | yes |
+
+- **Sway** does not tell applications where the pointer is, so its steps
+  show the pointer itself and no marker. The Steps settings pane says so.
+- **KDE and GNOME ask once**, with the same grant as Video: answer it once
+  and neither asks again. While a session runs, **GNOME shows its
+  screen-sharing indicator** in the top bar, and so in every step's picture.
+- **GNOME and Weston show no steps bar**, as for Video. Press the Steps key
+  again to stop.
+- **Esc** cancels and throws the steps away where it cancels a recording
+  (see above): from anywhere on X11, COSMIC, KDE and GNOME 48 and newer, only
+  from the bar on Sway and the other wlroots desktops.
+
+### Clicks on Wayland
+
+On X11 every click is a step with no setup. Wayland does not let
+applications see clicks in other windows, so Windup reads the mouse and the
+touchpad itself, and a tap on the touchpad counts as a click. It needs
+permission to, one of two ways:
+
+- **The `.deb`, `.rpm` and Arch package** install a udev rule,
+  `/usr/lib/udev/rules.d/70-windup-pointer.rules`, which lets the person
+  logged in at the screen read mice and touchpads. It never covers a
+  keyboard, or any device that is also one. Nothing to do: it works as soon
+  as the package is installed.
+- **The AppImage** cannot install a rule. The Steps settings pane offers
+  **Capture clicks too**, which asks for your password and adds your account
+  to the `input` group. That group can also read the keyboard, which is why
+  it is a choice and not the default. It takes effect after you log out and
+  back in.
+
+Without either, the Steps key still takes steps, and the settings say why
+clicks do not. The Steps settings pane says which route your desktop uses.
+
+### Exporting
+
+The review exports to `Documents/Windup`, unless the settings name another
+folder, as one of:
+
+- **A web page** (the default): one HTML file with every picture inside it.
+- **PDF**: one step per page.
+- **Markdown**: `steps.md` and an `images` folder, in a folder of their own.
+- **Images**: the numbered pictures, in a folder of their own.
+
+Markdown and Images will not write into a folder that is not empty.
+
 ## Starting at login
 
 Turn on **Launch at login** in Windup's General settings. It writes
@@ -244,3 +318,6 @@ the order things depend on each other:
 11. On KDE and GNOME: `RUST_LOG=windup=info windup --record-test out.mp4
     --seconds 5` asks to share the screens, says the portal gave a restore
     token, and leaves a five-second `out.mp4`.
+12. `windup --step-shot-test step.png` takes one step's picture of the
+    pointer's monitor and prints where the pointer was in it (`pointer
+    unknown` on Sway).

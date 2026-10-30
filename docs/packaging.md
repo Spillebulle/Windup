@@ -180,8 +180,8 @@ input subsystem (the deb `postinst`/`postrm`, the rpm `%post`/`%postun`,
 applies to devices already plugged in and a container without udev still
 installs.
 
-The AppImage cannot install a rule. There the settings offer to add the user
-to the `input` group through `pkexec usermod` (`linux/steps/setup.rs`), say
+The AppImage cannot install a rule. There the Steps settings pane offers
+**Capture clicks too**, which adds the user to the `input` group through `pkexec usermod` (`linux/steps/setup.rs`), say
 that the group can read the keyboard too, and that it counts from the next
 login. The settings tell the two routes apart from whether the nodes are
 readable and whether the process has the group (`ClickRoute`).

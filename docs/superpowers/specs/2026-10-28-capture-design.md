@@ -206,8 +206,11 @@ Editing happens on the frozen screen, with the selection still adjustable.
 - **Enter** copies the result to the clipboard and closes. **Ctrl+S** saves to
   a file and closes. A setting, "Also save a file when copying", makes Enter
   do both. All rebindable except Esc (see "Escape" below).
-- The same editor opens on a single step image from the Steps review list, in
-  an ordinary window sized to the image. *(My call.)*
+- The same editor opens on a single step image from the Steps review list:
+  the capture session opened on that picture as if it were the frozen monitor,
+  with the whole picture selected. Enter or Ctrl+S writes the edits back into
+  the step's file, and Esc leaves it as it was. *(Corrected during the build:
+  an ordinary window sized to the image was the first plan.)*
 
 Saved files: PNG by default (JPEG as an option) in
 `<Pictures>/Windup/` named `Screenshot YYYY-MM-DD HHMMSS.png`; folder and name
@@ -312,9 +315,9 @@ clipboard history like any other copied image.
 | Launcher | Win+Shift+S (intercepted like Win+V, displacing Snipping Tool) |
 | Screenshot, straight to selection | Print Screen |
 | Video, straight to selection | Win+Shift+R |
-| Steps | none |
-| Take a step | to be chosen by the builder; must not collide with typing |
-| Pause / stop recording | to be chosen by the builder; must not collide with typing |
+| Steps | Win+Shift+G (Super+Shift+G); pressed again, it stops |
+| Take a step | Win+Shift+X (Super+Shift+X), only while Steps runs |
+| Pause / stop recording | Pause Win+Shift+P, shared by Video and Steps; stop is the tool's own key again |
 | Toggle the zoom loupe, editor tools | keys inside the overlay, rebindable |
 | Cancel | **Esc, always, not rebindable** |
 
@@ -331,10 +334,12 @@ runs, and the recorded app does not receive it. That is the accepted price of
 "always". Windows: the existing `WH_KEYBOARD_LL` hook swallows it. X11: a
 passive grab for the duration. Wayland: bound for the duration where the
 desktop allows it (COSMIC: a temporary entry in its shortcut file, removed on
-stop; the GlobalShortcuts portal elsewhere; the click-capture input path when
-the user enabled it). Where none of these is available (GNOME without the
-portal), the settings page says so; this is the one place the rule cannot be
-kept, and it must be stated, not hidden.
+stop; the GlobalShortcuts portal elsewhere). The click-capture input path
+(evdev) reads mice and touchpads only and never watches keys, so it does not
+take Esc either. Where none of these is available (GNOME without the portal,
+Sway and the other wlroots desktops away from the bar, Weston), the settings
+page says so; this is the one place the rule cannot be kept, and it must be
+stated, not hidden.
 
 Every one is editable in settings, and Windup honours what is configured. That
 means replacing the hardcoded Windows hook branch and X11 grabs with a lookup
