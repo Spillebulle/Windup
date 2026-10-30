@@ -47,6 +47,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.1" date="2026-10-30">
+      <description>
+        <p>Recordings with sound play in every player, and the capture bar keeps its Area, Window and Full screen choice after a selection; dragging outside the selection draws a new one.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-10-29">
       <description>
         <p>Screen recording: an area, a window or the whole screen to MP4, WebM, MOV, MKV or GIF, with optional computer sound and microphone, a recording bar that stays out of the video, and a Video settings pane.</p>

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - Recordings with sound play in every player. The sound track was stamped with the time of day, so the MP4 claimed to be decades long, and GStreamer players such as COSMIC's and GNOME's found nothing to play in it. Recordings made with 0.3.0 can be fixed with `ffmpeg -i old.mp4 -c:v copy -af asetpts=PTS-STARTPTS fixed.mp4`.
 - After a selection is made, the Area, Window and Full screen dropdown stays on the bar, in the editor and before recording. Dragging outside the selection draws a new area, whatever tool is in hand; with Window or Full screen chosen, a click outside picks the window or screen under the pointer, which is highlighted as it moves. The edges and corners still resize the selection, and the edits stay where they are.
