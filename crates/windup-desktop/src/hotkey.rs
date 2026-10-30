@@ -565,10 +565,7 @@ fn start_crossplatform_hotkeys(
         while running.load(Ordering::SeqCst) {
             // Only the newest list matters.
             if let Some(list) = rebinds.try_iter().last() {
-                for hk in registered.drain(..) {
-                    let _ = manager.unregister(hk);
-                }
-                actions.clear();
+                let mut wanted: Vec<(HotKey, Action)> = Vec::new();
                 for (shortcut, action) in list {
                     let Some(code) = code_for(&shortcut.key) else {
                         log::warn!("no X key for {}", shortcut.key);
@@ -580,18 +577,31 @@ fn start_crossplatform_hotkeys(
                     mods.set(Modifiers::CONTROL, m.ctrl);
                     mods.set(Modifiers::ALT, m.alt);
                     mods.set(Modifiers::SHIFT, m.shift);
-                    let hk = HotKey::new((!mods.is_empty()).then_some(mods), code);
+                    wanted.push((
+                        HotKey::new((!mods.is_empty()).then_some(mods), code),
+                        action,
+                    ));
+                }
+                let keys: Vec<HotKey> = wanted.iter().map(|(hk, _)| *hk).collect();
+                let (drop, grab) = rebind_plan(&registered, &keys);
+                for hk in drop {
+                    let _ = manager.unregister(hk);
+                    registered.retain(|r| *r != hk);
+                }
+                for hk in grab {
                     // Another program (often the desktop itself) may own the
                     // shortcut; then the command-line route in docs/linux.md
                     // is the way in.
                     match manager.register(hk) {
-                        Ok(()) => {
-                            actions.push((hk.id(), action));
-                            registered.push(hk);
-                        }
+                        Ok(()) => registered.push(hk),
                         Err(e) => log::warn!("could not grab {hk:?}: {e}"),
                     }
                 }
+                actions = wanted
+                    .into_iter()
+                    .filter(|(hk, _)| registered.contains(hk))
+                    .map(|(hk, action)| (hk.id(), action))
+                    .collect();
             }
 
             if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -607,6 +617,26 @@ fn start_crossplatform_hotkeys(
     });
 }
 
+/// What a rebind changes: the grabs `held` that are no longer `wanted`, and
+/// the `wanted` keys not held yet. A key in both keeps its grab (its action
+/// may change), so it is never let go while the rest are redone; on X11 each
+/// grab takes a round trip, and a press in the gap would be lost.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn rebind_plan<K: Copy + PartialEq>(held: &[K], wanted: &[K]) -> (Vec<K>, Vec<K>) {
+    let drop = held
+        .iter()
+        .filter(|k| !wanted.contains(k))
+        .copied()
+        .collect();
+    let mut grab: Vec<K> = Vec::new();
+    for k in wanted {
+        if !held.contains(k) && !grab.contains(k) {
+            grab.push(*k);
+        }
+    }
+    (drop, grab)
+}
+
 #[cfg(target_os = "linux")]
 fn focused_window() -> Target {
     crate::linux::x11::active_window().map_or(Target::None, Target::X11)
@@ -620,6 +650,15 @@ fn focused_window() -> Target {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rebind_keeps_the_grabs_both_lists_hold() {
+        let (drop, grab) = rebind_plan(&[1, 2, 3], &[3, 4, 2, 4]);
+        assert_eq!(drop, vec![1]);
+        assert_eq!(grab, vec![4]);
+        assert_eq!(rebind_plan(&[1, 2], &[1, 2]), (vec![], vec![]));
+        assert_eq!(rebind_plan::<u8>(&[], &[]), (vec![], vec![]));
+    }
     use windup_core::ToolId;
     use windup_core::hotkeys::{bindings, session_bindings};
     use windup_core::{Config, Shortcut, ShortcutModifiers};
