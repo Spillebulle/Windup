@@ -1,10 +1,12 @@
-//! Steps exports: a web page, Markdown with its pictures, or the pictures
-//! alone. Numbers come from a step's place in the list, so a deleted step
-//! leaves no gap.
+//! Steps exports: a web page, a PDF, Markdown with its pictures, or the
+//! pictures alone. Numbers come from a step's place in the list, so a
+//! deleted step leaves no gap.
 
 mod base64;
 mod html;
 mod markdown;
+mod pdf;
+mod winansi;
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +19,7 @@ use super::render::render_step;
 pub use base64::base64;
 pub use html::{escape_html, html};
 pub use markdown::{escape_markdown, markdown};
+pub use pdf::{PdfImage, jpeg_for_pdf, pdf, text_width, winansi, wrap};
 
 pub const NOTHING_TO_EXPORT: &str = "There are no steps to export.";
 
@@ -39,22 +42,38 @@ pub fn export(
     if doc.steps.is_empty() {
         return Err(NOTHING_TO_EXPORT.to_string());
     }
+    // Each step rendered with its marker, one at a time, so only the encoded
+    // pictures are held.
+    let shot = |i: usize| -> Result<image::RgbaImage, String> {
+        let step = &doc.steps[i];
+        let img = image::open(dir.join(&step.file))
+            .map_err(|e| format!("cannot read {}: {e}", step.file))?
+            .to_rgba8();
+        Ok(render_step(&img, step, i + 1, style))
+    };
+
     if format == ExportFormat::Pdf {
-        return Err("PDF export is not available yet.".to_string());
+        let pages = (0..doc.steps.len())
+            .map(|i| {
+                Ok((
+                    i + 1,
+                    doc.steps[i].caption.clone(),
+                    jpeg_for_pdf(&shot(i)?)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if let Some(parent) = dest.parent() {
+            make_dir(parent)?;
+        }
+        write(dest, &pdf(TITLE, &pages))?;
+        return Ok(dest.to_path_buf());
     }
-    let items = doc
-        .steps
-        .iter()
-        .enumerate()
-        .map(|(i, step)| {
-            let img = image::open(dir.join(&step.file))
-                .map_err(|e| format!("cannot read {}: {e}", step.file))?
-                .to_rgba8();
-            let shot = render_step(&img, step, i + 1, style);
+    let items = (0..doc.steps.len())
+        .map(|i| {
             Ok(Item {
                 number: i + 1,
-                caption: step.caption.clone(),
-                png: encode_png(&shot)?,
+                caption: doc.steps[i].caption.clone(),
+                png: encode_png(&shot(i)?)?,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -76,7 +95,7 @@ pub fn export(
             make_dir(dest)?;
             write_pictures(dest, &items)?;
         }
-        ExportFormat::Pdf => unreachable!("refused above"),
+        ExportFormat::Pdf => unreachable!("written above"),
     }
     Ok(dest.to_path_buf())
 }
