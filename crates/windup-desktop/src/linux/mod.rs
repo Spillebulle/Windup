@@ -237,8 +237,9 @@ struct Background {
     capture: capture::Capturing,
     /// The Steps session that runs, or is stopping.
     steps: Option<crate::steps::live::StepsLive>,
-    /// The Steps review, `windup --steps-review <dir>`, while it is open.
-    review: Option<Child>,
+    /// The Steps review, `windup --steps-review <dir>`, and its folder,
+    /// while it is open.
+    review: Option<(Child, PathBuf)>,
     /// The review's requests for the editor on a step.
     edits: Receiver<PathBuf>,
     /// When the socket last brought a command; an update is only taken over

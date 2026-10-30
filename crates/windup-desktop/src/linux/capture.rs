@@ -64,7 +64,7 @@ use windup_core::capture::{DRect, DesktopShot};
 use windup_core::hotkeys::{LiveKind, session_bindings, session_keys_untaken};
 use windup_core::ipc::Command;
 use windup_core::steps::clicks::takes;
-use windup_core::steps::model::{StepsDoc, steps_root};
+use windup_core::steps::model::{Step, StepsDoc};
 use windup_core::steps::options::StepTrigger;
 use windup_core::steps::place::steps_bar_slot;
 use windup_core::{Config, ToolId};
@@ -974,10 +974,10 @@ impl Background {
                 StepsEvent::Over(end) => self.steps_over(end, config, shared, commands),
             }
         }
-        if let Some(child) = self.review.as_mut()
+        if let Some((child, _)) = self.review.as_mut()
             && !matches!(child.try_wait(), Ok(None))
         {
-            log::info!("steps: review closed");
+            log::info!("steps: review child exited");
             self.review = None;
         }
     }
@@ -1014,7 +1014,7 @@ impl Background {
 
     /// Whether the review child is still open.
     fn review_open(&mut self) -> bool {
-        match self.review.as_mut().map(std::process::Child::try_wait) {
+        match self.review.as_mut().map(|(child, _)| child.try_wait()) {
             Some(Ok(None)) => true,
             Some(_) => {
                 self.review = None;
@@ -1047,7 +1047,7 @@ impl Background {
         match spawned {
             Ok(child) => {
                 log::info!("steps: review opened");
-                self.review = Some(child);
+                self.review = Some((child, dir.to_path_buf()));
             }
             Err(e) => {
                 log::error!("steps: the review did not start: {e}");
@@ -1067,16 +1067,17 @@ impl Background {
         shared: &Shared,
         commands: &Receiver<Command>,
     ) {
-        // Only a step's own picture is ever written over.
-        let in_session = steps_root().is_some_and(|root| {
-            path.parent()
-                .and_then(Path::parent)
-                .is_some_and(|p| p == root)
-        });
-        if !in_session {
-            log::warn!("steps: not a step's picture: {}", path.display());
+        // Only a step of the open review is ever written over.
+        let review_dir = if self.review_open() {
+            self.review.as_ref().map(|(_, dir)| dir.clone())
+        } else {
+            None
+        };
+        let doc = review_dir.as_deref().and_then(|d| StepsDoc::load(d).ok());
+        let Some(step) = editable_step(&path, review_dir.as_deref(), doc.as_ref()) else {
+            log::warn!("steps: not a step of the open review: {}", path.display());
             return;
-        }
+        };
         let open = self.capture.gate != Gate::Idle && !self.steps_busy();
         if let Some(why) = edit_refusal(open, self.steps_busy()) {
             log::info!("steps: the editor cannot open now");
@@ -1093,7 +1094,7 @@ impl Background {
                 return;
             }
         };
-        let named = step_monitor(&path);
+        let named = step.monitor;
         let outputs = super::wayland::screencopy::output_layout_from_env().unwrap_or_default();
         let Some((name, layout)) = outputs
             .iter()
@@ -1122,17 +1123,31 @@ impl Background {
     }
 }
 
-/// The output a step was taken on, from its session's `steps.json`; empty
-/// when it cannot be told.
-fn step_monitor(path: &Path) -> String {
-    let (Some(dir), Some(file)) = (path.parent(), path.file_name().and_then(|f| f.to_str())) else {
-        return String::new();
+/// The step `path` names, when the editor may write it: a review is open
+/// (`review_dir`, whose `steps.json` is `doc`), the path has no `.` or `..`
+/// in it, its folder is the review's, and its file is a step listed there.
+pub(super) fn editable_step(
+    path: &Path,
+    review_dir: Option<&Path>,
+    doc: Option<&StepsDoc>,
+) -> Option<Step> {
+    use std::path::Component;
+    let (dir, doc) = (review_dir?, doc?);
+    let plain = |p: &Path| {
+        p.components()
+            .all(|c| !matches!(c, Component::ParentDir | Component::CurDir))
     };
-    StepsDoc::load(dir)
-        .ok()
-        .and_then(|doc| doc.steps.into_iter().find(|s| s.file == file))
-        .map(|s| s.monitor)
-        .unwrap_or_default()
+    if !plain(path) || !plain(dir) {
+        return None;
+    }
+    let same = path
+        .parent()
+        .is_some_and(|p| p.components().eq(dir.components()));
+    if !same {
+        return None;
+    }
+    let file = path.file_name()?.to_str()?;
+    doc.steps.iter().find(|s| s.file == file).cloned()
 }
 
 /// Opens a Steps camera and finds what its bar is placed from; on the
@@ -1181,6 +1196,44 @@ mod tests {
         assert_eq!(live_kind(false, true), Some(LiveKind::Steps));
         // Never both; Steps is the one that answers if it were.
         assert_eq!(live_kind(true, true), Some(LiveKind::Steps));
+    }
+
+    #[test]
+    fn only_a_listed_step_of_the_open_review_is_editable() {
+        let mut doc = StepsDoc::new(&jiff::Zoned::now());
+        let file = doc.next_file();
+        doc.push(Step {
+            file,
+            cause: windup_core::steps::model::StepCause::Hotkey,
+            pointer: None,
+            scale: 1.0,
+            monitor: "DP-1".into(),
+            caption: String::new(),
+            at_ms: 0,
+        });
+        let dir = Path::new("/c/windup/steps/2026-10-30 142501");
+        let ok = |p: &str| editable_step(Path::new(p), Some(dir), Some(&doc));
+        assert_eq!(
+            ok("/c/windup/steps/2026-10-30 142501/01.png").map(|s| s.monitor),
+            Some("DP-1".to_string())
+        );
+        // Another session's folder.
+        assert!(ok("/c/windup/steps/2026-10-29 090000/01.png").is_none());
+        // No review open.
+        assert!(
+            editable_step(
+                Path::new("/c/windup/steps/2026-10-30 142501/01.png"),
+                None,
+                None
+            )
+            .is_none()
+        );
+        // A file the session does not list.
+        assert!(ok("/c/windup/steps/2026-10-30 142501/02.png").is_none());
+        assert!(ok("/c/windup/steps/2026-10-30 142501/steps.json").is_none());
+        // Climbing out, or in and out again.
+        assert!(ok("/c/windup/steps/2026-10-30 142501/../2026-10-30 142501/01.png").is_none());
+        assert!(ok("/c/windup/steps/2026-10-30 142501/x/../01.png").is_none());
     }
 
     fn r(x: f32) -> DRect {
