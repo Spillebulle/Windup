@@ -3,7 +3,10 @@
 
 pub mod avail;
 pub mod clicks;
+pub mod glyphs;
+pub mod marker;
 pub mod model;
 pub mod options;
 pub mod place;
 pub mod pointer;
+pub mod render;

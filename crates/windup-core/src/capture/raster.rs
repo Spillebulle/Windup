@@ -152,12 +152,12 @@ fn process(img: &mut RgbaImage, shape: &Shape, size: f32, scale: f32) {
     }
 }
 
-fn premultiply(p: Rgba<u8>) -> PremultipliedColorU8 {
+pub(crate) fn premultiply(p: Rgba<u8>) -> PremultipliedColorU8 {
     let [r, g, b, a] = p.0;
     ColorU8::from_rgba(r, g, b, a).premultiply()
 }
 
-fn to_pixmap(img: &RgbaImage) -> Option<Pixmap> {
+pub(crate) fn to_pixmap(img: &RgbaImage) -> Option<Pixmap> {
     let mut pm = Pixmap::new(img.width(), img.height())?;
     for (dst, src) in pm.pixels_mut().iter_mut().zip(img.pixels()) {
         *dst = premultiply(*src);
@@ -165,7 +165,7 @@ fn to_pixmap(img: &RgbaImage) -> Option<Pixmap> {
     Some(pm)
 }
 
-fn from_pixmap(pm: &Pixmap) -> RgbaImage {
+pub(crate) fn from_pixmap(pm: &Pixmap) -> RgbaImage {
     let mut img = RgbaImage::new(pm.width(), pm.height());
     for (dst, src) in img.pixels_mut().zip(pm.pixels()) {
         let c = src.demultiply();
