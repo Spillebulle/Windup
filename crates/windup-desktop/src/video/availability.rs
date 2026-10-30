@@ -49,14 +49,19 @@ struct Sources {
 }
 
 impl Sources {
-    fn from(f: &Facts) -> Sources {
+    /// `wayland_clicks` looks at the pointer devices; it is asked only on
+    /// Wayland.
+    fn from(f: &Facts, wayland_clicks: impl FnOnce() -> ClickFacts) -> Sources {
         // The OS hands Windows and X11 the clicks. On Wayland they are read
-        // from the pointer devices, which nothing here opens yet: say so.
+        // from the pointer devices, when Windup may.
         let wayland = !f.windows && !f.x11_only;
-        let clicks = ClickFacts {
-            native: !wayland,
-            pointer_nodes: usize::from(wayland),
-            ..ClickFacts::default()
+        let clicks = if wayland {
+            wayland_clicks()
+        } else {
+            ClickFacts {
+                native: true,
+                ..ClickFacts::default()
+            }
         };
         Sources {
             video: video_order(f),
@@ -72,6 +77,18 @@ impl Sources {
             steps: vec![StepRoute::None],
             clicks: Ok(()),
         }
+    }
+}
+
+/// Whether this Wayland session can read the pointer devices.
+fn wayland_click_facts() -> ClickFacts {
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux::steps::evdev::click_facts()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        ClickFacts::default()
     }
 }
 
@@ -173,7 +190,7 @@ pub(crate) fn refresh() -> Refresh {
         &SOURCES,
         &FINDING,
         Sources::failed(),
-        || Sources::from(&crate::capture::video_facts()),
+        || Sources::from(&crate::capture::video_facts(), wayland_click_facts),
     );
     Refresh([sound, sources])
 }
@@ -272,23 +289,42 @@ mod tests {
     #[test]
     fn steps_and_clicks_follow_the_desktop() {
         use windup_core::steps::avail::NO_STEPS_SOURCE;
-        use windup_core::steps::clicks::CLICKS_NOT_SET_UP;
-        let windows = Sources::from(&Facts {
-            windows: true,
-            ..Facts::default()
-        });
+        use windup_core::steps::clicks::{CLICKS_NO_POINTER, CLICKS_NOT_SET_UP};
+        let never = || -> ClickFacts { panic!("only Wayland looks at the devices") };
+        let windows = Sources::from(
+            &Facts {
+                windows: true,
+                ..Facts::default()
+            },
+            never,
+        );
         assert_eq!(steps_available(&windows.steps), Ok(()));
         assert_eq!(windows.clicks, Ok(()));
-        let x11 = Sources::from(&Facts {
-            x11_only: true,
-            ..Facts::default()
-        });
+        let x11 = Sources::from(
+            &Facts {
+                x11_only: true,
+                ..Facts::default()
+            },
+            never,
+        );
         assert_eq!(steps_available(&x11.steps), Ok(()));
         assert_eq!(x11.clicks, Ok(()));
         // Wayland with nothing to take pictures with.
-        let bare = Sources::from(&Facts::default());
+        let unreadable = || ClickFacts {
+            pointer_nodes: 2,
+            ..ClickFacts::default()
+        };
+        let bare = Sources::from(&Facts::default(), unreadable);
         assert_eq!(steps_available(&bare.steps), Err(NO_STEPS_SOURCE));
         assert_eq!(bare.clicks, Err(CLICKS_NOT_SET_UP));
+        // Readable through the udev rule, or no mouse at all.
+        let udev = Sources::from(&Facts::default(), || ClickFacts {
+            readable: 1,
+            ..unreadable()
+        });
+        assert_eq!(udev.clicks, Ok(()));
+        let none = Sources::from(&Facts::default(), ClickFacts::default);
+        assert_eq!(none.clicks, Err(CLICKS_NO_POINTER));
     }
 
     #[test]

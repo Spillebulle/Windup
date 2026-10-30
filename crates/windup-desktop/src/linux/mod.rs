@@ -8,6 +8,7 @@ pub mod cosmic;
 pub mod ipc;
 pub mod kde;
 pub mod portal;
+pub(crate) mod steps;
 pub(crate) mod video;
 pub mod wayland;
 pub mod window;

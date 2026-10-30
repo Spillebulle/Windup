@@ -164,6 +164,33 @@ sh tools/fetch-ffmpeg.sh linux64 target/release
 sh packaging/linux/package.sh 0.1.0 amd64 target/release dist
 ```
 
+### The pointer rule
+
+On Wayland no application sees another's clicks, so Steps reads the mouse and
+touchpad event nodes itself (evdev, `crates/windup-desktop/src/linux/steps/`).
+The `.deb`, `.rpm` and Arch package ship
+`packaging/linux/70-windup-pointer.rules` to
+`/usr/lib/udev/rules.d/`. It tags mice and touchpads `uaccess`, which gives
+the logged-in seat user an ACL on their nodes; any device that is also a
+keyboard is left out, so keys stay unreadable. The name must sort before
+`73-seat-late.rules`, which turns the tag into the ACL. Install, upgrade and
+removal run `udevadm control --reload-rules` and a `change` trigger on the
+input subsystem (the deb `postinst`/`postrm`, the rpm `%post`/`%postun`,
+`_windup_udev` in `windup.install`), each ending in `|| true`, so the rule
+applies to devices already plugged in and a container without udev still
+installs.
+
+The AppImage cannot install a rule. There the settings offer to add the user
+to the `input` group through `pkexec usermod` (`linux/steps/setup.rs`), say
+that the group can read the keyboard too, and that it counts from the next
+login. The settings tell the two routes apart from whether the nodes are
+readable and whether the process has the group (`ClickRoute`).
+
+`packaging/check.sh` refuses a rule that matches on `ID_INPUT_KEY` or grants
+`uaccess` on a line without `ENV{ID_INPUT_KEYBOARD}!="1"`, and
+`check-enrolment.sh` checks the file is installed by each of the three
+packages.
+
 ## Adding a platform
 
 A new platform needs:

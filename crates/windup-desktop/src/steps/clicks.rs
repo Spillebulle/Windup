@@ -1,7 +1,8 @@
 //! The click watchers: every button press anywhere on the desktop, as a
 //! `Trigger::Click` on the session's trigger channel. Windows has a
-//! low-level mouse hook; X11 has XInput2 raw button events. Each runs on a
-//! thread of its own and stops when its `ClickWatch` is dropped.
+//! low-level mouse hook; X11 has XInput2 raw button events; Wayland reads
+//! the pointer devices (`linux::steps::evdev`). Each runs on a thread of its
+//! own and stops when its `ClickWatch` is dropped.
 
 use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
@@ -12,7 +13,7 @@ use super::live::Trigger;
 /// Seconds since the first press any watcher saw: the steady clock a
 /// `Press` is timed by.
 #[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
-fn now() -> f64 {
+pub(crate) fn now() -> f64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64()
 }
@@ -22,13 +23,18 @@ pub struct ClickWatch {
     #[cfg(target_os = "windows")]
     _inner: windows::Watch,
     #[cfg(target_os = "linux")]
-    _inner: x11::Watch,
+    _inner: LinuxWatch,
+}
+
+#[cfg(target_os = "linux")]
+enum LinuxWatch {
+    X11(x11::Watch),
+    Evdev(crate::linux::steps::evdev::EvdevWatch),
 }
 
 impl ClickWatch {
     /// Starts watching, sending each press to `tx`; `None` where clicks
-    /// cannot be seen this way. On Linux this is X11 only: Wayland hosts
-    /// read clicks through evdev.
+    /// cannot be seen (on Wayland: no pointer device Windup may read).
     pub fn start(tx: Sender<Trigger>) -> Option<ClickWatch> {
         #[cfg(target_os = "windows")]
         {
@@ -38,12 +44,15 @@ impl ClickWatch {
         }
         #[cfg(target_os = "linux")]
         {
-            if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
-                return None;
-            }
-            Some(ClickWatch {
-                _inner: x11::Watch::start(tx)?,
-            })
+            let inner = if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
+                let watch = crate::linux::steps::evdev::EvdevWatch::start(tx)
+                    .map_err(|route| log::warn!("steps: cannot read clicks: {route:?}"))
+                    .ok()?;
+                LinuxWatch::Evdev(watch)
+            } else {
+                LinuxWatch::X11(x11::Watch::start(tx)?)
+            };
+            Some(ClickWatch { _inner: inner })
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {

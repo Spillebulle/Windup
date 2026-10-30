@@ -46,6 +46,8 @@ egui-wgpu = "0.32"
 pollster = "0.4"
 x11rb = { version = "0.13", features = ["randr", "xinput"] }
 rustix = { version = "1", features = ["fs", "process", "pipe", "event"] }
+# Clicks on Wayland while recording steps: the pointer devices' events.
+evdev = "0.13"
 # The same portal client and runtime rfd already brings in.
 ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
 futures-util = "0.3"

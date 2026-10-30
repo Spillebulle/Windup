@@ -79,6 +79,12 @@ PACMAN_DEPENDS="'glibc' 'gcc-libs' 'libxkbcommon' 'xdotool' 'libpipewire' 'wayla
 
 DESCRIPTION_SHORT="Clipboard history and plain-text paste behind a hotkey"
 
+# The pointer rule (docs/packaging.md), and what every install, upgrade and
+# removal runs so it applies to the devices already plugged in. Never fails
+# the transaction: a container has no udev to reload.
+UDEV_RULE=70-windup-pointer.rules
+UDEV_RELOAD='command -v udevadm >/dev/null && { udevadm control --reload-rules; udevadm trigger --subsystem-match=input --action=change; } || true'
+
 # --- the house archive (STYLE-GUIDE §18.2) ----------------------------------
 #
 # The .deb and .rpm carry the archive's public key and write its source on
@@ -116,6 +122,10 @@ stage_tree() {
     # lets Windup read the screen on KDE. The AppImage keeps the bare name.
     if [ "${2:-}" = system ]; then
         sed -i 's|^Exec=windup|Exec=/usr/bin/windup|'             "$prefix/share/applications/$APP_ID.desktop"
+        # Lets the seat's user read mice and touchpads, never keyboards, so
+        # Steps sees clicks on Wayland. Not in the AppImage, which cannot
+        # install one: there the settings offer the input group instead.
+        install -Dm644 "$root/packaging/linux/$UDEV_RULE" "$prefix/lib/udev/rules.d/$UDEV_RULE"
     fi
     install -Dm644 "$root/packaging/$APP_ID.metainfo.xml" \
         "$prefix/share/metainfo/$APP_ID.metainfo.xml"
@@ -167,6 +177,7 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true
 fi
 EOF
+echo "$UDEV_RELOAD" >>"$deb/DEBIAN/postinst"
 if [ -n "$archive_key" ]; then
     cat >>"$deb/DEBIAN/postinst" <<EOF
 
@@ -197,6 +208,7 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database -q /usr/share/applications || true
 fi
 EOF
+echo "$UDEV_RELOAD" >>"$deb/DEBIAN/postrm"
 chmod 755 "$deb/DEBIAN/postinst" "$deb/DEBIAN/postrm"
 dpkg-deb --build --root-owner-group "$deb" "$outdir/$deb_name" >/dev/null
 
@@ -231,6 +243,7 @@ rpm_key=/etc/pki/rpm-gpg/RPM-GPG-KEY-spillebulle
     echo
     echo "%post"
     echo "command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || :"
+    echo "$UDEV_RELOAD"
     if [ -n "$archive_key" ]; then
         echo "repo=/etc/yum.repos.d/spillebulle.repo"
         echo "if [ ! -e \"\$repo\" ] && [ ! -e \"\$repo.disabled\" ]; then"
@@ -248,11 +261,13 @@ rpm_key=/etc/pki/rpm-gpg/RPM-GPG-KEY-spillebulle
     echo
     echo "%postun"
     echo "command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || :"
+    echo "$UDEV_RELOAD"
     echo
     echo "%files"
     [ -n "$archive_key" ] && echo "$rpm_key"
     echo "/usr/bin/windup"
     echo "/usr/lib/windup/"
+    echo "/usr/lib/udev/rules.d/$UDEV_RULE"
     echo "/usr/share/applications/$APP_ID.desktop"
     echo "/usr/share/metainfo/$APP_ID.metainfo.xml"
     echo "/usr/share/icons/hicolor/*/apps/$APP_ID.png"

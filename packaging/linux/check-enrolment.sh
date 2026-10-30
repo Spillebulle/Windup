@@ -14,12 +14,15 @@ mode=$1
 dist=$2
 fpr=7A9EA69E033F3C3EF4F53EB4A72BC0FD5E061ADA
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# The pointer rule every system package installs (docs/packaging.md).
+rule=/usr/lib/udev/rules.d/70-windup-pointer.rules
 
 case $mode in
 deb)
     apt-get update -qq
     apt-get install -y -qq "$dist"/windup_*.deb >/dev/null
     windup --help >/dev/null
+    test -s "$rule" || fail "no udev rule at $rule"
     test -s /etc/apt/keyrings/spillebulle-archive.gpg || fail "no shared keyring"
     grep -qx 'Signed-By: /etc/apt/keyrings/spillebulle-archive.gpg' \
         /etc/apt/sources.list.d/spillebulle.sources || fail "source missing or wrong"
@@ -58,6 +61,7 @@ deb-legacy)
 rpm)
     dnf install -y -q "$dist"/windup-*.rpm
     windup --help >/dev/null
+    test -s "$rule" || fail "no udev rule at $rule"
     test -s /etc/pki/rpm-gpg/RPM-GPG-KEY-spillebulle || fail "no key"
     grep -q '^gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-spillebulle$' \
         /etc/yum.repos.d/spillebulle.repo || fail "repo file missing or wrong"
@@ -71,6 +75,7 @@ arch)
     pacman -Sy --noconfirm --needed archlinux-keyring >/dev/null
     pacman -U --noconfirm "$dist"/windup-bin-*.pkg.tar.zst >/dev/null
     windup --help >/dev/null
+    test -s "$rule" || fail "no udev rule at $rule"
     test "$(grep -c '^\[spillebulle\]' /etc/pacman.conf)" = 1 || fail "no [spillebulle] section"
     grep -qx 'Include = /etc/pacman.d/spillebulle' /etc/pacman.conf || fail "no Include"
     grep -qx 'SigLevel = Required DatabaseRequired' /etc/pacman.d/spillebulle || fail "settings"

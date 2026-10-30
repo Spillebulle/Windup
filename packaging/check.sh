@@ -80,3 +80,20 @@ if grep -q 'deb/usr/share/keyrings/' packaging/linux/package.sh; then
     fail "the .deb ships /usr/share/keyrings/, which a second application's .deb would conflict with"
 fi
 ok "archive enrolment matches ENROLMENT.md"
+
+# The udev rule that lets the seat's user read clicks (docs/packaging.md).
+# It must never hand over a keyboard: no rule may match on ID_INPUT_KEY
+# (every device with a key has it, mice included), and every line that
+# grants access must leave out devices that are also keyboards.
+rules=packaging/linux/70-windup-pointer.rules
+[ -f "$rules" ] || fail "no udev rule at $rules"
+if grep -Eq 'ID_INPUT_KEY[}=]' "$rules"; then
+    fail "$rules matches on ID_INPUT_KEY, which mice and keyboards alike have"
+fi
+if grep 'uaccess' "$rules" | grep -vq 'ENV{ID_INPUT_KEYBOARD}!="1"'; then
+    fail "a line of $rules grants access without leaving keyboards out"
+fi
+grep -q '^UDEV_RULE=70-windup-pointer.rules$' packaging/linux/package.sh &&
+    grep -q 'install -Dm644 "$root/packaging/linux/$UDEV_RULE" "$prefix/lib/udev/rules.d/$UDEV_RULE"' packaging/linux/package.sh ||
+    fail "package.sh does not install the udev rule"
+ok "the udev rule gives mice and touchpads, never keyboards"

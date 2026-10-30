@@ -26,10 +26,19 @@ _spillebulle_archive() {
     fi
 }
 
+# Windup's own: applies the pointer rule (70-windup-pointer.rules) to the
+# mice and touchpads already plugged in, so Steps sees clicks without a
+# reboot. Never fails the install: a container has no udev to reload.
+_windup_udev() {
+    command -v udevadm >/dev/null && { udevadm control --reload-rules; udevadm trigger --subsystem-match=input --action=change; } || true
+}
+
 post_install() {
     _spillebulle_archive
+    _windup_udev
 }
 
 post_upgrade() {
     _spillebulle_archive
+    _windup_udev
 }

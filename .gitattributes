@@ -7,3 +7,6 @@
 *.ico binary
 *.png binary
 *.ttf binary
+
+# udev reads rules line by line; a carriage return would end up in a value.
+*.rules text eol=lf
