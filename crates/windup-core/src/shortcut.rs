@@ -119,6 +119,14 @@ impl Shortcut {
         Self::new(ShortcutModifiers::SUPER_SHIFT, "R")
     }
 
+    pub fn super_shift_g() -> Self {
+        Self::new(ShortcutModifiers::SUPER_SHIFT, "G")
+    }
+
+    pub fn super_shift_x() -> Self {
+        Self::new(ShortcutModifiers::SUPER_SHIFT, "X")
+    }
+
     pub fn super_shift_p() -> Self {
         Self::new(ShortcutModifiers::SUPER_SHIFT, "P")
     }

@@ -28,6 +28,12 @@ pub enum Command {
     RecordStop,
     /// Cancel the screen recording and throw it away, if one runs.
     RecordCancel,
+    /// Start a Steps session, or stop the one that runs.
+    Steps,
+    /// Add a step by hand to the Steps session, if one runs.
+    Step,
+    /// Stop the Steps session and export it, if one runs.
+    StepsStop,
     /// Bring up the settings window.
     Show,
     /// Re-read `config.json`; sent by the settings window after it saves.
@@ -35,7 +41,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 10] = [
+    pub const ALL: [Command; 13] = [
         Command::Popup,
         Command::PastePlain,
         Command::Capture,
@@ -44,6 +50,9 @@ impl Command {
         Command::RecordPause,
         Command::RecordStop,
         Command::RecordCancel,
+        Command::Steps,
+        Command::Step,
+        Command::StepsStop,
         Command::Show,
         Command::Reload,
     ];
@@ -59,6 +68,9 @@ impl Command {
             Command::RecordPause => "record-pause",
             Command::RecordStop => "record-stop",
             Command::RecordCancel => "record-cancel",
+            Command::Steps => "steps",
+            Command::Step => "step",
+            Command::StepsStop => "steps-stop",
             Command::Show => "show",
             Command::Reload => "reload",
         }
@@ -72,6 +84,9 @@ impl Command {
             Action::CaptureLauncher => Command::Capture,
             Action::Screenshot => Command::Screenshot,
             Action::Video => Command::Record,
+            Action::Steps => Command::Steps,
+            // The key that is live only while a Steps session runs.
+            Action::Step => Command::Step,
             // The keys that are live only while a recording runs.
             Action::RecordPause => Command::RecordPause,
             Action::RecordStop => Command::RecordStop,
@@ -134,6 +149,9 @@ Usage: windup [OPTION]
   --record-pause  Pause or resume the screen recording
   --record-stop   Stop the screen recording
   --record-cancel Cancel the screen recording and discard it
+  --steps         Start or stop recording steps
+  --step          Add a step by hand while recording steps
+  --steps-stop    Stop recording steps and export them
   --background    Start without opening the window
   --help          Show this text
 
@@ -254,6 +272,9 @@ where
             "--record-pause" => Launch::Send(Command::RecordPause),
             "--record-stop" => Launch::Send(Command::RecordStop),
             "--record-cancel" => Launch::Send(Command::RecordCancel),
+            "--steps" => Launch::Send(Command::Steps),
+            "--step" => Launch::Send(Command::Step),
+            "--steps-stop" => Launch::Send(Command::StepsStop),
             "--show" => Launch::Send(Command::Show),
             "--background" => Launch::Background,
             "--settings" => Launch::Settings,
@@ -310,6 +331,22 @@ mod tests {
     fn every_command_round_trips() {
         for c in Command::ALL {
             assert_eq!(Command::parse(&c.encode()), Some(c));
+        }
+    }
+
+    #[test]
+    fn steps_flags_parse() {
+        assert_eq!(parse_args(["--steps"]), Launch::Send(Command::Steps));
+        assert_eq!(parse_args(["--step"]), Launch::Send(Command::Step));
+        assert_eq!(
+            parse_args(["--steps-stop"]),
+            Launch::Send(Command::StepsStop)
+        );
+        assert_eq!(Command::for_action(Action::Steps), Command::Steps);
+        assert_eq!(Command::for_action(Action::Step), Command::Step);
+        assert_eq!(Command::ALL.len(), 13);
+        for flag in ["--steps", "--step", "--steps-stop"] {
+            assert!(USAGE.contains(flag), "{flag}");
         }
     }
 

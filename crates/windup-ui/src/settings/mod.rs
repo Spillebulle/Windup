@@ -26,10 +26,11 @@ pub enum SettingsPane {
     Capture,
     Screenshot,
     Video,
+    Steps,
 }
 
 impl SettingsPane {
-    pub const ALL: [SettingsPane; 7] = [
+    pub const ALL: [SettingsPane; 8] = [
         SettingsPane::Overview,
         SettingsPane::General,
         SettingsPane::ClipboardHistory,
@@ -37,6 +38,7 @@ impl SettingsPane {
         SettingsPane::Capture,
         SettingsPane::Screenshot,
         SettingsPane::Video,
+        SettingsPane::Steps,
     ];
 
     pub fn label(self) -> &'static str {
@@ -48,6 +50,7 @@ impl SettingsPane {
             SettingsPane::Capture => "Capture launcher",
             SettingsPane::Screenshot => "Screenshot",
             SettingsPane::Video => "Video",
+            SettingsPane::Steps => "Steps",
         }
     }
 
@@ -60,6 +63,7 @@ impl SettingsPane {
             SettingsPane::Capture => Icon::Camera,
             SettingsPane::Screenshot => Icon::SquareDashed,
             SettingsPane::Video => Icon::Video,
+            SettingsPane::Steps => Icon::Footprints,
         }
     }
 
@@ -74,6 +78,7 @@ impl SettingsPane {
             SettingsPane::Capture => "The capture bar, its shortcut and where screenshots go.",
             SettingsPane::Screenshot => "The instant screenshot, file names and the editor's keys.",
             SettingsPane::Video => "Screen recording, its formats and shortcuts.",
+            SettingsPane::Steps => "Recording the steps you take, and what they are exported as.",
         }
     }
 }
@@ -366,6 +371,8 @@ impl SettingsView {
                                     self.esc_caution,
                                 );
                             }
+                            // The pane itself comes later.
+                            SettingsPane::Steps => {}
                         }
                     });
             });

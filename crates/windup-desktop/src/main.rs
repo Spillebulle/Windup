@@ -196,6 +196,13 @@ impl WindupApp {
                         Command::RecordPause => HotkeyEvent::RecordPause,
                         Command::RecordStop => HotkeyEvent::RecordStop,
                         Command::RecordCancel => HotkeyEvent::RecordCancel,
+                        Command::Steps => HotkeyEvent::Steps { target },
+                        Command::Step => HotkeyEvent::Step,
+                        // Task 14 gives it an event of its own.
+                        Command::StepsStop => {
+                            log::info!("steps: not yet");
+                            return;
+                        }
                         Command::Show => HotkeyEvent::Show,
                         Command::Reload => HotkeyEvent::Reload,
                     };
@@ -414,6 +421,7 @@ impl eframe::App for WindupApp {
                 HotkeyEvent::RecordPause => self.pause_recording(),
                 HotkeyEvent::RecordStop => self.stop_recording(),
                 HotkeyEvent::RecordCancel => self.cancel_recording(),
+                HotkeyEvent::Steps { .. } | HotkeyEvent::Step => log::info!("steps: not yet"),
                 HotkeyEvent::Show => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));

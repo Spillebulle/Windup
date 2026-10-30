@@ -12,7 +12,10 @@ pub enum Action {
     CaptureLauncher,
     Screenshot,
     Video,
-    /// The three below are live only while a recording runs.
+    Steps,
+    /// Adds a step by hand: live only while a Steps session runs.
+    Step,
+    /// The three below are live only while a recording or Steps session runs.
     RecordPause,
     RecordStop,
     RecordCancel,
@@ -26,6 +29,7 @@ impl Action {
             ToolId::CaptureLauncher => Action::CaptureLauncher,
             ToolId::Screenshot => Action::Screenshot,
             ToolId::Video => Action::Video,
+            ToolId::Steps => Action::Steps,
         }
     }
 }
@@ -38,6 +42,7 @@ impl Action {
             Action::PastePlain => ToolId::PastePlainText,
             Action::CaptureLauncher => ToolId::CaptureLauncher,
             Action::Screenshot => ToolId::Screenshot,
+            Action::Steps | Action::Step => ToolId::Steps,
             Action::Video | Action::RecordPause | Action::RecordStop | Action::RecordCancel => {
                 ToolId::Video
             }
@@ -74,27 +79,67 @@ pub fn recording_bindings(config: &Config) -> Vec<(Shortcut, Action)> {
     ]
 }
 
-/// The recording's keys that no enabled tool holds, for desktops where the
-/// tools' keys stay bound through the recording (the GlobalShortcuts portal's
+/// Which kind of session owns the live keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveKind {
+    Video,
+    Steps,
+}
+
+/// The keys that are live only while a Steps session runs: add a step,
+/// pause, stop (the Steps shortcut again) and Esc. Pause is the Video
+/// pause key.
+pub fn steps_bindings(config: &Config) -> Vec<(Shortcut, Action)> {
+    vec![
+        (config.steps.step_shortcut.clone(), Action::Step),
+        (config.video.pause_shortcut.clone(), Action::RecordPause),
+        (config.steps.shortcut.clone(), Action::RecordStop),
+        (
+            Shortcut::new(ShortcutModifiers::NONE, ESCAPE),
+            Action::RecordCancel,
+        ),
+    ]
+}
+
+/// The keys live only while a session of `kind` runs.
+pub fn session_bindings(config: &Config, kind: LiveKind) -> Vec<(Shortcut, Action)> {
+    match kind {
+        LiveKind::Video => recording_bindings(config),
+        LiveKind::Steps => steps_bindings(config),
+    }
+}
+
+/// The session's keys that no enabled tool holds, for desktops where the
+/// tools' keys stay bound through the session (the GlobalShortcuts portal's
 /// first session): asking for a held key again would clash, and the tool's
 /// binding does the job already (the Video key is stop while recording).
-pub fn recording_keys_untaken(config: &Config) -> Vec<(Shortcut, Action)> {
+pub fn session_keys_untaken(config: &Config, kind: LiveKind) -> Vec<(Shortcut, Action)> {
     let tools = bindings(config);
-    recording_bindings(config)
+    session_bindings(config, kind)
         .into_iter()
         .filter(|(s, _)| tools.iter().all(|(t, _)| t != s))
         .collect()
+}
+
+/// The recording's keys that no enabled tool holds; see [`session_keys_untaken`].
+pub fn recording_keys_untaken(config: &Config) -> Vec<(Shortcut, Action)> {
+    session_keys_untaken(config, LiveKind::Video)
 }
 
 /// What is bound right now: the tools' keys, plus while `recording` the
 /// recording's own, which come first and take a key a tool shares with them
 /// (the Video key is stop for as long as the recording runs).
 pub fn live_bindings(config: &Config, recording: bool) -> Vec<(Shortcut, Action)> {
+    live_bindings_for(config, recording.then_some(LiveKind::Video))
+}
+
+/// [`live_bindings`] for whichever session `live` names, if any.
+pub fn live_bindings_for(config: &Config, live: Option<LiveKind>) -> Vec<(Shortcut, Action)> {
     let tools = bindings(config);
-    if !recording {
+    let Some(kind) = live else {
         return tools;
-    }
-    let mut out = recording_bindings(config);
+    };
+    let mut out = session_bindings(config, kind);
     for (shortcut, action) in tools {
         if out.iter().all(|(s, _)| *s != shortcut) {
             out.push((shortcut, action));
@@ -250,11 +295,16 @@ mod tests {
         assert_eq!(t(ToolId::CaptureLauncher), "Print");
         assert_eq!(t(ToolId::Screenshot), "CTRL+SHIFT+s");
         assert_eq!(t(ToolId::Video), "LOGO+SHIFT+r");
+        assert_eq!(t(ToolId::Steps), "LOGO+SHIFT+g");
+        assert_eq!(
+            portal_trigger(&c.steps.step_shortcut).unwrap(),
+            "LOGO+SHIFT+x"
+        );
     }
 
     #[test]
-    fn defaults_bind_all_five() {
-        assert_eq!(bindings(&Config::default()).len(), 5);
+    fn defaults_bind_all_six() {
+        assert_eq!(bindings(&Config::default()).len(), 6);
         assert!(clashes(&Config::default()).is_empty());
     }
 
@@ -263,7 +313,7 @@ mod tests {
         let mut c = Config::default();
         c.screenshot.enabled = false;
         let b = bindings(&c);
-        assert_eq!(b.len(), 4);
+        assert_eq!(b.len(), 5);
         assert!(!b.contains(&(Shortcut::ctrl_shift_s(), Action::Screenshot)));
     }
 
@@ -371,6 +421,47 @@ mod tests {
     }
 
     #[test]
+    fn steps_keys_are_step_pause_stop_and_esc() {
+        let b = session_bindings(&Config::default(), LiveKind::Steps);
+        let s = Shortcut::new;
+        assert_eq!(
+            b,
+            vec![
+                (s(ShortcutModifiers::SUPER_SHIFT, "X"), Action::Step),
+                (s(ShortcutModifiers::SUPER_SHIFT, "P"), Action::RecordPause),
+                (s(ShortcutModifiers::SUPER_SHIFT, "G"), Action::RecordStop),
+                (s(ShortcutModifiers::NONE, "ESCAPE"), Action::RecordCancel),
+            ]
+        );
+    }
+
+    #[test]
+    fn during_steps_the_steps_key_is_stop_once_and_the_rest_stay() {
+        let c = Config::default();
+        let live = live_bindings_for(&c, Some(LiveKind::Steps));
+        assert_eq!(
+            live.iter().filter(|(s, _)| *s == c.steps.shortcut).count(),
+            1
+        );
+        assert!(live.contains(&(c.steps.shortcut.clone(), Action::RecordStop)));
+        assert!(live.contains(&(c.video.shortcut.clone(), Action::Video)));
+        assert_eq!(
+            live_bindings_for(&c, Some(LiveKind::Video)),
+            live_bindings(&c, true)
+        );
+        assert_eq!(live_bindings_for(&c, None), bindings(&c));
+    }
+
+    #[test]
+    fn the_step_key_a_tool_holds_is_left_to_it() {
+        let mut c = Config::default();
+        c.steps.step_shortcut = Shortcut::ctrl_shift_s();
+        let free = session_keys_untaken(&c, LiveKind::Steps);
+        assert!(free.iter().all(|(_, a)| *a != Action::Step));
+        assert!(free.iter().any(|(_, a)| *a == Action::RecordPause));
+    }
+
+    #[test]
     fn vk_codes() {
         assert_eq!(windows_vk("PRINTSCREEN"), Some(0x2C));
         assert_eq!(windows_vk("V"), Some(0x56));
@@ -399,7 +490,7 @@ mod tests {
         let json = r#"{"modifiers":{"super_key":true,"ctrl":false,"alt":false,"shift":false},"key":"Space"}"#;
         c.paste_plain.shortcut = serde_json::from_str(json).unwrap();
         assert_eq!(clashes(&c), vec![ToolId::PastePlainText]);
-        assert_eq!(bindings(&c).len(), 4);
+        assert_eq!(bindings(&c).len(), 5);
     }
 
     #[test]

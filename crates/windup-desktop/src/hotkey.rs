@@ -35,6 +35,12 @@ pub enum HotkeyEvent {
     Record {
         target: Target,
     },
+    /// The Steps key: starts a Steps session, or stops the one that runs.
+    Steps {
+        target: Target,
+    },
+    /// Add a step by hand (`windup --step`).
+    Step,
     /// Pause or resume the recording (`windup --record-pause`).
     RecordPause,
     /// Stop the recording (`windup --record-stop`).
@@ -57,6 +63,8 @@ impl HotkeyEvent {
             Action::CaptureLauncher => Self::Capture { target },
             Action::Screenshot => Self::Screenshot { target },
             Action::Video => Self::Record { target },
+            Action::Steps => Self::Steps { target },
+            Action::Step => Self::Step,
             Action::RecordPause => Self::RecordPause,
             Action::RecordStop => Self::RecordStop,
             Action::RecordCancel => Self::RecordCancel,

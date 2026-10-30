@@ -1,4 +1,5 @@
 use crate::shortcut::{Shortcut, ShortcutModifiers};
+use crate::steps::options::{ExportFormat, MarkerStyle, StepTrigger};
 use crate::tool::ToolId;
 use crate::video::{Bitrate, Codec, Container};
 use directories::ProjectDirs;
@@ -165,7 +166,7 @@ impl Default for ToolSizes {
 
 /// `windup_ui::theme::Palette::dark(28.0).critical`, i.e. `oklch(0.66, 0.13, 22.0)`
 /// as sRGB. Core cannot depend on the UI crate, so the value is written out.
-const DEFAULT_COLOUR: [u8; 4] = [214, 111, 110, 255];
+pub(crate) const DEFAULT_COLOUR: [u8; 4] = [214, 111, 110, 255];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -254,6 +255,35 @@ impl Default for VideoConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StepsConfig {
+    pub enabled: bool,
+    pub shortcut: Shortcut,
+    /// Adds a step by hand while a session runs.
+    pub step_shortcut: Shortcut,
+    pub trigger: StepTrigger,
+    pub marker: MarkerStyle,
+    pub export: ExportFormat,
+    pub export_dir: Option<PathBuf>,
+    pub name_pattern: String,
+}
+
+impl Default for StepsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            shortcut: Shortcut::super_shift_g(),
+            step_shortcut: Shortcut::super_shift_x(),
+            trigger: StepTrigger::default(),
+            marker: MarkerStyle::default(),
+            export: ExportFormat::default(),
+            export_dir: None,
+            name_pattern: "Steps {date} {time}".to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub theme_mode: ThemeMode,
@@ -270,6 +300,8 @@ pub struct Config {
     pub screenshot: ScreenshotConfig,
     #[serde(default)]
     pub video: VideoConfig,
+    #[serde(default)]
+    pub steps: StepsConfig,
 }
 
 impl Default for Config {
@@ -285,6 +317,7 @@ impl Default for Config {
             capture: CaptureLauncherConfig::default(),
             screenshot: ScreenshotConfig::default(),
             video: VideoConfig::default(),
+            steps: StepsConfig::default(),
         }
     }
 }
@@ -413,6 +446,7 @@ impl Config {
             ToolId::CaptureLauncher => self.capture.enabled,
             ToolId::Screenshot => self.screenshot.enabled,
             ToolId::Video => self.video.enabled,
+            ToolId::Steps => self.steps.enabled,
         }
     }
 
@@ -423,6 +457,7 @@ impl Config {
             ToolId::CaptureLauncher => self.capture.enabled = enabled,
             ToolId::Screenshot => self.screenshot.enabled = enabled,
             ToolId::Video => self.video.enabled = enabled,
+            ToolId::Steps => self.steps.enabled = enabled,
         }
         self.save();
     }
@@ -434,6 +469,7 @@ impl Config {
             ToolId::CaptureLauncher => &self.capture.shortcut,
             ToolId::Screenshot => &self.screenshot.shortcut,
             ToolId::Video => &self.video.shortcut,
+            ToolId::Steps => &self.steps.shortcut,
         }
     }
 
@@ -444,6 +480,7 @@ impl Config {
             ToolId::CaptureLauncher => self.capture.shortcut = shortcut,
             ToolId::Screenshot => self.screenshot.shortcut = shortcut,
             ToolId::Video => self.video.shortcut = shortcut,
+            ToolId::Steps => self.steps.shortcut = shortcut,
         }
         self.save();
     }
@@ -626,6 +663,28 @@ mod tests {
         c.video.enabled = false;
         assert!(!c.is_tool_enabled(ToolId::Video));
         assert_eq!(c.tool_shortcut(ToolId::Video), &Shortcut::super_shift_r());
+    }
+
+    #[test]
+    fn a_config_from_0_3_without_steps_keeps_everything_else() {
+        let mut v = serde_json::to_value(Config::default()).unwrap();
+        v.as_object_mut().unwrap().remove("steps");
+        v["clipboard"]["max_items"] = serde_json::json!(37);
+        let c: Config = serde_json::from_value(v).unwrap();
+        assert_eq!(c.clipboard.max_items, 37);
+        assert_eq!(c.steps, StepsConfig::default());
+    }
+
+    #[test]
+    fn steps_defaults_and_tool_accessors_cover_steps() {
+        let mut c = Config::default();
+        assert_eq!(c.tool_shortcut(ToolId::Steps), &Shortcut::super_shift_g());
+        assert_eq!(c.steps.step_shortcut, Shortcut::super_shift_x());
+        assert_eq!(c.steps.name_pattern, "Steps {date} {time}");
+        assert_eq!(c.steps.marker.colour, DEFAULT_COLOUR);
+        assert!(c.is_tool_enabled(ToolId::Steps));
+        c.set_tool_enabled(ToolId::Steps, false);
+        assert!(!c.steps.enabled);
     }
 
     #[test]

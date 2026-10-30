@@ -615,9 +615,20 @@ mod tests {
     }
 
     #[test]
+    fn steps_is_offered_to_cosmic() {
+        let w = wanted(&Config::default());
+        assert!(w.iter().any(|w| w.args == "--steps"
+            && w.key == "g"
+            && w.modifiers == ["Super", "Shift"]
+            && w.description == "Steps"));
+        // The step key is for the session only.
+        assert!(w.iter().all(|w| w.args != "--step"));
+    }
+
+    #[test]
     fn no_marker_offers_everything() {
         assert!(offered(None).is_empty());
-        assert_eq!(pending(wanted(&Config::default()), &offered(None)).len(), 5);
+        assert_eq!(pending(wanted(&Config::default()), &offered(None)).len(), 6);
     }
 
     #[test]
@@ -627,7 +638,7 @@ mod tests {
 ";
         let left = pending(wanted(&Config::default()), &offered(Some(old)));
         let args: Vec<&str> = left.iter().map(|w| w.args.as_str()).collect();
-        assert_eq!(args, ["--capture", "--screenshot", "--record"]);
+        assert_eq!(args, ["--capture", "--screenshot", "--record", "--steps"]);
     }
 
     #[test]

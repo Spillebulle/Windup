@@ -8,15 +8,17 @@ pub enum ToolId {
     CaptureLauncher,
     Screenshot,
     Video,
+    Steps,
 }
 
 impl ToolId {
-    pub const ALL: [ToolId; 5] = [
+    pub const ALL: [ToolId; 6] = [
         ToolId::ClipboardHistory,
         ToolId::PastePlainText,
         ToolId::CaptureLauncher,
         ToolId::Screenshot,
         ToolId::Video,
+        ToolId::Steps,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -26,6 +28,7 @@ impl ToolId {
             ToolId::CaptureLauncher => "capture_launcher",
             ToolId::Screenshot => "screenshot",
             ToolId::Video => "video",
+            ToolId::Steps => "steps",
         }
     }
 
@@ -36,6 +39,7 @@ impl ToolId {
             ToolId::CaptureLauncher => "Capture",
             ToolId::Screenshot => "Screenshot",
             ToolId::Video => "Video",
+            ToolId::Steps => "Steps",
         }
     }
 
@@ -54,6 +58,9 @@ impl ToolId {
             ToolId::Video => {
                 "Records the screen to a video file or a GIF, with sound if you want it."
             }
+            ToolId::Steps => {
+                "Records the steps you take, a picture for each click or key press, and exports them as a document."
+            }
         }
     }
 
@@ -64,6 +71,7 @@ impl ToolId {
             ToolId::CaptureLauncher => Some(Shortcut::print_screen()),
             ToolId::Screenshot => Some(Shortcut::ctrl_shift_s()),
             ToolId::Video => Some(Shortcut::super_shift_r()),
+            ToolId::Steps => Some(Shortcut::super_shift_g()),
         }
     }
 }
@@ -78,6 +86,20 @@ mod tests {
         for t in ToolId::ALL {
             assert!(seen.insert(t.default_shortcut().unwrap()), "{t:?}");
         }
-        assert_eq!(ToolId::ALL.len(), 5);
+        assert_eq!(ToolId::ALL.len(), 6);
+    }
+
+    #[test]
+    fn the_step_and_pause_keys_collide_with_no_tool_default() {
+        let c = crate::config::Config::default();
+        for s in [&c.steps.step_shortcut, &c.video.pause_shortcut] {
+            assert!(
+                ToolId::ALL
+                    .iter()
+                    .all(|t| t.default_shortcut().as_ref() != Some(s)),
+                "{s}"
+            );
+        }
+        assert_ne!(c.steps.step_shortcut, c.video.pause_shortcut);
     }
 }
