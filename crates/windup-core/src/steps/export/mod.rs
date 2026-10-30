@@ -42,6 +42,10 @@ pub fn export(
     if doc.steps.is_empty() {
         return Err(NOTHING_TO_EXPORT.to_string());
     }
+    // A folder export would merge into whatever is there.
+    if matches!(format, ExportFormat::Markdown | ExportFormat::Images) && !is_free_folder(dest) {
+        return Err(FOLDER_NOT_EMPTY.to_string());
+    }
     // Each step rendered with its marker, one at a time, so only the encoded
     // pictures are held.
     let shot = |i: usize| -> Result<image::RgbaImage, String> {
@@ -101,6 +105,16 @@ pub fn export(
 }
 
 const TITLE: &str = "Steps";
+
+pub const FOLDER_NOT_EMPTY: &str = "That folder is not empty.";
+
+/// Nothing there yet, or a folder with nothing in it. A file counts as in use.
+fn is_free_folder(dest: &Path) -> bool {
+    match std::fs::read_dir(dest) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => !dest.exists(),
+    }
+}
 
 fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
@@ -271,6 +285,39 @@ mod tests {
         assert!(text.contains("![Step 2](images/02.png)"));
         assert!(text.contains(r"\*not bold\*"));
         assert!(out.join("images/01.png").exists());
+    }
+
+    #[test]
+    fn a_folder_in_use_is_refused_and_an_empty_one_accepted() {
+        let (dir, _) = session("folder");
+        let style = MarkerStyle::default();
+        for format in [ExportFormat::Markdown, ExportFormat::Images] {
+            let used = dir.join(format!("used-{}", format.arg()));
+            std::fs::create_dir_all(&used).unwrap();
+            std::fs::write(used.join("keep.txt"), "x").unwrap();
+            let err = export(&dir, format, &style, &used).unwrap_err();
+            assert_eq!(err, FOLDER_NOT_EMPTY);
+            let names: Vec<_> = std::fs::read_dir(&used).unwrap().collect();
+            assert_eq!(names.len(), 1, "nothing was written");
+
+            let empty = dir.join(format!("empty-{}", format.arg()));
+            std::fs::create_dir_all(&empty).unwrap();
+            export(&dir, format, &style, &empty).unwrap();
+            assert!(
+                empty
+                    .join(if format == ExportFormat::Images {
+                        "01.png"
+                    } else {
+                        "steps.md"
+                    })
+                    .exists()
+            );
+        }
+        // A file may be overwritten.
+        let page = dir.join("a.html");
+        std::fs::write(&page, "old").unwrap();
+        export(&dir, ExportFormat::Html, &style, &page).unwrap();
+        assert_ne!(std::fs::read_to_string(&page).unwrap(), "old");
     }
 
     #[test]
