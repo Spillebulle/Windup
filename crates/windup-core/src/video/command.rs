@@ -136,6 +136,12 @@ pub fn segment_args(job: &SegmentJob, container: Container) -> Vec<String> {
     }
 
     // Sound inputs come after the picture, so their indices start there.
+    // Stamped by the wall clock as it arrives, so silence padded in late
+    // never looks behind the picture (ffmpeg would stop reading the picture
+    // to wait for it), then moved to start at zero: ffmpeg moves an input
+    // there itself only when it learns its start, which a pipe with nothing
+    // in it yet does not tell, and a track stamped from 1970 made the MP4
+    // decades long, which GStreamer players refuse.
     for inp in audio {
         push(&mut a, &["-thread_queue_size", "512"]);
         push(
@@ -146,12 +152,15 @@ pub fn segment_args(job: &SegmentJob, container: Container) -> Vec<String> {
         a.extend(["-ac".into(), inp.channels.to_string()]);
         a.extend(["-i".into(), inp.path.clone()]);
     }
-    let mixed = audio.len() == 2;
-    if mixed {
-        graph.push(format!(
-            "[{video_inputs}:a][{}:a]amix=inputs=2:normalize=0[a]",
-            video_inputs + 1
-        ));
+    let zeroed = |i: usize| format!("[{}:a]asetpts=PTS-STARTPTS", video_inputs + i);
+    match audio.len() {
+        0 => {}
+        1 => graph.push(format!("{}[a]", zeroed(0))),
+        _ => graph.push(format!(
+            "{}[a0];{}[a1];[a0][a1]amix=inputs=2:normalize=0[a]",
+            zeroed(0),
+            zeroed(1)
+        )),
     }
     if !graph.is_empty() {
         a.extend(["-filter_complex".into(), graph.join(";")]);
@@ -160,17 +169,15 @@ pub fn segment_args(job: &SegmentJob, container: Container) -> Vec<String> {
         push(&mut a, &["-vf", "format=nv12,hwupload"]);
     }
 
-    // Maps are only needed when the graph labels its streams or the sound
-    // has to be picked from inputs of its own.
+    // Maps are only needed when the graph labels its streams; sound always
+    // goes through it.
     if video_inputs == 0 {
         push(&mut a, &["-map", "[v]"]);
     } else if !audio.is_empty() {
         push(&mut a, &["-map", "0:v"]);
     }
-    if mixed {
+    if !audio.is_empty() {
         push(&mut a, &["-map", "[a]"]);
-    } else if audio.len() == 1 {
-        a.extend(["-map".into(), format!("{video_inputs}:a")]);
     }
 
     if gif {
@@ -432,7 +439,11 @@ mod tests {
         let mut j = job(raw(), "libx264");
         j.audio = audio(2);
         let a = segment_args(&j, Container::Mp4);
-        assert!(graph(&a).contains("amix=inputs=2:normalize=0"));
+        assert_eq!(
+            graph(&a),
+            "[1:a]asetpts=PTS-STARTPTS[a0];[2:a]asetpts=PTS-STARTPTS[a1];\
+             [a0][a1]amix=inputs=2:normalize=0[a]"
+        );
         assert!(has(&a, "-map 0:v -map [a]"));
         assert!(has(
             &a,
@@ -442,19 +453,20 @@ mod tests {
     }
 
     #[test]
-    fn one_audio_input_is_mapped_directly_and_ddagrab_shares_one_graph() {
+    fn one_audio_input_starts_at_zero_and_ddagrab_shares_one_graph() {
         let mut j = job(raw(), "libx264");
         j.audio = audio(1);
         let a = segment_args(&j, Container::WebM);
-        assert!(!a.iter().any(|x| x == "-filter_complex"));
-        assert!(has(&a, "-map 0:v -map 1:a"));
+        assert_eq!(graph(&a), "[1:a]asetpts=PTS-STARTPTS[a]");
+        assert!(has(&a, "-map 0:v -map [a]"));
         assert!(has(&a, "-c:a libopus -b:a 128k"));
 
         let mut j = job(dda(), "h264_nvenc");
         j.audio = audio(2);
         let a = segment_args(&j, Container::Mp4);
         assert_eq!(a.iter().filter(|x| *x == "-filter_complex").count(), 1);
-        assert!(graph(&a).contains("[v];[0:a][1:a]amix"));
+        assert!(graph(&a).contains("[v];[0:a]asetpts=PTS-STARTPTS[a0];[1:a]"));
+        assert!(has(&a, "-map [v] -map [a]"));
     }
 
     #[test]

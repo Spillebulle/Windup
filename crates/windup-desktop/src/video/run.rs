@@ -1515,6 +1515,18 @@ mod tests {
         let info = info(&ff, &out);
         assert!(info.contains("64x64"), "{info}");
         assert!(info.contains("Audio: aac"), "{info}");
+        // Timed from zero, not from 1970: a sound track stamped with the
+        // wall clock made the MP4 decades long, and GStreamer players
+        // (COSMIC's, GNOME's) found nothing in it to play.
+        let d = duration(&info);
+        assert!((0.8..2.5).contains(&d), "{d} s: {info}");
+        let at = info.find("start: ").expect("a start") + "start: ".len();
+        let start: f64 = info[at..]
+            .split(',')
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .expect("a start time");
+        assert!(start.abs() < 0.5, "starts at {start} s");
     }
 
     /// Silence that counts how often a segment restarted it.
