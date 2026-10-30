@@ -12,6 +12,14 @@
 # extracted. Downloads are cached in target/ff-dl (FFMPEG_CACHE overrides),
 # FFMPEG_LOCK points at a different lock file (the tests use a tampered copy).
 #
+# BtbN prunes old autobuild tags, so the same archives are mirrored as the
+# assets of a release `ffmpeg-<tag>` in this repository (made by
+# tools/mirror-ffmpeg.sh). The mirror is tried first, BtbN after; whichever
+# answers, the sum decides. With GH_TOKEN or GITHUB_TOKEN set and gh
+# installed the mirror is read through gh, which also works while the
+# repository is private. FFMPEG_MIRROR names another owner/repo, or `none`
+# to go straight to BtbN.
+#
 # Run from the repository root.
 
 set -eu
@@ -31,6 +39,7 @@ fi
 
 lock=${FFMPEG_LOCK:-packaging/ffmpeg.lock}
 cache=${FFMPEG_CACHE:-target/ff-dl}
+mirror=${FFMPEG_MIRROR:-Spillebulle/Windup}
 
 tag=$(awk '$1 == "tag" { print $2 }' "$lock")
 set -- $(awk -v p="$platform" '$1 == p { print $2, $3 }' "$lock")
@@ -50,10 +59,31 @@ mkdir -p "$cache" "$dest"
 
 sum() { sha256sum "$1" | cut -d' ' -f1; }
 
+# The mirror's copy into $archive.part; fails quietly when there is none.
+from_mirror() {
+    [ "$mirror" != none ] || return 1
+    name=${url##*/}
+    if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
+        gh release download "ffmpeg-$tag" --repo "$mirror" --pattern "$name" \
+            --output "$archive.part" --clobber 2>/dev/null
+    else
+        curl -fsSL --retry 3 -o "$archive.part" \
+            "https://github.com/$mirror/releases/download/ffmpeg-$tag/$name" 2>/dev/null
+    fi
+}
+
 if [ ! -f "$archive" ] || [ "$(sum "$archive")" != "$want" ]; then
-    echo "==> downloading ${url##*/}"
-    curl -fsSL --retry 3 -o "$archive.part" "$url"
-    mv "$archive.part" "$archive"
+    rm -f "$archive" "$archive.part"
+    [ "$mirror" = none ] || echo "==> downloading ${url##*/} from $mirror, release ffmpeg-$tag"
+    if from_mirror && [ "$(sum "$archive.part")" = "$want" ]; then
+        mv "$archive.part" "$archive"
+    else
+        [ ! -f "$archive.part" ] || echo "the mirror's copy does not match the lock; ignoring it" >&2
+        rm -f "$archive.part"
+        echo "==> downloading ${url##*/} from BtbN"
+        curl -fsSL --retry 3 -o "$archive.part" "$url"
+        mv "$archive.part" "$archive"
+    fi
 fi
 got=$(sum "$archive")
 if [ "$got" != "$want" ]; then

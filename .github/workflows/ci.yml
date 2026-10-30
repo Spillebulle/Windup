@@ -70,6 +70,8 @@ jobs:
           key: linux-packages
 
       - name: Build
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           sh packaging/linux/dependencies.sh
           sudo apt-get install -y rpm
@@ -161,11 +163,13 @@ jobs:
         if: ${{ !matrix.test }}
         run: cargo build --release -p windup-desktop --target ${{ matrix.target }}
 
-      # The pinned FFmpeg must still download, match its checksum and offer
-      # the encoders the recorder needs.
+      # The pinned FFmpeg must still download (from the mirror, else BtbN),
+      # match its checksum and offer the encoders the recorder needs.
       - name: FFmpeg encoders
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           sh tools/fetch-ffmpeg.sh win64 target/ff
           WINDUP_FFMPEG="$PWD/target/ff/ffmpeg.exe" cargo run -p windup-desktop --target ${{ matrix.target }} -- --encoders-test
@@ -198,6 +202,8 @@ jobs:
       # Next to the binary, where Windup looks first. ffprobe is only for
       # the cases that inspect what they recorded.
       - name: FFmpeg
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: sh tools/fetch-ffmpeg.sh linux64 target/debug --with-ffprobe
 
       - name: FFmpeg starts
