@@ -192,6 +192,22 @@ fn menu(entries: Vec<Entry>, current: BarCommand, tip: Option<&'static str>) -> 
     }
 }
 
+/// Area, Window or Full screen: what the next selection is made of.
+fn target_menu(s: &BarState) -> Item {
+    Item::Menu(menu(
+        TARGETS
+            .iter()
+            .map(|&(kind, icon, label)| Entry {
+                icon: Some(icon),
+                label: label.to_string(),
+                command: BarCommand::Target(kind),
+            })
+            .collect(),
+        BarCommand::Target(s.target),
+        None,
+    ))
+}
+
 fn plain(label: String, command: BarCommand) -> Entry {
     Entry {
         icon: None,
@@ -248,18 +264,7 @@ impl Bar {
                     .collect(),
                 ),
                 Item::Divider,
-                Item::Menu(menu(
-                    TARGETS
-                        .iter()
-                        .map(|&(kind, icon, label)| Entry {
-                            icon: Some(icon),
-                            label: label.to_string(),
-                            command: BarCommand::Target(kind),
-                        })
-                        .collect(),
-                    BarCommand::Target(s.target),
-                    None,
-                )),
+                target_menu(s),
                 Item::Divider,
                 Item::Icon(IconButton {
                     icon: Icon::Settings,
@@ -269,7 +274,10 @@ impl Bar {
                 }),
                 Item::Icon(close),
             ],
+            // The target stays: a click outside the selection picks again.
             Stage::Editing => vec![
+                target_menu(s),
+                Item::Divider,
                 Item::Seg(
                     TOOLS
                         .iter()
@@ -344,6 +352,8 @@ impl Bar {
                     })
                 };
                 vec![
+                    target_menu(s),
+                    Item::Divider,
                     Item::Menu(rate),
                     Item::Menu(quality),
                     Item::Divider,

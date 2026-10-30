@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Recordings with sound play in every player. The sound track was stamped with the time of day, so the MP4 claimed to be decades long, and GStreamer players such as COSMIC's and GNOME's found nothing to play in it. Recordings made with 0.3.0 can be fixed with `ffmpeg -i old.mp4 -c:v copy -af asetpts=PTS-STARTPTS fixed.mp4`.
+- After a selection is made, the Area, Window and Full screen dropdown stays on the bar, in the editor and before recording. Dragging outside the selection draws a new area, whatever tool is in hand; with Window or Full screen chosen, a click outside picks the window or screen under the pointer, which is highlighted as it moves. The edges and corners still resize the selection, and the edits stay where they are.
+
 ## 0.3.0
 
 - Screen recording. Win+Shift+R (Super+Shift+R on Linux) opens the capture bar ready to record an area, a window or the whole screen, to MP4, WebM, MOV, MKV or a GIF, with the computer's sound and the microphone if you turn them on. A small bar with a timer, pause and stop stays out of the recording; the same keys stop it, Win+Shift+P pauses it and Esc throws it away. A notice says where the file went, with a button that opens the folder.

@@ -543,6 +543,26 @@ impl CaptureView {
             }
         }
 
+        // Once a selection is made, the window or screen a click outside it
+        // would pick instead: its ants, without the hole.
+        if session.stage != Stage::Choosing
+            && let Some(t) = session.hover
+        {
+            let r = map.rect_to_surface(t.at(now, self.reduced_motion).normalised());
+            let ring = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+            ];
+            ants::ants(&painter, &ring, true, p, now, ctx.pixels_per_point());
+            if gliding(session, now, self.reduced_motion) {
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(metrics::ANT_FRAME_MS));
+            }
+        }
+
         // The selected annotation's transform box.
         if session.stage == Stage::Editing
             && let Some(id) = session.doc.selected
@@ -634,13 +654,18 @@ impl CaptureView {
 
 /// Whether the loupe shows: when it is on, while choosing (any target: the
 /// press or click is what it aims), and while editing or ready only for the
-/// pipette or while an edge or corner of the selection is being dragged.
+/// pipette, while an edge or corner of the selection is being dragged, or
+/// while a new area is dragged out over it.
 pub fn loupe_wanted(session: &Session) -> bool {
     session.loupe
         && match session.stage {
             Stage::Choosing => true,
-            Stage::Editing => session.tool == Tool::Pipette || session.adjusting_edge(),
-            Stage::Ready => session.adjusting_edge(),
+            Stage::Editing => {
+                session.tool == Tool::Pipette
+                    || session.adjusting_edge()
+                    || session.redrawing_area()
+            }
+            Stage::Ready => session.adjusting_edge() || session.redrawing_area(),
         }
 }
 
@@ -667,7 +692,6 @@ fn bar_state<'a>(session: &Session, keys: &'a EditorKeys) -> BarState<'a> {
 /// now and where it will be a whole tween later are the same rect.
 pub fn gliding(session: &Session, now: f64, reduced_motion: bool) -> bool {
     !reduced_motion
-        && session.stage == Stage::Choosing
         && session
             .hover
             .is_some_and(|t| t.at(now, false) != t.at(now + TWEEN_SECS, false))
@@ -675,9 +699,15 @@ pub fn gliding(session: &Session, now: f64, reduced_motion: bool) -> bool {
 
 /// The pointer's shape over the overlay at desktop position `d`.
 fn cursor(session: &Session, d: [f32; 2]) -> CursorIcon {
+    // Outside a selection already made, as while choosing: a drag there
+    // draws a new area, a click picks the window or screen.
+    let outside = if session.target == TargetKind::Area {
+        CursorIcon::Crosshair
+    } else {
+        CursorIcon::PointingHand
+    };
     match session.stage {
-        Stage::Choosing if session.target == TargetKind::Area => CursorIcon::Crosshair,
-        Stage::Choosing => CursorIcon::PointingHand,
+        Stage::Choosing => outside,
         Stage::Editing if session.tool == Tool::Pipette => CursorIcon::Crosshair,
         // Ready has no tools: it acts as the select tool does.
         Stage::Ready => match session
@@ -689,7 +719,7 @@ fn cursor(session: &Session, d: [f32; 2]) -> CursorIcon {
             Some(Handle::NE | Handle::SW) => CursorIcon::ResizeNeSw,
             Some(Handle::NW | Handle::SE) => CursorIcon::ResizeNwSe,
             Some(Handle::Move) => CursorIcon::Move,
-            None => CursorIcon::Default,
+            None => outside,
         },
         Stage::Editing => match session
             .selection
@@ -700,6 +730,7 @@ fn cursor(session: &Session, d: [f32; 2]) -> CursorIcon {
             Some(Handle::NE | Handle::SW) => CursorIcon::ResizeNeSw,
             Some(Handle::NW | Handle::SE) => CursorIcon::ResizeNwSe,
             Some(Handle::Move) if session.tool == Tool::Select => CursorIcon::Move,
+            None => outside,
             _ if session.tool == Tool::Select => CursorIcon::Default,
             _ => CursorIcon::Crosshair,
         },

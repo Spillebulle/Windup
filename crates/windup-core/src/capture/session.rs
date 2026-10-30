@@ -168,6 +168,9 @@ pub struct Session {
     grab: Grab,
     /// The selection edge last grabbed, which the arrow keys then move.
     edge: Option<Handle>,
+    /// A press outside the selection, once one is made: a drag there draws
+    /// a new area, a click picks the window or screen under it.
+    reselecting: bool,
     draw_start: (f32, f32),
 }
 
@@ -212,6 +215,7 @@ impl Session {
             also_save_on_copy: cfg.also_save_on_copy,
             grab: Grab::Nothing,
             edge: None,
+            reselecting: false,
             draw_start: (0.0, 0.0),
         }
     }
@@ -238,12 +242,21 @@ impl Session {
 
     // --- pointer -----------------------------------------------------------
 
+    /// While choosing, the window or screen a click would pick glides to the
+    /// pointer; once a selection is made, the same outside it, where a
+    /// click picks again.
     pub fn pointer_moved(&mut self, p: [f32; 2], now: f64) {
         self.pointer = Some(p);
-        if self.stage != Stage::Choosing {
-            return;
-        }
-        let target = self.target_at((p[0], p[1]));
+        let at = (p[0], p[1]);
+        let target = match self.stage {
+            Stage::Choosing => self.target_at(at),
+            Stage::Editing | Stage::Ready
+                if self.grab == Grab::Nothing && self.outside_selection(at) =>
+            {
+                self.target_at(at)
+            }
+            Stage::Editing | Stage::Ready => None,
+        };
         if target == self.hover_target {
             return;
         }
@@ -292,9 +305,19 @@ impl Session {
         match grab {
             Grab::Selection => {
                 let min_drag = MIN_DRAG * self.units_per_point((p[0], p[1]));
-                self.selection.release(min_drag);
+                let click = self.selection.release(min_drag);
                 if self.stage == Stage::Choosing && self.has_selection(min_drag) {
                     self.enter_selected();
+                }
+                if std::mem::take(&mut self.reselecting) {
+                    if !click {
+                        // A drawn area, whatever the dropdown said.
+                        self.set_target(TargetKind::Area);
+                    } else if let Some(rect) = self.target_at((p[0], p[1])) {
+                        self.selection.set_rect(rect);
+                        self.hover = None;
+                        self.hover_target = None;
+                    }
                 }
             }
             Grab::Transform => self.doc.end_transform(),
@@ -348,6 +371,12 @@ impl Session {
         matches!(self.stage, Stage::Editing | Stage::Ready)
             && self.grab == Grab::Selection
             && self.edge.is_some()
+    }
+
+    /// Whether a new area is being dragged out over a selection already made,
+    /// which the loupe helps aim as it does the first.
+    pub fn redrawing_area(&self) -> bool {
+        self.grab == Grab::Selection && self.reselecting
     }
 
     // --- video -------------------------------------------------------------
@@ -485,7 +514,9 @@ impl Session {
                 }
                 self.tool = tool;
             }
-            Action::SetTarget(kind) if choosing => self.set_target(kind),
+            // Once a selection is made it stays; the target says what a
+            // click outside it picks next.
+            Action::SetTarget(kind) if self.grab == Grab::Nothing => self.set_target(kind),
             // Steps arrives in a later version; Video when it can work here.
             Action::SetMode(mode) if choosing && mode != self.mode => {
                 let allowed = match mode {
@@ -663,14 +694,36 @@ impl Session {
     }
 
     /// Ready has no tools: an edge or corner resizes the selection, inside
-    /// moves it.
+    /// moves it, outside starts another.
     fn press_ready(&mut self, at: (f32, f32)) {
         let tolerance = self.handle_tolerance(at);
-        if let Some(h) = self.selection.handle_at(at, tolerance) {
-            self.edge = (h != Handle::Move).then_some(h);
-            self.selection.press(at, tolerance);
-            self.grab = Grab::Selection;
+        match self.selection.handle_at(at, tolerance) {
+            Some(h) => {
+                self.edge = (h != Handle::Move).then_some(h);
+                self.selection.press(at, tolerance);
+                self.grab = Grab::Selection;
+            }
+            None => self.reselect(at, tolerance),
         }
+    }
+
+    /// A press outside the selection: a drag draws a new area in its place,
+    /// a click picks the window or screen there (`release`).
+    fn reselect(&mut self, at: (f32, f32), tolerance: f32) {
+        self.doc.selected = None;
+        self.edge = None;
+        self.hover = None;
+        self.hover_target = None;
+        self.selection.press(at, tolerance);
+        self.grab = Grab::Selection;
+        self.reselecting = true;
+    }
+
+    /// Outside the selection and its edges.
+    fn outside_selection(&self, at: (f32, f32)) -> bool {
+        self.selection
+            .handle_at(at, self.handle_tolerance(at))
+            .is_none()
     }
 
     fn press_editing(&mut self, at: (f32, f32)) {
@@ -715,16 +768,19 @@ impl Session {
             self.grab = Grab::Selection;
             return;
         }
-        if self.tool == Tool::Select {
-            self.doc.selected = None;
-            if handle.is_some() {
-                self.edge = None;
-                self.selection.press(at, tolerance);
-                self.grab = Grab::Selection;
-            }
+        // Outside it, whatever the tool, the area is chosen again.
+        if handle.is_none() {
+            self.reselect(at, tolerance);
             return;
         }
         self.doc.selected = None;
+        if self.tool == Tool::Select {
+            // Inside: Select moves it.
+            self.edge = None;
+            self.selection.press(at, tolerance);
+            self.grab = Grab::Selection;
+            return;
+        }
         self.start_draft(at);
     }
 
@@ -950,6 +1006,75 @@ mod tests {
         s.release([40.0, 85.0], NONE);
         assert_ne!(s.selection.rect, Some(rect(10.0, 10.0, 80.0, 80.0)));
         assert_eq!(s.doc.items, before);
+    }
+
+    #[test]
+    fn a_drag_outside_the_selection_draws_a_new_area_with_any_tool() {
+        for tool in [Tool::Select, Tool::Pen, Tool::Rect] {
+            let mut s = editing();
+            draw(&mut s, Tool::Ellipse, [20.0, 20.0], [60.0, 50.0], NONE);
+            let before = s.doc.items.clone();
+            s.act(Action::SetTool(tool));
+            drag_area(&mut s, [120.0, 20.0], [180.0, 80.0]);
+            assert_eq!(s.stage, Stage::Editing, "{tool:?}");
+            assert_eq!(
+                s.selection.rect,
+                Some(rect(120.0, 20.0, 60.0, 60.0)),
+                "{tool:?}"
+            );
+            assert_eq!(s.doc.items, before, "{tool:?}: nothing drawn, nothing lost");
+        }
+    }
+
+    #[test]
+    fn a_click_outside_the_selection_keeps_an_area_and_picks_a_window() {
+        let mut s = editing();
+        s.press([150.0, 50.0], NONE);
+        s.release([150.0, 50.0], NONE);
+        assert_eq!(s.selection.rect, Some(rect(10.0, 10.0, 80.0, 80.0)));
+
+        s.act(Action::SetTarget(TargetKind::FullScreen));
+        s.pointer_moved([50.0, 50.0], 0.0);
+        assert!(s.hover.is_none(), "inside the selection nothing is offered");
+        s.pointer_moved([150.0, 50.0], 0.0);
+        assert!(s.hover.is_some(), "outside it, what a click would pick");
+        s.press([150.0, 50.0], NONE);
+        s.release([150.0, 50.0], NONE);
+        assert_eq!(s.stage, Stage::Editing);
+        assert_eq!(s.selection.rect, Some(rect(100.0, 0.0, 100.0, 100.0)));
+        assert_eq!(s.target, TargetKind::FullScreen);
+    }
+
+    #[test]
+    fn a_drawn_area_makes_the_target_area() {
+        let mut s = session(TargetKind::Window);
+        s.press([20.0, 20.0], NONE);
+        s.release([20.0, 20.0], NONE);
+        assert_eq!(s.stage, Stage::Editing);
+        drag_area(&mut s, [120.0, 20.0], [180.0, 80.0]);
+        assert_eq!(s.selection.rect, Some(rect(120.0, 20.0, 60.0, 60.0)));
+        assert_eq!(s.target, TargetKind::Area);
+    }
+
+    #[test]
+    fn ready_draws_a_new_area_outside_the_selection() {
+        let mut s = ready();
+        drag_area(&mut s, [120.0, 20.0], [180.0, 80.0]);
+        assert_eq!(s.stage, Stage::Ready);
+        assert_eq!(s.selection.rect, Some(rect(120.0, 20.0, 60.0, 60.0)));
+    }
+
+    #[test]
+    fn redrawing_an_area_is_aimed_with_the_loupe() {
+        let mut s = editing();
+        s.press([120.0, 20.0], NONE);
+        assert!(s.redrawing_area());
+        s.drag([180.0, 80.0], NONE);
+        assert!(s.redrawing_area());
+        s.release([180.0, 80.0], NONE);
+        assert!(!s.redrawing_area());
+        s.press([150.0, 50.0], NONE);
+        assert!(!s.redrawing_area(), "moving the new one is not");
     }
 
     /// `editing()` with monitor 0 at 150 %: 1.5 desktop units per point.

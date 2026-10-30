@@ -108,14 +108,19 @@ impl Selection {
     }
 
     /// A new drag shorter than `min_drag` (desktop units) in either
-    /// direction was a click or a line: the previous rect comes back.
-    pub fn release(&mut self, min_drag: f32) {
+    /// direction was a click or a line: the previous rect comes back, and
+    /// the answer is true. (One that never moved left the rect as it was.)
+    pub fn release(&mut self, min_drag: f32) -> bool {
         if let Some(Drag::New { prev, .. }) = self.drag.take()
-            && let Some(rect) = self.rect
-            && (rect.w < min_drag || rect.h < min_drag)
+            && (self.rect == prev
+                || self
+                    .rect
+                    .is_none_or(|rect| rect.w < min_drag || rect.h < min_drag))
         {
             self.rect = prev;
+            return true;
         }
+        false
     }
 
     /// Corners win over edges, edges over the inside (`Move`).
