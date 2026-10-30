@@ -9,8 +9,9 @@
 //! offered. A key changed in Windup's own settings is not carried over to a
 //! binding COSMIC already has.
 //!
-//! A recording's keys (pause, stop, Esc) go in the same file for as long as
-//! it runs, tagged so the ones a crash leaves are removed at the next start.
+//! A recording's keys (pause, stop, Esc), and a Steps session's (those and
+//! `--step`), go in the same file for as long as it runs, tagged so the ones
+//! a crash leaves are removed at the next start.
 
 use std::path::{Path, PathBuf};
 use std::{fs, io};
@@ -86,8 +87,9 @@ fn program() -> String {
         .unwrap_or_else(|| "windup".into())
 }
 
-/// Binds a recording's keys for as long as it runs: `keys` is each shortcut
-/// and the arguments it runs Windup with (`--record-cancel`). Entries a
+/// Binds a recording's or a Steps session's keys for as long as it runs:
+/// `keys` is each shortcut and the arguments it runs Windup with
+/// (`--record-cancel`, `--step`). Entries a
 /// crash left are replaced. False when nothing was added; the recording goes
 /// on, with the bar and the commands.
 pub fn add_temporary(keys: &[(Shortcut, &str)]) -> bool {

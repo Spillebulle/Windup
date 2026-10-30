@@ -26,7 +26,7 @@ pub use clip::Payload;
 pub use notice::NoticeSetup;
 pub use overlay::{CaptureEnd, CaptureSetup};
 pub use popup::PopupSetup;
-pub use recbar::RecBarSetup;
+pub use recbar::{LayerConceal, RecBarSetup};
 
 use crate::platform::{DataControl, Host, PasteVia, Plan, Watch};
 use calloop::channel::{Channel, Event as ChannelEvent, Sender as LoopSender, channel};
@@ -128,6 +128,14 @@ pub enum Request {
     OpenRecBar(Box<RecBarSetup>),
     /// Take the recording bar down.
     CloseRecBar,
+    /// Hide the bar for a Steps shot, or show it again; the sender is told
+    /// once that is done.
+    ConcealRecBar {
+        hide: bool,
+        done: std::sync::mpsc::Sender<()>,
+    },
+    /// What the bar shows changed (a step taken, a pause): draw it again.
+    RecBarChanged,
 }
 
 pub enum ServiceEvent {
@@ -153,6 +161,7 @@ pub struct Shared {
     pub events: Sender<ServiceEvent>,
 }
 
+#[derive(Clone)]
 pub struct Service {
     tx: LoopSender<Request>,
 }
@@ -250,6 +259,19 @@ impl Service {
 
     pub fn close_recbar(&self) {
         self.send(Request::CloseRecBar);
+    }
+
+    /// Hides the bar (`hide`) or shows it again. The receiver hears once
+    /// it is done: after the compositor's next frame callback, or 100 ms;
+    /// at once when there is no bar or the thread is gone.
+    pub fn conceal_recbar(&self, hide: bool) -> std::sync::mpsc::Receiver<()> {
+        let (done, rx) = std::sync::mpsc::channel();
+        self.send(Request::ConcealRecBar { hide, done });
+        rx
+    }
+
+    pub fn recbar_changed(&self) {
+        self.send(Request::RecBarChanged);
     }
 }
 
@@ -463,6 +485,8 @@ impl State {
             Request::Notice(setup) => self.open_notice(*setup),
             Request::OpenRecBar(setup) => self.open_recbar(*setup),
             Request::CloseRecBar => self.close_recbar(),
+            Request::ConcealRecBar { hide, done } => self.conceal_recbar(hide, done),
+            Request::RecBarChanged => self.queue_pane_redraw(),
         }
     }
 

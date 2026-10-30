@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::{Command as Process, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use windup_core::ipc::{self, Command};
+use windup_core::ipc::{self, Command, Request};
 
 pub fn socket_path() -> PathBuf {
     let var = |k| std::env::var(k).ok();
@@ -24,9 +24,22 @@ pub fn socket_path() -> PathBuf {
 
 /// Delivers `command` to the running Windup. Fails when none is listening.
 pub fn send(command: Command) -> std::io::Result<()> {
+    send_request(&Request::Do(command))
+}
+
+/// Delivers `request` to the running Windup: a command, or the Steps
+/// review's `EditStep`. Fails when none is listening, or for a path that
+/// cannot go on the socket's one line.
+pub fn send_request(request: &Request) -> std::io::Result<()> {
+    let line = request.encode().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the path cannot be sent on the socket",
+        )
+    })?;
     let mut stream = UnixStream::connect(socket_path())?;
     stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-    stream.write_all(command.encode().as_bytes())
+    stream.write_all(line.as_bytes())
 }
 
 /// Delivers `command`, first starting Windup in the background if it is not
@@ -117,16 +130,16 @@ pub fn bind() -> std::io::Result<Bound> {
     }
 }
 
-/// Accepts connections for ever, one command per connection.
-pub fn serve(listener: UnixListener, mut on_command: impl FnMut(Command) + Send + 'static) {
+/// Accepts connections for ever, one request per connection.
+pub fn serve(listener: UnixListener, mut on_request: impl FnMut(Request) + Send + 'static) {
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
             let mut line = String::new();
             if BufReader::new(stream).read_line(&mut line).is_ok() {
-                match Command::parse(&line) {
-                    Some(command) => on_command(command),
+                match Request::parse(&line) {
+                    Some(request) => on_request(request),
                     // `bind` in another Windup checking whether we are alive.
                     None if line.is_empty() => {}
                     None => log::warn!("ignoring unknown command {line:?} on the socket"),

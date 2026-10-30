@@ -188,8 +188,13 @@ impl WindupApp {
             if let Some(socket) = startup.listener {
                 let tx = listener.sender();
                 let ctx = cc.egui_ctx.clone();
-                linux::ipc::serve(socket, move |command| {
-                    use windup_core::ipc::Command;
+                linux::ipc::serve(socket, move |request| {
+                    use windup_core::ipc::{Command, Request};
+                    // The review is in this process here: nothing sends
+                    // `EditStep` but the Wayland review child.
+                    let Request::Do(command) = request else {
+                        return;
+                    };
                     let target = linux::current_target(&plan);
                     let event = match command {
                         Command::Popup => HotkeyEvent::ClipboardPopup { target },
@@ -852,6 +857,14 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    // The Steps review, as a child of the background process on Wayland.
+    #[cfg(target_os = "linux")]
+    if let windup_core::ipc::Launch::StepsReview(dir) =
+        windup_core::ipc::parse_args(std::env::args().skip(1))
+    {
+        return steps::review_app::run(dir);
+    }
+
     #[cfg(target_os = "linux")]
     let Some(startup) = linux_startup() else {
         return Ok(());
@@ -1039,7 +1052,8 @@ fn linux_startup() -> Option<Startup> {
         | Launch::WindowRectsTest
         | Launch::EncodersTest
         | Launch::RecordTest(_)
-        | Launch::StepsExport(_) => return None,
+        | Launch::StepsExport(_)
+        | Launch::StepsReview(_) => return None,
         Launch::Unknown(why) => {
             eprintln!("windup: {why}\n\n{}", ipc::USAGE);
             std::process::exit(2);

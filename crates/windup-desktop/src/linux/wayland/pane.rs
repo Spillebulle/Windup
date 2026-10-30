@@ -17,6 +17,7 @@ use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerSurface,
 };
 use smithay_client_toolkit::shell::xdg::window::{Window, WindowDecorations};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use wayland_client::protocol::{wl_output, wl_surface};
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1;
@@ -477,6 +478,15 @@ impl State {
                     o.cursor = None;
                 }
                 PointerEventKind::Leave { .. } if o.pointer == Some(i) => o.pointer = None,
+                _ => {}
+            }
+        }
+        // Steps' clicks come from evdev without a position: this is how the
+        // camera thread tells a click on the bar.
+        if let (PaneRef::RecBar, Some(b)) = (which, self.recbar.as_ref()) {
+            match event.kind {
+                PointerEventKind::Enter { .. } => b.pointer_on_bar.store(true, Ordering::Relaxed),
+                PointerEventKind::Leave { .. } => b.pointer_on_bar.store(false, Ordering::Relaxed),
                 _ => {}
             }
         }

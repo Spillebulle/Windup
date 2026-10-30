@@ -107,6 +107,46 @@ impl Command {
     }
 }
 
+/// One line on the socket: a command, or a request only Windup's own
+/// processes send (the Steps review asking the host to open the editor).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    Do(Command),
+    /// Open the capture editor on this step's picture, and write the edits
+    /// back to it.
+    EditStep(PathBuf),
+}
+
+/// The word before an `EditStep`'s path.
+const EDIT_STEP: &str = "edit-step ";
+
+impl Request {
+    /// One line of the protocol. For `edit-step` the rest of the line, up
+    /// to its newline, is the path, spaces and all.
+    pub fn parse(line: &str) -> Option<Request> {
+        if let Some(rest) = line.strip_prefix(EDIT_STEP) {
+            let path = rest.strip_suffix('\n').unwrap_or(rest);
+            let path = path.strip_suffix('\r').unwrap_or(path);
+            return (!path.is_empty()).then(|| Request::EditStep(PathBuf::from(path)));
+        }
+        Command::parse(line).map(Request::Do)
+    }
+
+    /// The line written to the socket; `None` for a path that cannot go on
+    /// one line (a newline in it, or not UTF-8).
+    pub fn encode(&self) -> Option<String> {
+        match self {
+            Request::Do(c) => Some(c.encode()),
+            Request::EditStep(path) => {
+                let path = path
+                    .to_str()
+                    .filter(|p| !p.is_empty() && !p.contains('\n'))?;
+                Some(format!("{EDIT_STEP}{path}\n"))
+            }
+        }
+    }
+}
+
 /// What this launch of the program was asked to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Launch {
@@ -139,6 +179,10 @@ pub enum Launch {
     /// session would, write it, print where the pointer is in it, exit. A
     /// test aid, so not in `USAGE`.
     StepShotTest(PathBuf),
+    /// `--steps-review <dir>`: the Steps review of the session in `dir`,
+    /// as a child of the background process on Wayland. Internal, so not in
+    /// `USAGE`.
+    StepsReview(PathBuf),
     /// `--help`.
     Help,
     /// Something we do not understand; the text says what.
@@ -319,11 +363,13 @@ where
             "--encoders-test" => Launch::EncodersTest,
             "--capture-test" => Launch::Unknown("--capture-test needs a file name".into()),
             "--step-shot-test" => Launch::Unknown("--step-shot-test needs a file name".into()),
+            "--steps-review" => Launch::Unknown("--steps-review needs a folder".into()),
             "--help" | "-h" => Launch::Help,
             other => Launch::Unknown(format!("unknown option '{other}'")),
         },
         [flag, path] if flag == "--capture-test" => Launch::CaptureTest(PathBuf::from(path)),
         [flag, path] if flag == "--step-shot-test" => Launch::StepShotTest(PathBuf::from(path)),
+        [flag, dir] if flag == "--steps-review" => Launch::StepsReview(PathBuf::from(dir)),
         _ => Launch::Unknown("expected at most one option".into()),
     }
 }
@@ -387,6 +433,42 @@ mod tests {
         for flag in ["--steps", "--step", "--steps-stop"] {
             assert!(USAGE.contains(flag), "{flag}");
         }
+    }
+
+    #[test]
+    fn edit_step_requests_round_trip() {
+        assert_eq!(
+            Request::parse("edit-step /tmp/a b/01.png\n"),
+            Some(Request::EditStep(PathBuf::from("/tmp/a b/01.png")))
+        );
+        assert_eq!(Request::parse("edit-step "), None);
+        assert_eq!(Request::parse("edit-step"), None);
+        assert_eq!(Request::parse("popup"), Some(Request::Do(Command::Popup)));
+        assert_eq!(Request::parse("nonsense"), None);
+        for r in [
+            Request::EditStep(PathBuf::from("/home/a/.cache/windup/steps/x y/02.png")),
+            Request::Do(Command::Step),
+            Request::Do(Command::Popup),
+        ] {
+            let line = r.encode().expect("encodable");
+            assert!(line.ends_with('\n') && line.matches('\n').count() == 1);
+            assert_eq!(Request::parse(&line), Some(r));
+        }
+        // A newline in the path would end the line early.
+        assert_eq!(
+            Request::EditStep(PathBuf::from("/tmp/a\nb.png")).encode(),
+            None
+        );
+    }
+
+    #[test]
+    fn steps_review_is_hidden() {
+        assert_eq!(
+            parse_args(["--steps-review", "/c/steps/2026-10-30 142501"]),
+            Launch::StepsReview(PathBuf::from("/c/steps/2026-10-30 142501"))
+        );
+        assert!(matches!(parse_args(["--steps-review"]), Launch::Unknown(_)));
+        assert!(!USAGE.contains("steps-review"));
     }
 
     #[test]

@@ -71,7 +71,16 @@ impl CompositorHandler for State {
     ) {
     }
 
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
+    fn frame(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        _: u32,
+    ) {
+        // Only the recording bar asks for one, when it is hidden for a shot.
+        self.recbar_concealed(Some(surface));
+    }
 
     fn surface_enter(
         &mut self,

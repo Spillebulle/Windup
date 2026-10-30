@@ -8,9 +8,10 @@
 //! token in the config directory, so the question is not asked again at the
 //! next login on desktops that support persisting it.
 //!
-//! A recording's keys (pause, stop, Esc) are a second GlobalShortcuts
-//! session, open only while the recording runs ([`recording_shortcuts`]):
-//! Esc must not be taken from every app the rest of the time.
+//! A recording's keys (pause, stop, Esc), and a Steps session's (those and
+//! the step key), are a second GlobalShortcuts session, open only while the
+//! session runs ([`recording_shortcuts`]): Esc must not be taken from every
+//! app the rest of the time.
 
 use crate::capture::split::split_desktop;
 use crate::capture::{CaptureError, dbus_absent};
@@ -29,7 +30,7 @@ use std::time::Duration;
 use windup_core::Config;
 use windup_core::Shortcut;
 use windup_core::capture::geometry::DesktopShot;
-use windup_core::hotkeys::{Action, bindings, portal_trigger};
+use windup_core::hotkeys::{Action, LiveKind, bindings, portal_trigger};
 use windup_core::ipc::Command;
 
 /// How long a screenshot may wait on the portal, including the user
@@ -182,15 +183,18 @@ impl Drop for RecordingShortcuts {
     }
 }
 
-/// Opens the recording's session with `bindings` (the ids `record-pause`,
-/// `record-stop` and `record-cancel`).
-pub fn recording_shortcuts(bindings: Vec<(Shortcut, Action)>) -> RecordingShortcuts {
+/// Opens the session's keys for a `kind` session with `bindings` (the ids
+/// `record-pause`, `record-stop` and `record-cancel`, and for Steps `step`).
+pub fn recording_shortcuts(
+    kind: LiveKind,
+    bindings: Vec<(Shortcut, Action)>,
+) -> RecordingShortcuts {
     let ending = Arc::new(Ending::default());
     let theirs = Arc::clone(&ending);
     let spawned = std::thread::Builder::new()
         .name("portal-recording-keys".into())
         .spawn(move || {
-            if let Err(e) = pollster::block_on(recording_session(&bindings, &theirs)) {
+            if let Err(e) = pollster::block_on(recording_session(kind, &bindings, &theirs)) {
                 log::info!(
                     "the recording's keys are not bound through the GlobalShortcuts portal ({e}); the bar and `windup --record-cancel` still work"
                 );
@@ -202,7 +206,11 @@ pub fn recording_shortcuts(bindings: Vec<(Shortcut, Action)>) -> RecordingShortc
     RecordingShortcuts { ending }
 }
 
-async fn recording_session(bindings: &[(Shortcut, Action)], ending: &Ending) -> ashpd::Result<()> {
+async fn recording_session(
+    kind: LiveKind,
+    bindings: &[(Shortcut, Action)],
+    ending: &Ending,
+) -> ashpd::Result<()> {
     let portal = GlobalShortcuts::new().await?;
     // Over already: no session to open, and none to close.
     if ending.done.load(Ordering::SeqCst) {
@@ -212,15 +220,7 @@ async fn recording_session(bindings: &[(Shortcut, Action)], ending: &Ending) -> 
         return Ok(());
     };
     let result = async {
-        let wanted = new_shortcuts(bindings, |a| {
-            match a {
-                Action::RecordPause => "Pause or resume the recording",
-                Action::RecordStop => "Stop the recording",
-                Action::RecordCancel => "Cancel the recording",
-                other => other.tool().display_name(),
-            }
-            .to_owned()
-        });
+        let wanted = new_shortcuts(bindings, |a| live_key_description(kind, a).to_owned());
         // GNOME may ask the user here; a recording over before the answer
         // stops waiting for it.
         let bound = ending
@@ -252,6 +252,20 @@ async fn recording_session(bindings: &[(Shortcut, Action)], ending: &Ending) -> 
     }
     log::info!("the recording's keys are released from the GlobalShortcuts portal");
     result
+}
+
+/// What the portal's dialog says a session's key does.
+fn live_key_description(kind: LiveKind, a: Action) -> &'static str {
+    match (kind, a) {
+        (_, Action::Step) => "Take a step",
+        (LiveKind::Video, Action::RecordPause) => "Pause or resume the recording",
+        (LiveKind::Video, Action::RecordStop) => "Stop the recording",
+        (LiveKind::Video, Action::RecordCancel) => "Cancel the recording",
+        (LiveKind::Steps, Action::RecordPause) => "Pause or resume the steps",
+        (LiveKind::Steps, Action::RecordStop) => "Stop recording steps",
+        (LiveKind::Steps, Action::RecordCancel) => "Cancel the steps",
+        (_, other) => other.tool().display_name(),
+    }
 }
 
 /// How long `global_shortcuts_available` waits for the portal.

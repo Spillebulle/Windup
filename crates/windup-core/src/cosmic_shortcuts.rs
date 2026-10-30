@@ -259,8 +259,9 @@ fn same_keys(e: &Entry, w: &Wanted) -> bool {
 
 // --- the recording's keys, for as long as it runs ---------------------------
 //
-// While a recording runs, its pause, stop and cancel keys are bound the same
-// way and taken out again when it ends. Those entries carry a tag in their
+// While a recording or a Steps session runs, its pause, stop and cancel keys
+// (and Steps' step key) are bound the same way and taken out again when it
+// ends. Those entries carry a tag in their
 // description, so any a crash left behind are found at the next start and
 // removed, and an entry of the user's own is never touched.
 
@@ -268,7 +269,12 @@ fn same_keys(e: &Entry, w: &Wanted) -> bool {
 pub const TEMPORARY_TAG: &str = "Windup while recording: ";
 
 /// The arguments a temporary entry runs Windup with.
-const TEMPORARY_ARGS: [&str; 3] = ["--record-pause", "--record-stop", "--record-cancel"];
+const TEMPORARY_ARGS: [&str; 4] = [
+    "--record-pause",
+    "--record-stop",
+    "--record-cancel",
+    "--step",
+];
 
 /// The empty map a missing file starts as.
 const EMPTY_MAP: &str = "{\n}\n";
@@ -278,6 +284,7 @@ fn temporary_label(args: &str) -> &str {
         "--record-pause" => "Pause",
         "--record-stop" => "Stop",
         "--record-cancel" => "Cancel",
+        "--step" => "Take a step",
         other => other,
     }
 }
@@ -810,6 +817,31 @@ mod tests {
             );
             // Nothing tagged: nothing to do.
             assert_eq!(remove_temporary(text).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn steps_temporary_keys_include_step() {
+        let c = Config::default();
+        let super_shift_x = c.steps.step_shortcut.clone();
+        let keys = [
+            (super_shift_x, "--step"),
+            (c.video.pause_shortcut.clone(), "--record-pause"),
+            (
+                Shortcut::new(crate::ShortcutModifiers::NONE, crate::shortcut::ESCAPE),
+                "--record-cancel",
+            ),
+        ];
+        for base in [SETTINGS, "{\n}\n"] {
+            let added = add_temporary(Some(base), &keys, "windup").unwrap().unwrap();
+            let (entries, _) = parse(&added).unwrap();
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.key.as_deref() == Some("x") && runs_windup(&e.action, "--step")),
+                "{added}"
+            );
+            assert_eq!(remove_temporary(&added).unwrap().as_deref(), Some(base));
         }
     }
 

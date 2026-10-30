@@ -578,6 +578,28 @@ PY
     fi
 }
 
+# Steps on the layer host, by its commands alone: `--steps` starts at once,
+# `--step` twice takes two steps (by screencopy), `--steps-stop` opens the
+# review as a child process, and the session exports as HTML with both
+# pictures and no script. Clicks are not watched here: no evdev access.
+sway_steps() {
+    local root=$home/.cache/windup/steps log=$art/wayland-windup.log dir out=/tmp/windup-e2e-steps-$$.html
+    "$bin" --steps
+    wait_for 100 grep -q "steps: started" "$log" || { bad "wayland: --steps did not start"; grep steps "$log"; return; }
+    ok "wayland: --steps started at once"
+    "$bin" --step; wait_for 50 grep -q "steps: step 1 written" "$log"
+    "$bin" --step
+    if wait_for 50 grep -q "steps: step 2 written" "$log"; then ok "wayland: --step twice took two steps"; else bad "wayland: --step did not take two steps"; fi
+    "$bin" --steps-stop
+    if wait_for 100 grep -q "steps: review opened" "$log"; then ok "wayland: --steps-stop opened the review"; else bad "wayland: no review"; return; fi
+    dir=$(ls -d "$root"/*/ | head -1)
+    if python3 -c 'import json,sys; assert len(json.load(open(sys.argv[1]))["steps"]) == 2' "$dir/steps.json"; then
+        ok "wayland: steps.json lists two steps"; else bad "wayland: steps.json: $(cat "$dir/steps.json")"; fi
+    if timeout 30 "$bin" --steps-export "$dir" html "$out" && [ "$(grep -o '<img' "$out" | wc -l)" -eq 2 ] && ! grep -q '<script' "$out"; then
+        ok "wayland: the HTML export has two pictures and no script"; else bad "wayland: the HTML export is wrong"; fi
+    pkill -f -- '--steps-review' ; rm -rf "$root" "$out"
+}
+
 wayland_session() {
     echo "== Wayland (headless sway)"
     fresh_home
@@ -739,6 +761,7 @@ EOF
     fi
 
     sway_record_live
+    sway_steps
 
     # A second `windup` does not start a second copy; it opens settings.
     "$bin"

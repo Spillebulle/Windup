@@ -15,6 +15,7 @@ pub mod window;
 pub mod x11;
 
 use crate::platform::{self, Env, HotkeysVia, PasteVia, Plan, Target};
+use std::path::PathBuf;
 use std::process::Child;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 use wayland::{PopupSetup, Service, ServiceEvent, Shared};
 use windup_core::capture::session::CaptureMode;
 use windup_core::clipboard::{ClipboardEntry, ClipboardHistory, ClipboardMonitor};
-use windup_core::ipc::Command;
+use windup_core::ipc::{Command, Request};
 use windup_core::{Config, ToolId};
 use windup_ui::PopupAction;
 
@@ -157,8 +158,9 @@ pub fn system_prefers_dark() -> bool {
 /// clipboard are watched here, the settings window is a separate
 /// `windup --settings` process started on demand, and the popup is either a
 /// layer surface on the Wayland thread or, without layer-shell, a window of
-/// its own for as long as it is open. Capture is in `capture.rs`. Returns only if the plan turns out to
-/// need the eframe app after all.
+/// its own for as long as it is open. Capture, recording and Steps are in
+/// `capture.rs`. Returns only if the plan turns out to need the eframe app
+/// after all.
 pub fn run_background(
     plan: Plan,
     listener: std::os::unix::net::UnixListener,
@@ -186,8 +188,14 @@ pub fn run_background(
     crate::video::availability::refresh();
 
     let (cmd_tx, commands) = channel();
-    ipc::serve(listener, move |c| {
-        let _ = cmd_tx.send(c);
+    let (edit_tx, edits) = channel();
+    ipc::serve(listener, move |request| match request {
+        Request::Do(c) => {
+            let _ = cmd_tx.send(c);
+        }
+        Request::EditStep(path) => {
+            let _ = edit_tx.send(path);
+        }
     });
     // A recording's keys a crash left in COSMIC's shortcuts.
     cosmic::remove_temporary();
@@ -203,6 +211,9 @@ pub fn run_background(
         config_stamp: config_stamp(),
         saved: history_state(&history),
         capture: capture::Capturing::default(),
+        steps: None,
+        review: None,
+        edits,
         last_command: Instant::now(),
     };
     if show_settings {
@@ -224,6 +235,12 @@ struct Background {
     config_stamp: Option<SystemTime>,
     saved: (usize, u64),
     capture: capture::Capturing,
+    /// The Steps session that runs, or is stopping.
+    steps: Option<crate::steps::live::StepsLive>,
+    /// The Steps review, `windup --steps-review <dir>`, while it is open.
+    review: Option<Child>,
+    /// The review's requests for the editor on a step.
+    edits: Receiver<PathBuf>,
     /// When the socket last brought a command; an update is only taken over
     /// once nothing has been asked for a while, so an open popup is left be.
     last_command: Instant,
@@ -244,7 +261,7 @@ impl Background {
         // at once, and while a recording runs, so the bar's buttons answer.
         let wait = if self.capture.gate.grabbing() {
             Duration::from_millis(20)
-        } else if self.capture.live.busy() {
+        } else if self.capture.live.busy() || self.steps_busy() {
             Duration::from_millis(50)
         } else {
             Duration::from_millis(200)
@@ -260,6 +277,10 @@ impl Background {
                 ServiceEvent::CaptureDone(end) => self.capture_done(*end, config, shared, commands),
                 ServiceEvent::RecBar(action) => self.recbar_action(action),
             }
+        }
+        while let Ok(path) = self.edits.try_recv() {
+            self.last_command = Instant::now();
+            self.edit_step(path, config, shared, commands);
         }
         self.poll_capture(config, shared, commands);
         self.poll_recording(config, shared, commands);
@@ -302,8 +323,11 @@ impl Background {
         }
 
         // A package update replaced the program: the new one takes over,
-        // once no capture is under way and nothing was asked for lately.
+        // once no capture is under way and nothing was asked for lately. Not
+        // while a review is open: the new one would take its folder for one
+        // a crash left.
         if self.capture.gate == crate::capture::gate::Gate::Idle
+            && self.review.is_none()
             && self.last_command.elapsed() > QUIET_BEFORE_HANDOVER
             && let Some(exe) = ipc::upgraded_exe()
         {
@@ -338,9 +362,17 @@ impl Background {
                 self.start_capture(ToolId::Screenshot, CaptureMode::Screenshot, config);
             }
             Command::Record => self.record_command(config, shared, commands),
-            Command::RecordPause => self.pause_recording(),
-            Command::RecordStop => self.stop_recording(),
-            Command::RecordCancel => self.cancel_recording(),
+            // The session keys act on whichever session runs.
+            Command::RecordPause => self.pause_live(),
+            Command::RecordStop => self.stop_live(),
+            Command::RecordCancel => self.cancel_live(),
+            Command::Steps => self.steps_command(config, shared, commands),
+            Command::Step => self.step_command(),
+            Command::StepsStop => {
+                if self.steps_busy() {
+                    self.stop_steps();
+                }
+            }
             Command::Show => self.show_settings(),
             Command::Reload => {
                 *config = Config::load();
