@@ -798,6 +798,22 @@ x11_session() {
         bad "x11: --capture-test failed (see x11-capture.log)"
     fi
 
+    # One Steps picture: the pointer's monitor (the whole screen here) and
+    # the pointer in its pixels.
+    xdotool mousemove 400 300
+    local step_out
+    if step_out=$("$bin" --step-shot-test "$art/x11-step.png" 2>"$art/x11-step.log"); then
+        local size
+        size=$(png_size "$art/x11-step.png")
+        if [ "$size" = "$screen" ] && [ "$step_out" = "pointer 400,300" ]; then
+            ok "x11: --step-shot-test pictured the monitor with the pointer ($size, $step_out)"
+        else
+            bad "x11: --step-shot-test wrote $size and said '$step_out', wanted $screen and 'pointer 400,300'"
+        fi
+    else
+        bad "x11: --step-shot-test failed (see x11-step.log)"
+    fi
+
     start_windup x11 || { kill $wm_pid $xvfb_pid; return; }
 
     printf 'xalpha-%s' "$$" | xclip -selection clipboard

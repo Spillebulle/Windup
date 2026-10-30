@@ -6,4 +6,9 @@
 #![allow(dead_code)]
 
 pub(crate) mod camera;
+pub(crate) mod clicks;
 pub(crate) mod live;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows;
+#[cfg(target_os = "linux")]
+pub(crate) mod x11;

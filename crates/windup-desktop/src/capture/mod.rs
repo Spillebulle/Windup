@@ -7,7 +7,7 @@
 
 use image::RgbaImage;
 use windup_core::capture::backend::{Facts, Still, still_order};
-use windup_core::capture::geometry::DesktopShot;
+use windup_core::capture::geometry::{DRect, DesktopShot};
 use windup_core::capture::pick::WindowRect;
 
 pub(crate) mod finish;
@@ -195,6 +195,26 @@ pub fn window_rects(shot: &DesktopShot) -> Vec<WindowRect> {
     }
 }
 
+/// Which of `monitors` holds the desktop point, else the one nearest to it:
+/// a press in the gap between two monitors of different sizes, or just past
+/// an edge, still pictures one. 0 for an empty list.
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+pub(crate) fn monitor_index_at(monitors: &[DRect], x: f32, y: f32) -> usize {
+    if let Some(i) = monitors.iter().position(|m| m.contains(x, y)) {
+        return i;
+    }
+    let distance = |m: &DRect| {
+        let dx = (m.x - x).max(x - m.right()).max(0.0);
+        let dy = (m.y - y).max(y - m.bottom()).max(0.0);
+        dx.hypot(dy)
+    };
+    monitors
+        .iter()
+        .enumerate()
+        .min_by(|a, b| distance(a.1).total_cmp(&distance(b.1)))
+        .map_or(0, |(i, _)| i)
+}
+
 /// GDI hands over BGRA rows with the alpha byte unset; the picture is opaque.
 /// `stride` is bytes per row.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -287,6 +307,31 @@ pub(crate) fn xft_scale(resources: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> DRect {
+        DRect { x, y, w, h }
+    }
+
+    #[test]
+    fn the_monitor_at_a_point_or_the_nearest() {
+        // Two 100-wide monitors with a 50-unit gap, the second lower down.
+        let list = [
+            rect(0.0, 0.0, 100.0, 100.0),
+            rect(150.0, 20.0, 100.0, 100.0),
+        ];
+        assert_eq!(monitor_index_at(&list, 10.0, 10.0), 0);
+        assert_eq!(monitor_index_at(&list, 200.0, 50.0), 1);
+        // The right edge is the next monitor's, not this one's.
+        assert_eq!(monitor_index_at(&list, 150.0, 50.0), 1);
+        // In the gap: nearer the first, then nearer the second.
+        assert_eq!(monitor_index_at(&list, 110.0, 50.0), 0);
+        assert_eq!(monitor_index_at(&list, 140.0, 50.0), 1);
+        // Above the second, but nearer it than the first.
+        assert_eq!(monitor_index_at(&list, 240.0, 5.0), 1);
+        // Far off to the left.
+        assert_eq!(monitor_index_at(&list, -500.0, 300.0), 0);
+        assert_eq!(monitor_index_at(&list[1..], -500.0, 300.0), 0);
+    }
 
     #[test]
     fn xft_dpi_gives_the_x11_scale() {

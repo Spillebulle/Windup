@@ -57,13 +57,17 @@ fn root_format(conn: &impl Connection, screen_num: usize) -> Result<XFormat, Cap
     })
 }
 
-pub fn grab() -> Result<DesktopShot, CaptureError> {
-    let (conn, screen_num) = x11rb::connect(None).map_err(|e| failed("no X display", e))?;
-    let root = conn.setup().roots[screen_num].root;
-    let format = root_format(&conn, screen_num)?;
+/// One RandR monitor, before its picture is taken.
+struct XMonitor {
+    name: String,
+    layout: DRect,
+    refresh_hz: Option<u32>,
+}
 
-    // RandR's monitors; the whole root when the extension is missing.
-    let mut rects: Vec<(String, i32, i32, u32, u32, Option<u32>)> = conn
+/// RandR's monitors; the whole root when the extension is missing.
+fn monitors(conn: &impl Connection, screen_num: usize) -> Vec<XMonitor> {
+    let root = conn.setup().roots[screen_num].root;
+    let mut list: Vec<XMonitor> = conn
         .randr_get_monitors(root, true)
         .ok()
         .and_then(|c| c.reply().ok())
@@ -71,41 +75,59 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
             r.monitors
                 .iter()
                 .filter(|m| m.width > 0 && m.height > 0)
-                .map(|m| {
-                    (
-                        atom_name(&conn, m.name).unwrap_or_default(),
-                        m.x as i32,
-                        m.y as i32,
-                        m.width as u32,
-                        m.height as u32,
-                        monitor_refresh(&conn, root, &m.outputs),
-                    )
+                .map(|m| XMonitor {
+                    name: atom_name(conn, m.name).unwrap_or_default(),
+                    layout: DRect {
+                        x: m.x as f32,
+                        y: m.y as f32,
+                        w: m.width as f32,
+                        h: m.height as f32,
+                    },
+                    refresh_hz: monitor_refresh(conn, root, &m.outputs),
                 })
                 .collect()
         })
         .unwrap_or_default();
-    if rects.is_empty() {
+    if list.is_empty() {
         let s = &conn.setup().roots[screen_num];
-        rects.push((
-            String::new(),
-            0,
-            0,
-            s.width_in_pixels as u32,
-            s.height_in_pixels as u32,
-            None,
-        ));
+        list.push(XMonitor {
+            name: String::new(),
+            layout: DRect {
+                x: 0.0,
+                y: 0.0,
+                w: s.width_in_pixels as f32,
+                h: s.height_in_pixels as f32,
+            },
+            refresh_hz: None,
+        });
     }
+    list
+}
 
+/// The pictures of `list`, one `GetImage` of the root each.
+fn shoot(
+    conn: &impl Connection,
+    screen_num: usize,
+    list: Vec<XMonitor>,
+) -> Result<Vec<MonitorShot>, CaptureError> {
+    let root = conn.setup().roots[screen_num].root;
+    let format = root_format(conn, screen_num)?;
     // One scale for every monitor: X has no per-monitor one.
-    let scale = resources(&conn, root).map_or(1.0, |db| xft_scale(&db));
-    let mut monitors = Vec::new();
-    for (name, x, y, w, h, refresh_hz) in rects {
+    let scale = resources(conn, root).map_or(1.0, |db| xft_scale(&db));
+    let mut shots = Vec::new();
+    for XMonitor {
+        name,
+        layout,
+        refresh_hz,
+    } in list
+    {
+        let (w, h) = (layout.w as u32, layout.h as u32);
         let reply = conn
             .get_image(
                 ImageFormat::Z_PIXMAP,
                 root,
-                x as i16,
-                y as i16,
+                layout.x as i16,
+                layout.y as i16,
                 w as u16,
                 h as u16,
                 !0,
@@ -114,20 +136,47 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
             .reply()
             .map_err(|e| failed("GetImage", e))?;
         let image = x_pixels_to_rgba(&reply.data, w, h, format).map_err(CaptureError::Failed)?;
-        monitors.push(MonitorShot {
-            layout: DRect {
-                x: x as f32,
-                y: y as f32,
-                w: w as f32,
-                h: h as f32,
-            },
+        shots.push(MonitorShot {
+            layout,
             image,
             name,
             scale,
             refresh_hz,
         });
     }
-    Ok(DesktopShot { monitors })
+    Ok(shots)
+}
+
+pub fn grab() -> Result<DesktopShot, CaptureError> {
+    let (conn, screen_num) = x11rb::connect(None).map_err(|e| failed("no X display", e))?;
+    let list = monitors(&conn, screen_num);
+    Ok(DesktopShot {
+        monitors: shoot(&conn, screen_num, list)?,
+    })
+}
+
+/// Each monitor's layout in root pixels, without taking a picture. Empty
+/// when there is no X display.
+pub fn monitor_list() -> Vec<DRect> {
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        return Vec::new();
+    };
+    monitors(&conn, screen_num)
+        .into_iter()
+        .map(|m| m.layout)
+        .collect()
+}
+
+/// A picture of the monitor holding the root point, else of the nearest
+/// one: one step's picture.
+pub fn grab_monitor_at(x: f32, y: f32) -> Result<MonitorShot, CaptureError> {
+    let (conn, screen_num) = x11rb::connect(None).map_err(|e| failed("no X display", e))?;
+    let mut list = monitors(&conn, screen_num);
+    let layouts: Vec<DRect> = list.iter().map(|m| m.layout).collect();
+    let one = list.swap_remove(super::monitor_index_at(&layouts, x, y));
+    shoot(&conn, screen_num, vec![one])?
+        .pop()
+        .ok_or_else(|| CaptureError::Failed("no monitors found".into()))
 }
 
 /// Frames per second a RandR mode refreshes at, rounded; `None` for a mode

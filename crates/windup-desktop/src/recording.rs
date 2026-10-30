@@ -37,7 +37,7 @@ use windup_ui::capture::recbar::{RecBarAction, RecBarState, RecBarView, bar_size
 use windup_ui::{Mode, Palette, metrics};
 
 /// The bar's window title (also how Win32 finds its window).
-const BAR_TITLE: &str = "Windup recording";
+pub(crate) const BAR_TITLE: &str = "Windup recording";
 /// How often a recording that is starting or joining is looked at.
 const POLL: Duration = Duration::from_millis(50);
 

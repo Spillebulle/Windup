@@ -182,9 +182,17 @@ fn blit(screen: HDC, rect: &RECT) -> Result<image::RgbaImage, CaptureError> {
     }
 }
 
-pub fn grab() -> Result<DesktopShot, CaptureError> {
-    let _dpi = DpiScope::enter();
-    let list = monitors();
+fn layout_of(m: &Monitor) -> DRect {
+    DRect {
+        x: m.rect.left as f32,
+        y: m.rect.top as f32,
+        w: (m.rect.right - m.rect.left) as f32,
+        h: (m.rect.bottom - m.rect.top) as f32,
+    }
+}
+
+/// Pictures of `list`, each exactly its monitor's layout.
+fn shoot(list: &[Monitor]) -> Result<Vec<MonitorShot>, CaptureError> {
     if list.is_empty() {
         return Err(CaptureError::Failed("no monitors found".into()));
     }
@@ -197,12 +205,7 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
         .iter()
         .map(|m| {
             Ok(MonitorShot {
-                layout: DRect {
-                    x: m.rect.left as f32,
-                    y: m.rect.top as f32,
-                    w: (m.rect.right - m.rect.left) as f32,
-                    h: (m.rect.bottom - m.rect.top) as f32,
-                },
+                layout: layout_of(m),
                 image: blit(screen, &m.rect)?,
                 name: m.name.clone(),
                 scale: m.scale,
@@ -212,7 +215,40 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
         .collect();
     // SAFETY: releases the DC taken above.
     unsafe { ReleaseDC(null_mut(), screen) };
-    Ok(DesktopShot { monitors: shots? })
+    shots
+}
+
+pub fn grab() -> Result<DesktopShot, CaptureError> {
+    let _dpi = DpiScope::enter();
+    Ok(DesktopShot {
+        monitors: shoot(&monitors())?,
+    })
+}
+
+/// The monitor holding the point (physical pixels), else the nearest one.
+/// Its layout without taking a picture, for Steps to decide about its bar.
+pub(crate) fn monitor_at(x: f32, y: f32) -> Option<DRect> {
+    let _dpi = DpiScope::enter();
+    let layouts: Vec<DRect> = monitors().iter().map(layout_of).collect();
+    layouts
+        .get(super::monitor_index_at(&layouts, x, y))
+        .copied()
+}
+
+/// A picture of the monitor holding the point (physical pixels), else of the
+/// nearest one: one step's picture.
+pub fn grab_monitor_at(x: f32, y: f32) -> Result<MonitorShot, CaptureError> {
+    let _dpi = DpiScope::enter();
+    let mut list = monitors();
+    let layouts: Vec<DRect> = list.iter().map(layout_of).collect();
+    let i = super::monitor_index_at(&layouts, x, y);
+    if i >= list.len() {
+        return Err(CaptureError::Failed("no monitors found".into()));
+    }
+    let one = list.swap_remove(i);
+    shoot(std::slice::from_ref(&one))?
+        .pop()
+        .ok_or_else(|| CaptureError::Failed("no monitors found".into()))
 }
 
 /// Each monitor's layout (physical pixels) and refresh rate, in the order
@@ -220,16 +256,8 @@ pub fn grab() -> Result<DesktopShot, CaptureError> {
 pub(crate) fn monitor_list() -> Vec<(DRect, Option<u32>)> {
     let _dpi = DpiScope::enter();
     monitors()
-        .into_iter()
-        .map(|m| {
-            let layout = DRect {
-                x: m.rect.left as f32,
-                y: m.rect.top as f32,
-                w: (m.rect.right - m.rect.left) as f32,
-                h: (m.rect.bottom - m.rect.top) as f32,
-            };
-            (layout, m.refresh_hz)
-        })
+        .iter()
+        .map(|m| (layout_of(m), m.refresh_hz))
         .collect()
 }
 

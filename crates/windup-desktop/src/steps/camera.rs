@@ -4,7 +4,8 @@
 
 use image::RgbaImage;
 use windup_core::capture::backend::StepRoute;
-use windup_core::capture::geometry::DRect;
+use windup_core::capture::geometry::{DRect, MonitorShot};
+use windup_core::steps::pointer::to_image;
 
 use crate::capture::CaptureError;
 
@@ -18,6 +19,21 @@ pub struct Shot {
     pub monitor_name: String,
     /// Image pixels per point.
     pub scale: f32,
+}
+
+impl Shot {
+    /// A monitor's picture, with the pointer at `point` (desktop units) when
+    /// it was found on that monitor.
+    pub fn of(m: MonitorShot, point: Option<(f32, f32)>) -> Self {
+        let size = (m.image.width(), m.image.height());
+        Shot {
+            pointer: point.and_then(|p| to_image(p, m.layout, size)),
+            scale: m.scale * m.px_per_unit(),
+            monitor: m.layout,
+            monitor_name: m.name,
+            image: m.image,
+        }
+    }
 }
 
 /// Takes pictures on the camera thread.
@@ -73,10 +89,16 @@ pub fn open_camera(route_order: &[StepRoute]) -> Result<(Box<dyn Camera>, StepRo
 
 /// The camera for one route.
 fn open(route: StepRoute) -> Result<Box<dyn Camera>, String> {
-    Err(format!("no camera exists for {route:?}"))
+    match route {
+        #[cfg(target_os = "windows")]
+        StepRoute::Gdi => Ok(Box::new(super::windows::GdiCamera)),
+        #[cfg(target_os = "linux")]
+        StepRoute::X11 => Ok(Box::new(super::x11::X11Camera::open()?)),
+        other => Err(format!("no camera exists for {other:?}")),
+    }
 }
 
-fn describe(e: &CaptureError) -> String {
+pub(crate) fn describe(e: &CaptureError) -> String {
     match e {
         CaptureError::Failed(why) => why.clone(),
         other => other.message().to_string(),
@@ -88,11 +110,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_camera_exists_yet_and_the_error_names_the_routes() {
-        let err = open_camera(&[StepRoute::Gdi, StepRoute::X11])
+    fn a_route_without_a_camera_is_named_in_the_error() {
+        // Routes of another platform, so no test here takes a picture.
+        let foreign = if cfg!(target_os = "windows") {
+            StepRoute::X11
+        } else {
+            StepRoute::Gdi
+        };
+        let err = open_camera(&[foreign, StepRoute::None])
             .err()
             .expect("no camera");
-        assert!(err.contains("Gdi") && err.contains("X11"), "{err}");
+        assert!(
+            err.contains(&format!("{foreign:?}")) && err.contains("None"),
+            "{err}"
+        );
         assert!(open_camera(&[]).is_err());
+    }
+
+    #[test]
+    fn a_shot_finds_the_pointer_on_its_own_monitor_only() {
+        let m = || MonitorShot {
+            layout: DRect {
+                x: 1920.0,
+                y: 0.0,
+                w: 1280.0,
+                h: 1024.0,
+            },
+            image: RgbaImage::new(1280, 1024),
+            name: "DP-2".into(),
+            scale: 1.5,
+            refresh_hz: None,
+        };
+        let shot = Shot::of(m(), Some((2000.0, 512.0)));
+        assert_eq!(shot.pointer, Some([80.0, 512.0]));
+        assert_eq!(shot.scale, 1.5);
+        assert_eq!(shot.monitor_name, "DP-2");
+        assert_eq!(Shot::of(m(), Some((10.0, 100.0))).pointer, None);
+        assert_eq!(Shot::of(m(), None).pointer, None);
     }
 }

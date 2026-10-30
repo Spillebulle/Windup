@@ -44,7 +44,7 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 raw-window-handle = "0.6"
 egui-wgpu = "0.32"
 pollster = "0.4"
-x11rb = { version = "0.13", features = ["randr"] }
+x11rb = { version = "0.13", features = ["randr", "xinput"] }
 rustix = { version = "1", features = ["fs", "process", "pipe", "event"] }
 # The same portal client and runtime rfd already brings in.
 ashpd = { version = "0.11", default-features = false, features = ["async-std"] }

@@ -135,6 +135,10 @@ pub enum Launch {
     /// `--steps-export <dir> <html|pdf|md|images> <out>`: export a session
     /// folder, exit. A test aid, so not in `USAGE`.
     StepsExport(StepsExport),
+    /// `--step-shot-test <file.png>`: take one step's picture as a Steps
+    /// session would, write it, print where the pointer is in it, exit. A
+    /// test aid, so not in `USAGE`.
+    StepShotTest(PathBuf),
     /// `--help`.
     Help,
     /// Something we do not understand; the text says what.
@@ -314,10 +318,12 @@ where
             "--window-rects-test" => Launch::WindowRectsTest,
             "--encoders-test" => Launch::EncodersTest,
             "--capture-test" => Launch::Unknown("--capture-test needs a file name".into()),
+            "--step-shot-test" => Launch::Unknown("--step-shot-test needs a file name".into()),
             "--help" | "-h" => Launch::Help,
             other => Launch::Unknown(format!("unknown option '{other}'")),
         },
         [flag, path] if flag == "--capture-test" => Launch::CaptureTest(PathBuf::from(path)),
+        [flag, path] if flag == "--step-shot-test" => Launch::StepShotTest(PathBuf::from(path)),
         _ => Launch::Unknown("expected at most one option".into()),
     }
 }
@@ -601,6 +607,19 @@ mod tests {
         );
         assert!(matches!(parse_args(["--capture-test"]), Launch::Unknown(_)));
         assert!(!USAGE.contains("capture-test"));
+    }
+
+    #[test]
+    fn step_shot_test_is_a_hidden_flag() {
+        assert_eq!(
+            parse_args(["--step-shot-test", "s.png"]),
+            Launch::StepShotTest(PathBuf::from("s.png"))
+        );
+        assert!(matches!(
+            parse_args(["--step-shot-test"]),
+            Launch::Unknown(_)
+        ));
+        assert!(!USAGE.contains("step-shot-test"));
     }
 
     #[test]

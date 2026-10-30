@@ -787,6 +787,13 @@ fn main() -> eframe::Result<()> {
         std::process::exit(capture_test(&path));
     }
 
+    // One step's picture, as a Steps session takes it. No window.
+    if let windup_core::ipc::Launch::StepShotTest(path) =
+        windup_core::ipc::parse_args(std::env::args().skip(1))
+    {
+        std::process::exit(step_shot_test(&path));
+    }
+
     if windup_core::ipc::parse_args(std::env::args().skip(1))
         == windup_core::ipc::Launch::WindowRectsTest
     {
@@ -911,6 +918,43 @@ fn steps_export(job: &windup_core::ipc::StepsExport) -> i32 {
     }
 }
 
+/// `windup --step-shot-test out.png`: one step's picture by the camera a
+/// session would open, of the pointer's monitor. Prints `pointer X,Y` in the
+/// picture's pixels, or `pointer unknown`.
+fn step_shot_test(path: &std::path::Path) -> i32 {
+    let order = windup_core::capture::backend::steps_order(&capture::facts());
+    let (mut camera, route) = match steps::camera::open_camera(&order) {
+        Ok(opened) => opened,
+        Err(why) => {
+            eprintln!("windup: {why}");
+            return 1;
+        }
+    };
+    let shot = match camera.shoot(None) {
+        Ok(shot) => shot,
+        Err(e) => {
+            eprintln!("windup: {route:?}: {}", steps::camera::describe(&e));
+            return 1;
+        }
+    };
+    if let Err(e) = shot.image.save_with_format(path, image::ImageFormat::Png) {
+        eprintln!("windup: could not write {}: {e}", path.display());
+        return 1;
+    }
+    log::info!(
+        "{route:?}: {} {}x{} -> {}",
+        shot.monitor_name,
+        shot.image.width(),
+        shot.image.height(),
+        path.display()
+    );
+    match shot.pointer {
+        Some([x, y]) => println!("pointer {},{}", x.round(), y.round()),
+        None => println!("pointer unknown"),
+    }
+    0
+}
+
 /// `windup --capture-test out.png`: the whole desktop as one PNG. The exit
 /// code is the process's.
 fn capture_test(path: &std::path::Path) -> i32 {
@@ -963,6 +1007,7 @@ fn linux_startup() -> Option<Startup> {
         }
         // Handled in `main` before this runs.
         Launch::CaptureTest(_)
+        | Launch::StepShotTest(_)
         | Launch::WindowRectsTest
         | Launch::EncodersTest
         | Launch::RecordTest(_)
