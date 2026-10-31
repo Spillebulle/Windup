@@ -322,6 +322,7 @@ impl WindupApp {
         } = cap;
         let step = steps(*frames);
         let mut outcome = None;
+        let layouts: Vec<DRect> = surfaces.iter().map(|s| s.layout).collect();
         for (i, surface) in surfaces.iter_mut().enumerate() {
             let rect = points_rect(surface.layout, surface.ppp);
             let builder = egui::ViewportBuilder::default()
@@ -344,13 +345,15 @@ impl WindupApp {
                 let unfocused = vctx.input(|inp| inp.viewport().focused) != Some(true);
                 if step.setup {
                     make_tool_window(&surface.title);
+                    no_transitions(&surface.title);
                 }
                 if fullscreen_now(step) {
                     fullscreen_overlay(&surface.title);
                 }
-                place_overlay(
+                place_capture(
                     &surface.title,
                     surface.layout,
+                    &layouts,
                     mine && unfocused && step.force_focus,
                 );
                 if step.show {
@@ -360,7 +363,7 @@ impl WindupApp {
                         vctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                 }
-                // Windows is placed exactly by `place_overlay`. Elsewhere the
+                // Windows is placed by `place_capture`. Elsewhere the
                 // window may land at another scale than guessed: re-derive the
                 // points from the scale it got, and egui moves it.
                 #[cfg(not(target_os = "windows"))]
@@ -528,6 +531,7 @@ impl WindupApp {
                     size.x,
                     size.y,
                     vctx.pixels_per_point(),
+                    true,
                 );
             }
             if n.frames == 2 {
@@ -667,11 +671,33 @@ pub(crate) fn own_window(title: &str) -> Option<windows_sys::Win32::Foundation::
 
 /// Puts the overlay exactly on its monitor in physical pixels, whatever
 /// winit made of the points, and takes the foreground for it when asked.
-/// Never shows it: see [`steps`]. Moving a window onto a monitor of another
-/// scale makes winit resize it for the new DPI, so the move is repeated
-/// until it holds.
+/// Never shows it: see [`steps`].
 #[cfg(target_os = "windows")]
 pub(crate) fn place_overlay(title: &str, layout: DRect, focus: bool) {
+    place_physical(title, physical(layout), focus);
+}
+
+/// [`place_overlay`] for a capture overlay, one pixel past its monitor
+/// where no other monitor is (see [`overhang`]); `all` is every monitor.
+#[cfg(target_os = "windows")]
+fn place_capture(title: &str, layout: DRect, all: &[DRect], focus: bool) {
+    let others: Vec<_> = all
+        .iter()
+        .filter(|l| **l != layout)
+        .map(|l| physical(*l))
+        .collect();
+    place_physical(title, overhang(physical(layout), &others), focus);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn place_capture(title: &str, layout: DRect, _all: &[DRect], focus: bool) {
+    place_overlay(title, layout, focus);
+}
+
+/// Moving a window onto a monitor of another scale makes winit resize it
+/// for the new DPI, so the move is repeated until it holds.
+#[cfg(target_os = "windows")]
+fn place_physical(title: &str, (x, y, w, h): (i32, i32, i32, i32), focus: bool) {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowRect, HWND_TOPMOST, SWP_NOACTIVATE, SetWindowPos,
@@ -679,7 +705,6 @@ pub(crate) fn place_overlay(title: &str, layout: DRect, focus: bool) {
     let Some(hwnd) = own_window(title) else {
         return;
     };
-    let (x, y, w, h) = physical(layout);
     // SAFETY: `hwnd` is one of this process's windows, found just now on
     // this (its own) thread.
     unsafe {
@@ -694,6 +719,36 @@ pub(crate) fn place_overlay(title: &str, layout: DRect, focus: bool) {
         if focus {
             force_foreground(hwnd);
         }
+    }
+}
+
+/// The capture overlay's window (`x, y, width, height`, physical pixels)
+/// on monitor `own`, given the `others`. An opaque window exactly the size
+/// of its monitor is taken for a fullscreen game: the display switches
+/// over to it, a black flash, and back when it closes. So the window
+/// reaches one pixel below the monitor, or past its right edge when another
+/// monitor is below; never above or to the left, which would move the
+/// picture. Exactly the monitor when both have a neighbour.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub(crate) fn overhang(
+    own: (i32, i32, i32, i32),
+    others: &[(i32, i32, i32, i32)],
+) -> (i32, i32, i32, i32) {
+    let (x, y, w, h) = own;
+    let free = |strip: (i32, i32, i32, i32)| {
+        others.iter().all(|&(ox, oy, ow, oh)| {
+            strip.0 >= ox + ow
+                || ox >= strip.0 + strip.2
+                || strip.1 >= oy + oh
+                || oy >= strip.1 + strip.3
+        })
+    };
+    if free((x, y + h, w, 1)) {
+        (x, y, w, h + 1)
+    } else if free((x + w, y, 1, h)) {
+        (x, y, w + 1, h)
+    } else {
+        own
     }
 }
 
@@ -784,6 +839,30 @@ pub(crate) fn make_tool_window(title: &str) {
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn make_tool_window(_title: &str) {}
+
+/// Turns off the shell's open and close animation (the window zooming in
+/// and out), which plays on any window that is not fullscreen.
+#[cfg(target_os = "windows")]
+fn no_transitions(title: &str) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_TRANSITIONS_FORCEDISABLED, DwmSetWindowAttribute,
+    };
+    if let Some(hwnd) = own_window(title) {
+        let on: i32 = 1;
+        // SAFETY: one of this process's windows; `on` outlives the call.
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED as u32,
+                &on as *const i32 as *const _,
+                4,
+            )
+        };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn no_transitions(_title: &str) {}
 
 /// Foreground and keyboard focus for `hwnd`, with the input of the current
 /// foreground thread attached so Windows allows it (as the popup does).
@@ -930,6 +1009,30 @@ mod tests {
         let r = fit_image(m, (500, 1000));
         assert_eq!((r.h, r.w), (1080.0, 540.0));
         assert_eq!(fit_image(m, (0, 10)), m);
+    }
+
+    #[test]
+    fn a_lone_monitor_reaches_one_pixel_below() {
+        assert_eq!(overhang((0, 0, 2560, 1440), &[]), (0, 0, 2560, 1441));
+    }
+
+    #[test]
+    fn a_monitor_beside_others_reaches_below_them_not_into_them() {
+        // Three side by side: below each is free.
+        let row = [(-1920, 0, 1920, 1080), (2560, 0, 1920, 1080)];
+        assert_eq!(overhang((0, 0, 2560, 1440), &row), (0, 0, 2560, 1441));
+    }
+
+    #[test]
+    fn a_monitor_above_another_reaches_right_instead() {
+        let below = [(0, 1440, 2560, 1440)];
+        assert_eq!(overhang((0, 0, 2560, 1440), &below), (0, 0, 2561, 1440));
+    }
+
+    #[test]
+    fn a_monitor_hemmed_in_below_and_right_stays_exact() {
+        let around = [(0, 1440, 2560, 1440), (2560, 0, 1920, 1080)];
+        assert_eq!(overhang((0, 0, 2560, 1440), &around), (0, 0, 2560, 1440));
     }
 
     #[test]

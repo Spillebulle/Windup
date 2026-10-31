@@ -441,6 +441,31 @@ static LIVE: AtomicU8 = AtomicU8::new(0);
 thread_local! {
     /// Keys whose press the hook swallowed, until their release (`key_verdict`).
     static HELD: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// When the hook last fired or swallowed a key (the event's own time).
+    static LAST_HELD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a press of a key the hook still holds is a new press rather than
+/// its auto-repeat. Windows does not always show the hook a release (it
+/// skips a hook that answers late), and a key left held would swallow the
+/// next real press of it. A repeat comes within the keyboard delay of the
+/// key's last event (the first repeat; later ones come faster), so anything
+/// later is a new press. Times are the events' own milliseconds, which wrap.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn stale_hold(last: u32, now: u32, delay_ms: u32) -> bool {
+    now.wrapping_sub(last) > delay_ms + 150
+}
+
+/// The keyboard delay before auto-repeat, in milliseconds (250 to 1000).
+#[cfg(target_os = "windows")]
+fn keyboard_delay_ms() -> u32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SPI_GETKEYBOARDDELAY, SystemParametersInfoW,
+    };
+    let mut n: i32 = 1;
+    // SAFETY: SPI_GETKEYBOARDDELAY writes one int to the pointer.
+    unsafe { SystemParametersInfoW(SPI_GETKEYBOARDDELAY, 0, &mut n as *mut i32 as *mut _, 0) };
+    (n.clamp(0, 3) as u32 + 1) * 250
 }
 
 /// The hook thread, which owns the registered hotkeys; told with
@@ -570,13 +595,16 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                     VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
                 };
                 use windows_sys::Win32::UI::WindowsAndMessaging::{
-                    GetForegroundWindow, KBDLLHOOKSTRUCT,
+                    GetForegroundWindow, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
                 };
 
                 if code >= 0 {
                     let p = *(lparam as *const KBDLLHOOKSTRUCT);
-                    // Ignore injected/simulated keystrokes from SendInput to prevent loops
-                    if p.flags & 1 != 0 {
+                    // Ignore injected keystrokes (LLKHF_INJECTED), Windup's own
+                    // pastes among them: a paste's V must never be swallowed.
+                    // Not bit 0, which is LLKHF_EXTENDED: arrows, Insert,
+                    // Delete, Print Screen and the Win keys.
+                    if p.flags & LLKHF_INJECTED != 0 {
                         return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
                     }
 
@@ -612,8 +640,20 @@ fn start_windows_hook(tx: Sender<HotkeyEvent>, running: Arc<AtomicBool>) {
                     }
 
                     // Only the hook thread runs this, so a thread-local needs no lock.
-                    let verdict =
-                        HELD.with_borrow_mut(|keys| key_verdict(keys, vk, is_down, matched));
+                    let verdict = HELD.with_borrow_mut(|keys| {
+                        if is_down
+                            && matched.is_none()
+                            && keys.contains(&vk)
+                            && stale_hold(LAST_HELD.get(), p.time, keyboard_delay_ms())
+                        {
+                            keys.retain(|k| *k != vk);
+                        }
+                        let verdict = key_verdict(keys, vk, is_down, matched);
+                        if verdict != Verdict::Pass {
+                            LAST_HELD.set(p.time);
+                        }
+                        verdict
+                    });
                     match verdict {
                         Verdict::Pass => {}
                         // The release (or a repeat) of a press already acted on.
@@ -1048,6 +1088,18 @@ mod tests {
         assert_eq!(key_verdict(&mut held, PRINT, true, None), Verdict::Pass);
         assert_eq!(key_verdict(&mut held, PRINT, false, None), Verdict::Pass);
         assert_eq!(key_verdict(&mut held, 0x56, false, None), Verdict::Pass);
+    }
+
+    #[test]
+    fn a_held_key_pressed_again_after_the_delay_is_a_new_press() {
+        // Win+V fired at 8062 and its release never reached the hook; V
+        // typed at 8843 is a new press, not a repeat (delay 500 ms).
+        assert!(stale_hold(8062, 8843, 500));
+        assert!(!stale_hold(8062, 8562, 500));
+        assert!(!stale_hold(8562, 8595, 500));
+        // The millisecond clock wraps.
+        assert!(!stale_hold(u32::MAX - 10, 20, 250));
+        assert!(stale_hold(u32::MAX - 10, 2000, 250));
     }
 
     #[test]

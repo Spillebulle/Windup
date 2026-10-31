@@ -684,7 +684,13 @@ impl eframe::App for WindupApp {
 
             ctx.show_viewport_immediate(viewport_id, viewport_builder, |ctx, class| {
                 if class == egui::ViewportClass::Immediate {
-                    let popup_hwnd = focus_and_clip_popup_window("Clipboard History", pw, ph, ppp);
+                    let popup_hwnd = focus_and_clip_popup_window(
+                        "Clipboard History",
+                        pw,
+                        ph,
+                        ppp,
+                        !self.popup_has_focused,
+                    );
                     // Only the Win32 focus restore below reads it.
                     #[cfg(not(target_os = "windows"))]
                     let _ = popup_hwnd;
@@ -718,20 +724,29 @@ impl eframe::App for WindupApp {
                         .map(|t| t.elapsed().as_millis())
                         .unwrap_or(0);
 
+                    // No foreground window at all is the middle of a switch,
+                    // not another window taking over.
                     #[cfg(target_os = "windows")]
-                    let lost_win32_focus = unsafe {
+                    let (win32_focused, lost_win32_focus) = unsafe {
                         use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
                         let fg = GetForegroundWindow();
-                        popup_hwnd != 0 && fg != popup_hwnd as windows_sys::Win32::Foundation::HWND
+                        let mine = popup_hwnd != 0
+                            && fg == popup_hwnd as windows_sys::Win32::Foundation::HWND;
+                        (mine, popup_hwnd != 0 && !fg.is_null() && !mine)
                     };
                     #[cfg(not(target_os = "windows"))]
-                    let lost_win32_focus = false;
+                    let win32_focused = false;
+                    if win32_focused {
+                        self.popup_has_focused = true;
+                    }
+                    // egui's flag lags the foreground window (it waits for
+                    // WM_SETFOCUS), so on Windows the foreground decides.
+                    #[cfg(target_os = "windows")]
+                    let unfocused = lost_win32_focus;
+                    #[cfg(not(target_os = "windows"))]
+                    let unfocused = is_focused == Some(false);
 
-                    // Auto-dismiss if not focused:
-                    // After initial 150ms for window creation & activation,
-                    // if egui says not focused OR Win32 foreground window is not our popup,
-                    // close immediately!
-                    if elapsed > 150 && (is_focused == Some(false) || lost_win32_focus) {
+                    if popup_dismissed(elapsed, self.popup_has_focused, unfocused) {
                         close_popup = true;
                     }
 
@@ -811,6 +826,21 @@ impl eframe::App for WindupApp {
     }
 }
 
+/// Whether the clipboard popup closes, `elapsed_ms` after it opened, given
+/// whether it has had focus yet and whether something else has it now. It
+/// closes when it loses focus it had, not because taking focus is slow; one
+/// that never gets focus can take no keys, so it goes after a while.
+fn popup_dismissed(elapsed_ms: u128, has_focused: bool, unfocused: bool) -> bool {
+    const SETTLE_MS: u128 = 150;
+    const NEVER_FOCUSED_MS: u128 = 1500;
+    unfocused
+        && if has_focused {
+            elapsed_ms > SETTLE_MS
+        } else {
+            elapsed_ms > NEVER_FOCUSED_MS
+        }
+}
+
 #[cfg(target_os = "windows")]
 static LAST_CLIPPED: std::sync::Mutex<Option<(isize, i32, i32)>> = std::sync::Mutex::new(None);
 
@@ -839,8 +869,38 @@ pub fn hide_popup_window(title: &str) {
 #[cfg(not(target_os = "windows"))]
 pub fn hide_popup_window(_title: &str) {}
 
+/// Keeps Windows from painting a frame on a borderless card: activation
+/// changes are passed on with `lParam = -1`, which tells Windows not to
+/// redraw the non-client area, and non-client paints are dropped.
 #[cfg(target_os = "windows")]
-fn focus_and_clip_popup_window(title: &str, width: f32, height: f32, ppp: f32) -> isize {
+unsafe extern "system" fn no_frame_paint(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+    _id: usize,
+    _data: usize,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::Shell::DefSubclassProc;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{WM_NCACTIVATE, WM_NCPAINT};
+    // SAFETY: called by Windows for a window this process subclassed.
+    unsafe {
+        match msg {
+            WM_NCACTIVATE => DefSubclassProc(hwnd, msg, wparam, -1),
+            WM_NCPAINT => 0,
+            _ => DefSubclassProc(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn focus_and_clip_popup_window(
+    title: &str,
+    width: f32,
+    height: f32,
+    ppp: f32,
+    take_focus: bool,
+) -> isize {
     use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
     use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
     use windows_sys::Win32::System::Threading::{
@@ -912,6 +972,11 @@ fn focus_and_clip_popup_window(title: &str, width: f32, height: f32, ppp: f32) -
             let round_pref: u32 = 2;
             let _ = DwmSetWindowAttribute(hwnd, 33, &round_pref as *const _ as *const _, 4);
 
+            // A window with a region loses DWM's frame drawing, so Windows
+            // would paint a classic frame over the card whenever it gains or
+            // loses focus. Same id each time: subclassing again only updates.
+            windows_sys::Win32::UI::Shell::SetWindowSubclass(hwnd, Some(no_frame_paint), 1, 0);
+
             // 3. Set physical window region to cut away all corner pixels outside radius
             let r = (8.0 * ppp).round() as i32; // metrics::RADIUS_CARD is 8.0
             let rgn = CreateRoundRectRgn(0, 0, pw + 1, ph + 1, r * 2, r * 2);
@@ -923,8 +988,12 @@ fn focus_and_clip_popup_window(title: &str, width: f32, height: f32, ppp: f32) -
         // Make window visible now that region & DWM composition are configured
         ShowWindow(hwnd, SW_SHOW);
 
-        // Force foreground focus onto the popup window
+        // Force foreground focus onto the popup window, until it has it:
+        // afterwards a click elsewhere must be allowed to take it away.
         let fg = GetForegroundWindow();
+        if !take_focus || fg == hwnd {
+            return hwnd as isize;
+        }
         let cur_thread = GetCurrentThreadId();
         let fg_thread = GetWindowThreadProcessId(fg, std::ptr::null_mut());
         if fg_thread != 0 && fg_thread != cur_thread {
@@ -942,7 +1011,13 @@ fn focus_and_clip_popup_window(title: &str, width: f32, height: f32, ppp: f32) -
 }
 
 #[cfg(not(target_os = "windows"))]
-fn focus_and_clip_popup_window(_title: &str, _width: f32, _height: f32, _ppp: f32) -> isize {
+fn focus_and_clip_popup_window(
+    _title: &str,
+    _width: f32,
+    _height: f32,
+    _ppp: f32,
+    _take_focus: bool,
+) -> isize {
     0
 }
 
@@ -1355,5 +1430,27 @@ impl WindupApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    use super::popup_dismissed;
+
+    #[test]
+    fn the_popup_stays_while_it_is_still_taking_focus() {
+        assert!(!popup_dismissed(400, false, true));
+        assert!(!popup_dismissed(100, true, true));
+    }
+
+    #[test]
+    fn the_popup_goes_when_it_loses_focus_it_had() {
+        assert!(popup_dismissed(400, true, true));
+        assert!(!popup_dismissed(400, true, false));
+    }
+
+    #[test]
+    fn a_popup_that_never_gets_focus_goes_in_the_end() {
+        assert!(popup_dismissed(1600, false, true));
     }
 }
