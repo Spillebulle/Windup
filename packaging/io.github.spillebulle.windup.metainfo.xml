@@ -47,6 +47,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.4.2" date="2026-10-31">
+      <description>
+        <p>Pictures in the clipboard history are stored as PNG files, so a long history no longer slows Windup's start; on Windows, no black flash when the capture bar opens, and the clipboard popup always pastes.</p>
+      </description>
+    </release>
     <release version="0.4.1" date="2026-10-30">
       <description>
         <p>Print Screen opens the capture bar again on Windows builds that no longer pass that key to keyboard hooks.</p>

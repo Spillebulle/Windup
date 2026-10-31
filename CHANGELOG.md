@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2
+
+- Windup starts quickly again with a long clipboard history full of pictures. Pictures were stored inside the history file itself, uncompressed, so a few screenshots of several monitors made a file of gigabytes that Windup read in full before showing anything. Each picture is now a PNG file of its own beside the history, the pictures kept in memory are capped at 256 MB (the newest is always kept, and text always stays), and an old history file over 1 GB is set aside as `clipboard_history.too-large.json` instead of being read. Smaller history files from earlier versions are read as before.
+- On Windows, starting Windup while it is already running brings up the running one instead of starting a second, which would have written the same history.
+- On Windows, the screen no longer flashes black when the capture bar opens or closes. A window exactly the size of a monitor is taken for a fullscreen game, and the display switched over to it; the capture overlay now reaches one pixel past an edge with no monitor beside it.
+- On Windows, choosing an entry in the clipboard popup always pastes it. Windup could swallow its own Ctrl+V when Windows had not told it that V was let go after Win+V; the next V you typed could be lost the same way.
+- On Windows, the clipboard popup no longer sometimes closes as soon as it opens, closes at the first click outside it, and no longer shows an old-style window frame while closing.
+- On Windows, shortcuts on the arrow keys, Insert, Delete, Home, End, Page Up and Page Down, and the numeric keypad's Enter now work: the keyboard hook ignored those keys.
+
 ## 0.4.1
 
 - Print Screen opens the capture bar again on Windows builds that no longer pass that key to keyboard hooks: a shortcut on Print Screen is now also registered as a system hotkey.
