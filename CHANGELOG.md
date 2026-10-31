@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3
+
+- On Windows, closing the window no longer quits Windup when "Run in background" is on (it is by default): the shortcuts and the clipboard history keep working, and Windup has an icon in the notification area. Click it to open the window again, or right-click it for Open Windup and Quit Windup. Starting Windup again also brings the window back.
+
 ## 0.4.2
 
 - Windup starts quickly again with a long clipboard history full of pictures. Pictures were stored inside the history file itself, uncompressed, so a few screenshots of several monitors made a file of gigabytes that Windup read in full before showing anything. Each picture is now a PNG file of its own beside the history, the pictures kept in memory are capped at 256 MB (the newest is always kept, and text always stays), and an old history file over 1 GB is set aside as `clipboard_history.too-large.json` instead of being read. Smaller history files from earlier versions are read as before.
