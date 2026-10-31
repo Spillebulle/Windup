@@ -12,6 +12,8 @@ mod recording;
 mod review_host;
 mod setup;
 mod steps;
+#[cfg(target_os = "windows")]
+mod tray;
 mod video;
 
 use eframe::egui;
@@ -42,6 +44,14 @@ struct WindupApp {
     history: Arc<Mutex<ClipboardHistory>>,
     _monitor: Option<ClipboardMonitor>,
     hotkey_listener: Option<HotkeyListener>,
+    /// The notification-area icon ("Run in background").
+    #[cfg(target_os = "windows")]
+    tray: Option<tray::Tray>,
+    /// The settings window, to cloak it when it is closed to the background.
+    #[cfg(target_os = "windows")]
+    main_hwnd: isize,
+    /// Quit was chosen: a close ends the app even with "Run in background".
+    quitting: bool,
     applied_bindings: Vec<(windup_core::Shortcut, windup_core::hotkeys::Action)>,
     /// The recording's keys as last bound (live only while one runs).
     applied_recording: Vec<(windup_core::Shortcut, windup_core::hotkeys::Action)>,
@@ -224,7 +234,27 @@ impl WindupApp {
         let applied_bindings = windup_core::hotkeys::bindings(&config);
         let applied_recording = session_keys(&config);
         paste::set_trigger_vk(paste_plain_vk(&applied_bindings));
+        #[cfg(target_os = "windows")]
+        let main_hwnd = {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            match cc.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Win32(w)) => w.hwnd.get(),
+                _ => 0,
+            }
+        };
+        #[cfg(target_os = "windows")]
+        let tray = if startup.settings_only {
+            None
+        } else {
+            let ctx = cc.egui_ctx.clone();
+            tray::Tray::start(move || ctx.request_repaint())
+        };
         Self {
+            #[cfg(target_os = "windows")]
+            tray,
+            #[cfg(target_os = "windows")]
+            main_hwnd,
+            quitting: false,
             config,
             settings_view: SettingsView {
                 hotkey_hint: hotkey_hint(plan, startup.settings_only),
@@ -507,10 +537,13 @@ impl eframe::App for WindupApp {
         }
 
         // A close that would end the app waits for a recording to be
-        // saved; one that only hides the window (Linux) lets it run on.
-        let hides = cfg!(target_os = "linux") && !self.settings_only && self.config.close_to_tray;
+        // saved; one that only hides the window lets it run on.
+        let hides = cfg!(any(target_os = "linux", target_os = "windows"))
+            && !self.settings_only
+            && !self.quitting
+            && self.config.close_to_tray;
         self.hold_close_while_recording(ctx, hides);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.keep_running_when_closed(ctx);
 
         // A package update replaced the program (X11; the Wayland hosts do
@@ -536,6 +569,22 @@ impl eframe::App for WindupApp {
             paste::set_trigger_vk(paste_plain_vk(&wanted));
             self.applied_bindings = wanted;
             self.applied_recording = wanted_recording;
+        }
+
+        #[cfg(target_os = "windows")]
+        while let Some(event) = self.tray.as_ref().and_then(|t| t.try_recv()) {
+            match event {
+                tray::TrayEvent::Show => {
+                    tray::conceal(self.main_hwnd, false);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                tray::TrayEvent::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
         }
 
         // -------------------------------------------------------------
@@ -1175,6 +1224,9 @@ fn windows_first_instance() -> bool {
         return true;
     }
     log::info!("Windup is already running; showing its window");
+    if tray::show_running() {
+        return false;
+    }
 
     /// The other Windup's main window: titled "Windup", not of this process.
     unsafe extern "system" fn find(hwnd: HWND, found: LPARAM) -> i32 {
@@ -1413,17 +1465,22 @@ fn linux_startup() -> Option<Startup> {
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 impl WindupApp {
     /// Closing the window must not end the clipboard history and the
-    /// hotkeys with it. X11 can hide a window; Wayland cannot, so there it
-    /// is minimised. Running `windup` again brings it back.
+    /// hotkeys with it. Windows and X11 can hide a window; Wayland cannot,
+    /// so there it is minimised. Running `windup` again brings it back, as
+    /// does the tray icon on Windows.
     fn keep_running_when_closed(&mut self, ctx: &egui::Context) {
-        if self.settings_only || !self.config.close_to_tray {
+        if self.settings_only || self.quitting || !self.config.close_to_tray {
             return;
         }
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            // Hidden, the window would get no more frames on Windows.
+            #[cfg(target_os = "windows")]
+            tray::conceal(self.main_hwnd, true);
+            #[cfg(target_os = "linux")]
             if std::env::var_os("WAYLAND_DISPLAY").is_some() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             } else {

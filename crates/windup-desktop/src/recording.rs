@@ -236,7 +236,7 @@ impl WindupApp {
     /// Holds a close of the main window while a recording is under way:
     /// the recording is stopped (a join already under way goes on), and
     /// the app closes when it is over. `hides` is a close that only hides
-    /// the window (Linux with "close to tray"), which the recording outlives.
+    /// the window ("Run in background"), which the recording outlives.
     ///
     /// A Steps session is stopped too, but the app stays: its review opens,
     /// which asks before steps that were not exported are lost. A review

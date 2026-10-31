@@ -78,7 +78,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_IO",
     "Win32_Storage_FileSystem",
     "Win32_Security",
+    "Win32_System_LibraryLoader",
 ] }
+# The settings window's HWND, to cloak it when it closes to the tray.
+raw-window-handle = "0.6"
 
 # Computer sound (WASAPI loopback) and the microphone on Windows.
 [target.'cfg(windows)'.dependencies.cpal]
