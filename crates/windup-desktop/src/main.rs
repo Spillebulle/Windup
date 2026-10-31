@@ -1026,6 +1026,11 @@ fn main() -> eframe::Result<()> {
     let Some(startup) = linux_startup() else {
         return Ok(());
     };
+    // One Windup at a time: two would both read and write the history.
+    #[cfg(target_os = "windows")]
+    if !windows_first_instance() {
+        return Ok(());
+    }
     // Segment folders a Windup that died while recording left behind.
     #[cfg(not(target_os = "linux"))]
     video::run::remove_stale_segments();
@@ -1068,6 +1073,68 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(WindupApp::new(cc, startup)))),
     )
+}
+
+/// Whether this is the only Windup of this user's session. Another one has
+/// its window brought up instead (restored if minimised), and this launch
+/// ends. The mutex is held, never closed, for as long as the process runs.
+#[cfg(target_os = "windows")]
+fn windows_first_instance() -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM};
+    use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsIconic, SW_RESTORE, SW_SHOW,
+        SetForegroundWindow, ShowWindow,
+    };
+
+    let name: Vec<u16> = "Local\\io.github.spillebulle.windup"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: a named mutex with default security; the handle is kept.
+    let first = unsafe {
+        let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        handle.is_null() || GetLastError() != ERROR_ALREADY_EXISTS
+    };
+    if first {
+        return true;
+    }
+    log::info!("Windup is already running; showing its window");
+
+    /// The other Windup's main window: titled "Windup", not of this process.
+    unsafe extern "system" fn find(hwnd: HWND, found: LPARAM) -> i32 {
+        unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == GetCurrentProcessId() {
+                return 1;
+            }
+            let mut title = [0u16; 16];
+            let n = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32);
+            if String::from_utf16_lossy(&title[..n.max(0) as usize]) == "Windup" {
+                *(found as *mut HWND) = hwnd;
+                return 0;
+            }
+            1
+        }
+    }
+    let mut hwnd: HWND = std::ptr::null_mut();
+    // SAFETY: `find` writes only to `hwnd`, which outlives the call.
+    unsafe {
+        EnumWindows(Some(find), &mut hwnd as *mut HWND as LPARAM);
+        if !hwnd.is_null() {
+            ShowWindow(
+                hwnd,
+                if IsIconic(hwnd) != 0 {
+                    SW_RESTORE
+                } else {
+                    SW_SHOW
+                },
+            );
+            SetForegroundWindow(hwnd);
+        }
+    }
+    false
 }
 
 /// `windup --window-rects-test`: the window rectangles the capture overlay
